@@ -56,13 +56,13 @@ func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 	}
 
 	tunnelBody, err := json.Marshal(map[string]any{
-		"nodeId": registerOut.NodeID,
-		"name": "ssh-edge-a",
-		"type": "tcp",
+		"nodeId":     registerOut.NodeID,
+		"name":       "ssh-edge-a",
+		"type":       "tcp",
 		"targetHost": "127.0.0.1",
 		"targetPort": 22,
 		"publicPort": 20022,
-		"status": "active",
+		"status":     "active",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +115,26 @@ func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 		t.Fatalf("expected public port 20022, got %d", routesOut.Items[0].PublicPort)
 	}
 
+	agentRoutesReq := httptest.NewRequest(http.MethodGet, "/agent/tunnels?nodeId="+registerOut.NodeID, nil)
+	agentRoutesRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(agentRoutesRes, agentRoutesReq)
+	if agentRoutesRes.Code != http.StatusOK {
+		t.Fatalf("expected agent routes status 200, got %d", agentRoutesRes.Code)
+	}
+
+	var agentRoutesOut struct {
+		Items []types.TunnelSpec `json:"items"`
+	}
+	if err := json.NewDecoder(agentRoutesRes.Body).Decode(&agentRoutesOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(agentRoutesOut.Items) != 1 {
+		t.Fatalf("expected 1 agent route, got %d", len(agentRoutesOut.Items))
+	}
+	if agentRoutesOut.Items[0].NodeID != registerOut.NodeID {
+		t.Fatalf("expected node id %s, got %s", registerOut.NodeID, agentRoutesOut.Items[0].NodeID)
+	}
+
 	metricsReq := httptest.NewRequest(http.MethodGet, "/api/server/metrics", nil)
 	metricsRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(metricsRes, metricsReq)
@@ -133,4 +153,3 @@ func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 		t.Fatalf("expected 1 configured tunnel, got %d", metricsOut.ConfiguredTunnels)
 	}
 }
-

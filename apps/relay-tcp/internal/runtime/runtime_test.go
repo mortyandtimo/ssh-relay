@@ -2,67 +2,104 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
+
+	"github.com/25743/cloud-relay-platform/packages/protocol/types"
 )
 
-func TestTCPRelayServiceForwardsTraffic(t *testing.T) {
-	targetListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+func TestTCPRelayServiceForwardsTrafficViaReverseAgentConnection(t *testing.T) {
+	tunnel := types.TunnelSpec{
+		ID:         "t-1",
+		NodeID:     "node-1",
+		Name:       "echo",
+		Type:       "tcp",
+		Status:     "active",
+		PublicPort: freePort(t),
+		TargetHost: "127.0.0.1",
+		TargetPort: 23546,
 	}
-	defer targetListener.Close()
-
-	go func() {
-		for {
-			conn, err := targetListener.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				reader := bufio.NewReader(c)
-				line, err := reader.ReadString('\n')
-				if err != nil {
-					return
-				}
-				_, _ = io.WriteString(c, "echo:"+line)
-			}(conn)
-		}
-	}()
-
-	publicPort := freePort(t)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/internal/routes/tcp" {
 			http.NotFound(w, r)
 			return
 		}
-		_, targetPort, _ := net.SplitHostPort(targetListener.Addr().String())
-		fmt.Fprintf(w, `{"items":[{"id":"t-1","name":"echo","type":"tcp","transportPolicy":"relay_only","targetHost":"127.0.0.1","targetPort":%s,"publicPort":%d,"status":"active","metadata":{"nodeId":"node-1"}}]}`, targetPort, publicPort)
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []types.TunnelSpec{tunnel}})
 	}))
 	defer api.Close()
 
 	service := NewService(api.URL)
+	service.acquireTimeout = 2 * time.Second
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
 		_ = service.Run(ctx)
 	}()
 
-	requireEventuallyDial(t, publicPort)
+	relayHTTP := httptest.NewServer(http.HandlerFunc(service.HandleAgentReverse))
+	defer relayHTTP.Close()
 
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", publicPort)), 5*time.Second)
+	requireEventuallyListening(t, service, tunnel.PublicPort)
+
+	agentResult := make(chan error, 1)
+	go func() {
+		agentConn, err := dialTestUpgrade(relayHTTP.URL+types.AgentRelayConnectPath, types.AgentRelayHello{
+			NodeID:     tunnel.NodeID,
+			TunnelID:   tunnel.ID,
+			PublicPort: tunnel.PublicPort,
+			TargetHost: tunnel.TargetHost,
+			TargetPort: tunnel.TargetPort,
+		})
+		if err != nil {
+			agentResult <- err
+			return
+		}
+		defer agentConn.Close()
+
+		start := make([]byte, 1)
+		if _, err := io.ReadFull(agentConn, start); err != nil {
+			agentResult <- err
+			return
+		}
+		if start[0] != types.AgentRelayStartByte {
+			agentResult <- fmt.Errorf("unexpected start byte %d", start[0])
+			return
+		}
+
+		buf := make([]byte, 64)
+		n, err := agentConn.Read(buf)
+		if err != nil {
+			agentResult <- err
+			return
+		}
+		if string(buf[:n]) != "hello\n" {
+			agentResult <- fmt.Errorf("unexpected relay payload %q", string(buf[:n]))
+			return
+		}
+		if _, err := io.WriteString(agentConn, "echo:hello\n"); err != nil {
+			agentResult <- err
+			return
+		}
+		agentResult <- nil
+	}()
+
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", tunnel.PublicPort)), 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	_, _ = io.WriteString(conn, "hello\n")
+	if _, err := io.WriteString(conn, "hello\n"); err != nil {
+		t.Fatal(err)
+	}
 	buf := make([]byte, 64)
 	n, err := conn.Read(buf)
 	if err != nil {
@@ -71,71 +108,145 @@ func TestTCPRelayServiceForwardsTraffic(t *testing.T) {
 	if string(buf[:n]) != "echo:hello\n" {
 		t.Fatalf("unexpected relay response: %q", string(buf[:n]))
 	}
-}
-
-func TestHandleConnectionForwardsPayloadInMemory(t *testing.T) {
-	targetListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
+	if err := <-agentResult; err != nil {
 		t.Fatal(err)
 	}
-	defer targetListener.Close()
+}
 
+func TestHandleAgentReverseRejectsInactiveTunnel(t *testing.T) {
+	service := NewService("http://127.0.0.1:1")
+	req := httptest.NewRequest(http.MethodPost, types.AgentRelayConnectPath, bytes.NewReader([]byte(`{"nodeId":"node-1","tunnelId":"t-1","publicPort":10086,"targetHost":"127.0.0.1","targetPort":23546}`)))
+	req.Header.Set("Upgrade", types.AgentRelayUpgrade)
+	res := httptest.NewRecorder()
+
+	service.HandleAgentReverse(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", res.Code)
+	}
+}
+
+func TestPublicConnectionFailsWithoutStandbyAgentConnection(t *testing.T) {
+	tunnel := types.TunnelSpec{
+		ID:         "t-2",
+		NodeID:     "node-2",
+		Type:       "tcp",
+		Status:     "active",
+		PublicPort: freePort(t),
+		TargetHost: "127.0.0.1",
+		TargetPort: 29999,
+	}
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []types.TunnelSpec{tunnel}})
+	}))
+	defer api.Close()
+
+	service := NewService(api.URL)
+	service.acquireTimeout = 300 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
-		conn, err := targetListener.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		buf := make([]byte, 1024)
-		n, err := conn.Read(buf)
-		if err != nil {
-			return
-		}
-		_, _ = conn.Write([]byte("echo:" + string(buf[:n])))
+		_ = service.Run(ctx)
 	}()
 
-	clientSide, relaySide := net.Pipe()
-	defer clientSide.Close()
-	defer relaySide.Close()
+	requireEventuallyListening(t, service, tunnel.PublicPort)
 
-	_, targetPort, err := net.SplitHostPort(targetListener.Addr().String())
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", tunnel.PublicPort)), 3*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var port int
-	if _, err := fmt.Sscanf(targetPort, "%d", &port); err != nil {
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "hello\n"); err != nil {
 		t.Fatal(err)
 	}
-
-	go handleConnection(relaySide, types.TunnelSpec{
-		PublicPort: 20099,
-		TargetHost: "127.0.0.1",
-		TargetPort: port,
-	})
-
-	_, _ = clientSide.Write([]byte("payload"))
-	buffer := make([]byte, 1024)
-	n, err := clientSide.Read(buffer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(buffer[:n]) != "echo:payload" {
-		t.Fatalf("unexpected payload relay response: %q", string(buffer[:n]))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 16)
+	_, err = conn.Read(buf)
+	if err == nil {
+		t.Fatal("expected read failure when no standby agent connection exists")
 	}
 }
 
-func requireEventuallyDial(t *testing.T, port int) {
+func dialTestUpgrade(relayURL string, hello types.AgentRelayHello) (net.Conn, error) {
+	parsedURL, err := neturlParse(relayURL)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.DialTimeout("tcp", parsedURL.hostPort, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(hello)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", parsedURL.path, parsedURL.hostHeader, types.AgentRelayUpgrade, len(body), body)
+	if _, err := io.WriteString(conn, request); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodPost})
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		defer resp.Body.Close()
+		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		_ = conn.Close()
+		return nil, fmt.Errorf("upgrade failed with status %s: %s", resp.Status, string(payload))
+	}
+	return &testBufferedConn{Conn: conn, reader: reader}, nil
+}
+
+type parsedNetURL struct {
+	hostPort   string
+	hostHeader string
+	path       string
+}
+
+func neturlParse(raw string) (parsedNetURL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return parsedNetURL{}, err
+	}
+	hostPort := parsed.Host
+	if _, _, err := net.SplitHostPort(hostPort); err != nil {
+		hostPort = net.JoinHostPort(parsed.Hostname(), "80")
+	}
+	path := parsed.Path
+	if path == "" {
+		path = "/"
+	}
+	if parsed.RawQuery != "" {
+		path += "?" + parsed.RawQuery
+	}
+	return parsedNetURL{hostPort: hostPort, hostHeader: parsed.Host, path: path}, nil
+}
+
+type testBufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *testBufferedConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
+}
+
+func requireEventuallyListening(t *testing.T, service *Service, port int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", port)), 200*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
+		service.mu.Lock()
+		_, ok := service.listeners[port]
+		service.mu.Unlock()
+		if ok {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("listener on port %d did not become ready", port)
+	t.Fatalf("listener on port %d did not become ready in service state", port)
 }
 
 func freePort(t *testing.T) int {

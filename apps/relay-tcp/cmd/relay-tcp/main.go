@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/25743/cloud-relay-platform/apps/relay-tcp/internal/runtime"
+	"github.com/25743/cloud-relay-platform/packages/protocol/types"
 	"github.com/25743/cloud-relay-platform/packages/shared/config"
 )
 
@@ -21,6 +22,7 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc(types.AgentRelayConnectPath, service.HandleAgentReverse)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"relay-tcp"}`))
@@ -35,4 +37,3 @@ func main() {
 		log.Fatal(err)
 	}
 }
-

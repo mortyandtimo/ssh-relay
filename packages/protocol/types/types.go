@@ -2,6 +2,13 @@ package types
 
 import "time"
 
+const (
+	AgentRelayConnectPath   = "/agent/reverse-tcp"
+	AgentRelayUpgrade       = "cloud-relay-tcp"
+	AgentRelayKeepaliveByte = byte(0x00)
+	AgentRelayStartByte     = byte(0x01)
+)
+
 type NodeCapabilities struct {
 	TCPRelay   bool `json:"tcpRelay"`
 	HTTPRelay  bool `json:"httpRelay"`
@@ -55,14 +62,14 @@ type AgentRelayHello struct {
 }
 
 type NodeSummary struct {
-	NodeID        string             `json:"nodeId"`
-	NodeName      string             `json:"nodeName"`
-	Status        string             `json:"status"`
-	AgentVersion  string             `json:"agentVersion"`
-	Capabilities  NodeCapabilities   `json:"capabilities"`
-	ActiveTunnels int                `json:"activeTunnels"`
-	LastSeenAt    time.Time          `json:"lastSeenAt"`
-	Metadata      map[string]string  `json:"metadata,omitempty"`
+	NodeID        string            `json:"nodeId"`
+	NodeName      string            `json:"nodeName"`
+	Status        string            `json:"status"`
+	AgentVersion  string            `json:"agentVersion"`
+	Capabilities  NodeCapabilities  `json:"capabilities"`
+	ActiveTunnels int               `json:"activeTunnels"`
+	LastSeenAt    time.Time         `json:"lastSeenAt"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
 }
 
 type ServerMetrics struct {

@@ -8,14 +8,16 @@
 - `cloud-relay-server-api` is healthy on `:7710`.
 - PostgreSQL database `cloud_relay` exists and schema is loaded.
 - Windows `client-agent.exe -once` can register and heartbeat into `nodes`.
-- `cloud-relay-tcp` should remain stopped until reverse data channel support is finished.
+- Reverse TCP data channel is now implemented and verified against a real Windows local service.
 
 ## Confirmed Working Facts
 
 1. `curl http://127.0.0.1:7710/healthz` on the cloud server returns `store=postgres`.
 2. Windows can reach `http://82.156.236.104:7710`.
 3. `nodes` contains a real Windows node named `my-windows-pc`.
-4. Current `relay-tcp` implementation only supports cloud-side direct dialing. It does **not** yet tunnel traffic back through `client-agent`.
+4. `relay-tcp` no longer dials Windows local services from the cloud side. Public inbound TCP connections are paired with standby reverse connections from `client-agent`.
+5. Verified working path: `82.156.236.104:10086 -> Windows node node-1774805183388699102 -> 127.0.0.1:16354`.
+6. Baseline validation on the Windows side succeeded with about `98ms` single-request latency, `10/10` serial HTTP success, and `8/8` concurrent HTTP success.
 
 ## Deployment Layout On Cloud Server
 
@@ -42,18 +44,60 @@ RELAY_TCP_ADDR=:9090
 RELAY_TCP_API_BASE_URL=http://127.0.0.1:7710
 ```
 
+### Windows client-agent test env
+
+```env
+CLOUD_RELAY_API_URL=http://82.156.236.104:7710
+RELAY_TCP_CONNECT_URL=http://82.156.236.104:9090/agent/reverse-tcp
+CLIENT_NODE_NAME=my-windows-pc
+CLIENT_NODE_ID=node-1774805183388699102
+AGENT_HEARTBEAT_INTERVAL=30
+AGENT_REVERSE_POOL_SIZE=8
+```
+
+## Current Verified Test Mapping
+
+- Public port: `10086`
+- Windows target host: `127.0.0.1`
+- Windows target port: `16354`
+- Node ID: `node-1774805183388699102`
+
+## Test Flow Guidance
+
+1. Keep the Windows local service listening on `127.0.0.1:16354`.
+2. Start exactly one `client-agent.exe` instance with `AGENT_REVERSE_POOL_SIZE=8` during the current test phase.
+3. Validate the public port with `Invoke-WebRequest -UseBasicParsing http://82.156.236.104:10086`.
+4. For lightweight availability checks, use serial `10` request loops and `8` concurrent jobs from Windows PowerShell.
+
+## Why Pool Size Is 8 For Now
+
+- `AGENT_REVERSE_POOL_SIZE` is per tunnel, not global.
+- With one active TCP tunnel, `8` means `8` standby reverse connections for that one public port.
+- Earlier smaller values such as `2` were enough for single requests but were too small for browser-style parallel HTTP fetches.
+- Current validation proved `8` is enough for a lightweight `8`-concurrency check against the test service.
+- Treat `8` as a temporary testing default, not as the final adaptive policy.
+
+## Follow-up Engineering Guidance
+
+- Keep the current test process using fixed `AGENT_REVERSE_POOL_SIZE=8` until stability and regression work is complete.
+- Add smarter pool control later instead of hard-coding one value for every tunnel.
+- The preferred future direction is tunnel-aware control, for example:
+  - low default pool for generic TCP services
+  - larger pool for browser-facing HTTP workloads carried over TCP relay
+  - optional tunnel-level override in control-plane metadata
+  - adaptive refill based on recent concurrency or queue pressure
+
 ## Exact Next Goal
 
-Implement a real reverse TCP data channel so the cloud relay can expose a Windows local service such as `127.0.0.1:23546` without direct cloud-side dialing.
+Stabilize the verified reverse TCP data channel implementation for long-running use and improve pool management beyond the current fixed testing value.
 
 ## Required Direction
 
-1. `server-api` must support node-scoped tunnel queries.
-2. `client-agent` must poll or fetch its own active TCP tunnels.
-3. `client-agent` must open reverse connections back to the cloud relay and identify the tunnel/public port.
-4. `relay-tcp` must maintain an agent connection pool keyed by node and public port.
-5. Public inbound connections on the cloud server must be paired with an available reverse agent connection.
-6. Only after this is implemented should `cloud-relay-tcp` be used to test ports like `10086`.
+1. Preserve the current verified reverse TCP path and do not regress to cloud-side direct dialing.
+2. Keep node-scoped tunnel queries and reverse standby connection pooling intact.
+3. Remove remaining agent-side panic and timeout noise from long-running idle standby connections.
+4. Add smarter standby pool sizing so testing does not depend on one global fixed value.
+5. Keep validating real tunnels through the control plane instead of manual database edits.
 
 ## Files Already Touched For This Direction
 
@@ -92,7 +136,8 @@ systemctl start cloud-relay-tcp
 2. `systemctl status cloud-relay-server-api --no-pager`
 3. `systemctl status cloud-relay-tcp --no-pager`
 4. Windows client remains able to register and heartbeat.
-5. A TCP tunnel from cloud public port to Windows local port succeeds only after reverse channel implementation is complete.
+5. `Invoke-WebRequest -UseBasicParsing http://82.156.236.104:10086` returns the Windows local service from `127.0.0.1:16354`.
+6. During the current test phase, `10/10` serial requests and `8/8` concurrent requests should succeed with `AGENT_REVERSE_POOL_SIZE=8`.
 
 ## Do Not Regress
 
@@ -100,4 +145,3 @@ systemctl start cloud-relay-tcp
 - Do not change the control plane off `:7710`.
 - Do not rely on `target_host = 127.0.0.1` or hostnames like `agent`/`my-windows-node` for Windows local services.
 - Do not use manual database tunnel inserts as a substitute for reverse channel support.
-

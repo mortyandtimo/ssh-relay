@@ -41,6 +41,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/agent/register", s.handleRegister)
 	s.mux.HandleFunc("/agent/heartbeat", s.handleHeartbeat)
+	s.mux.HandleFunc("/agent/tunnels", s.handleAgentTunnels)
 	s.mux.HandleFunc("/api/nodes", s.handleNodes)
 	s.mux.HandleFunc("/api/tunnels", s.handleTunnels)
 	s.mux.HandleFunc("/api/server/metrics", s.handleServerMetrics)
@@ -116,6 +117,35 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		"status":     "accepted",
 		"observedAt": time.Now().UTC(),
 	})
+}
+
+func (s *Server) handleAgentTunnels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("nodeId"))
+	if nodeID == "" {
+		writeError(w, http.StatusBadRequest, "nodeId is required")
+		return
+	}
+	filter := store.TunnelFilter{
+		NodeID: nodeID,
+		Type:   r.URL.Query().Get("type"),
+		Status: r.URL.Query().Get("status"),
+	}
+	if filter.Type == "" {
+		filter.Type = "tcp"
+	}
+	if filter.Status == "" {
+		filter.Status = "active"
+	}
+	items, err := s.store.ListTunnels(r.Context(), filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
