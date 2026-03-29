@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cloud_relay
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: relay
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../../db/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+
+  server-api:
+    build:
+      context: ../..
+      dockerfile: apps/server-api/Dockerfile
+    environment:
+      SERVER_API_ADDR: ":8080"
+      DATABASE_URL: postgres://relay:relay@postgres:5432/cloud_relay?sslmode=disable
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+
+  relay-tcp:
+    build:
+      context: ../..
+      dockerfile: apps/relay-tcp/Dockerfile
+    environment:
+      RELAY_TCP_ADDR: ":9090"
+      RELAY_TCP_API_BASE_URL: http://server-api:8080
+    ports:
+      - "9090:9090"
+      - "20000-20010:20000-20010"
+    depends_on:
+      - server-api
+
+  relay-http:
+    build:
+      context: ../..
+      dockerfile: apps/relay-http/Dockerfile
+    ports:
+      - "9091:9091"
+
+  relay-https:
+    build:
+      context: ../..
+      dockerfile: apps/relay-https/Dockerfile
+    ports:
+      - "9092:9092"
+
+  admin-web:
+    build:
+      context: ../..
+      dockerfile: apps/admin-web/Dockerfile
+    ports:
+      - "8088:80"
+    depends_on:
+      - server-api
+
+volumes:
+  postgres-data:

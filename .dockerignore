@@ -1,0 +1,7 @@
+node_modules
+apps/admin-web/node_modules
+apps/admin-web/dist
+dist
+coverage
+.git
+

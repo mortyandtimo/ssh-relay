@@ -1,0 +1,19 @@
+[Unit]
+Description=Cloud Relay Platform TCP Relay
+After=network-online.target cloud-relay-server-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cloud-relay-platform
+EnvironmentFile=/etc/cloud-relay-platform/relay-tcp.env
+ExecStart=/opt/cloud-relay-platform/bin/relay-tcp
+Restart=always
+RestartSec=3
+User=relay
+Group=relay
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+

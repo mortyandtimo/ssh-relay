@@ -1,0 +1,19 @@
+[Unit]
+Description=Cloud Relay Platform Client Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cloud-relay-platform
+EnvironmentFile=/etc/cloud-relay-platform/client-agent.env
+ExecStart=/opt/cloud-relay-platform/bin/client-agent
+Restart=always
+RestartSec=5
+User=relay
+Group=relay
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+

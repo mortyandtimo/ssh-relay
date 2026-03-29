@@ -1,0 +1,145 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", sans-serif;
+  background: linear-gradient(160deg, #f7f3e9 0%, #efe6d0 55%, #d5d9e8 100%);
+  color: #152234;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.shell {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 32px 20px 48px;
+}
+
+.hero,
+.panel {
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(21, 34, 52, 0.08);
+  border-radius: 24px;
+  box-shadow: 0 20px 50px rgba(21, 34, 52, 0.08);
+}
+
+.hero {
+  display: grid;
+  gap: 24px;
+  padding: 28px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 12px;
+  color: #6b7587;
+}
+
+h1,
+h2 {
+  margin: 0;
+}
+
+.summary {
+  max-width: 700px;
+  line-height: 1.6;
+  color: #3b4659;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+.metric-card {
+  padding: 18px;
+  background: #152234;
+  color: #f6f2e8;
+  border-radius: 18px;
+}
+
+.metric-card span {
+  display: block;
+  font-size: 13px;
+  opacity: 0.8;
+  margin-bottom: 8px;
+}
+
+.metric-card strong {
+  font-size: 28px;
+}
+
+.panel {
+  margin-top: 24px;
+  padding: 24px;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 14px 12px;
+  text-align: left;
+  border-bottom: 1px solid rgba(21, 34, 52, 0.08);
+  vertical-align: top;
+}
+
+th {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6b7587;
+}
+
+.muted {
+  color: #6b7587;
+  font-size: 13px;
+}
+
+.error {
+  margin-top: 20px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: #ffe7df;
+  color: #8d2b15;
+}
+
+@media (max-width: 720px) {
+  .shell {
+    padding: 20px 14px 36px;
+  }
+
+  .hero,
+  .panel {
+    padding: 18px;
+    border-radius: 18px;
+  }
+
+  .metric-card strong {
+    font-size: 22px;
+  }
+}
+
