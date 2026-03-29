@@ -20,6 +20,7 @@ import (
 const (
 	routeSyncInterval     = 5 * time.Second
 	standbyPoolBufferSize = 64
+	standbyConnMaxAge     = 90 * time.Second
 	defaultAcquireTimeout = 10 * time.Second
 )
 
@@ -125,12 +126,13 @@ func (s *Service) HandleAgentReverse(w http.ResponseWriter, r *http.Request) {
 
 	key := routePoolKey(route.NodeID, route.PublicPort)
 	item := standbyConn{conn: conn, hello: hello, registeredAt: time.Now().UTC()}
-	if err := s.enqueueStandbyConn(key, item); err != nil {
+	poolSize, err := s.enqueueStandbyConn(key, item)
+	if err != nil {
 		log.Printf("standby reverse connection rejected for %s tunnel %s: %v", key, hello.TunnelID, err)
 		_ = conn.Close()
 		return
 	}
-	log.Printf("standby reverse connection ready: node=%s tunnel=%s publicPort=%d", hello.NodeID, hello.TunnelID, hello.PublicPort)
+	log.Printf("standby reverse connection ready: node=%s tunnel=%s publicPort=%d poolSize=%d", hello.NodeID, hello.TunnelID, hello.PublicPort, poolSize)
 }
 
 func (s *Service) syncRoutes(ctx context.Context) error {
@@ -247,7 +249,7 @@ func (s *Service) handlePublicConnection(src net.Conn, route types.TunnelSpec) {
 		}
 
 		if err := standby.prepareForStart(); err != nil {
-			log.Printf("tcp connection %d discarded stale standby reverse connection for tunnel %s: %v", connID, route.ID, err)
+			log.Printf("tcp connection %d discarded stale standby reverse connection for tunnel %s age=%s: %v", connID, route.ID, standby.age(), err)
 			_ = standby.conn.Close()
 			continue
 		}
@@ -256,7 +258,7 @@ func (s *Service) handlePublicConnection(src net.Conn, route types.TunnelSpec) {
 			_ = standby.conn.Close()
 			continue
 		}
-		log.Printf("tcp connection %d paired with standby reverse connection for tunnel %s", connID, route.ID)
+		log.Printf("tcp connection %d paired with standby reverse connection for tunnel %s standbyAge=%s", connID, route.ID, standby.age())
 		defer standby.conn.Close()
 		proxyConnections(connID, src, standby.conn, start)
 		return
@@ -309,6 +311,11 @@ func (s *Service) acquireStandbyConn(ctx context.Context, route types.TunnelSpec
 	for {
 		select {
 		case item := <-queue:
+			if item.expired() {
+				log.Printf("evict expired standby reverse connection for node=%s publicPort=%d tunnel=%s age=%s", route.NodeID, route.PublicPort, item.hello.TunnelID, item.age())
+				_ = item.conn.Close()
+				continue
+			}
 			if !helloMatchesRoute(item.hello, route) {
 				_ = item.conn.Close()
 				continue
@@ -320,13 +327,33 @@ func (s *Service) acquireStandbyConn(ctx context.Context, route types.TunnelSpec
 	}
 }
 
-func (s *Service) enqueueStandbyConn(key string, item standbyConn) error {
+func (s *Service) enqueueStandbyConn(key string, item standbyConn) (int, error) {
 	queue := s.poolForKey(key)
 	select {
 	case queue <- item:
-		return nil
+		return len(queue), nil
 	default:
-		return errors.New("standby pool full")
+		select {
+		case evicted := <-queue:
+			if evicted.expired() {
+				log.Printf("evict expired standby reverse connection for key=%s tunnel=%s age=%s to admit new standby", key, evicted.hello.TunnelID, evicted.age())
+				_ = evicted.conn.Close()
+				select {
+				case queue <- item:
+					return len(queue), nil
+				default:
+					_ = item.conn.Close()
+					return len(queue), errors.New("standby pool full after expired eviction")
+				}
+			}
+			select {
+			case queue <- evicted:
+			default:
+				_ = evicted.conn.Close()
+			}
+		default:
+		}
+		return len(queue), errors.New("standby pool full")
 	}
 }
 
@@ -407,6 +434,14 @@ func (s standbyConn) prepareForStart() error {
 			return fmt.Errorf("unexpected pre-start byte %d", buf[0])
 		}
 	}
+}
+
+func (s standbyConn) age() time.Duration {
+	return time.Since(s.registeredAt)
+}
+
+func (s standbyConn) expired() bool {
+	return s.age() > standbyConnMaxAge
 }
 
 func helloMatchesRoute(hello types.AgentRelayHello, route types.TunnelSpec) bool {
