@@ -20,6 +20,7 @@ import (
 const (
 	routeSyncInterval     = 5 * time.Second
 	standbyPoolBufferSize = 64
+	standbyPoolTargetSize = 8
 	standbyConnMaxAge     = 90 * time.Second
 	defaultAcquireTimeout = 10 * time.Second
 )
@@ -329,6 +330,16 @@ func (s *Service) acquireStandbyConn(ctx context.Context, route types.TunnelSpec
 
 func (s *Service) enqueueStandbyConn(key string, item standbyConn) (int, error) {
 	queue := s.poolForKey(key)
+	if len(queue) >= standbyPoolTargetSize {
+		select {
+		case evicted := <-queue:
+			log.Printf("evict standby reverse connection for key=%s tunnel=%s age=%s to keep target pool size=%d", key, evicted.hello.TunnelID, evicted.age(), standbyPoolTargetSize)
+			_ = evicted.conn.Close()
+		case queue <- item:
+			return len(queue), nil
+		default:
+		}
+	}
 	select {
 	case queue <- item:
 		return len(queue), nil

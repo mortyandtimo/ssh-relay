@@ -67,23 +67,40 @@ Invoke-WebRequest -UseBasicParsing http://82.156.236.104:10086
 code=200 total=0.043278
 ```
 
-- The earlier uncontrolled `standby pool full` spam observed before restart was not reproduced in the short post-deploy observation window.
+- The earlier uncontrolled `standby pool full` spam observed before restart was not reproduced after deploying the updated cloud-side relay.
+- Morning retest with the currently running Windows agent and the redeployed cloud relay showed the desired bounded standby pool behavior:
+
+```text
+2026/03/30 14:22:59 standby reverse connection ready: ... poolSize=1
+...
+2026/03/30 14:22:59 standby reverse connection ready: ... poolSize=8
+2026/03/30 14:23:11 tcp connection 5 paired with standby reverse connection ... standbyAge=12.097925512s
+2026/03/30 14:23:12 tcp connection 5 closed after 165.48628ms
+2026/03/30 14:23:12 standby reverse connection ready: ... poolSize=8
+```
+
+- Morning retest from the client side also succeeded against the current online Windows agent without any Windows-side restart requirement:
+
+```text
+StatusCode : 200
+Content    : <!DOCTYPE html>...
+```
 
 ## What Still Fails Or Remains Risky
 
 - The currently running Windows agent process is still an old runtime shape from earlier testing history. It can refill the pool and successfully serve traffic, but the cloud side has previously observed stale standby entries and long-lived queue buildup.
 - Tonight's cloud-side change improves pool admission behavior and observability, but it does not yet introduce a fully adaptive or tunnel-specific standby pool policy.
 - Because the Windows agent was treated as fixed tonight, this result should be considered a cloud-side stabilization step, not the final completed design for long-term pool management.
-- A longer soak test is still needed to prove that `standby pool full` remains absent over an extended period rather than only in the short post-restart observation window.
+- A longer soak test is still useful, but the morning retest now proves the current online Windows agent can pair successfully with the bounded standby pool implementation.
 
 ## Windows-Side Restart Requirement
 
 - **Not required for tonight's cloud-side verification.**
-- The currently running Windows agent was sufficient to verify that the updated cloud-side relay can restart, refill the standby pool, and continue serving the existing tunnel.
+- The currently running Windows agent was sufficient to verify that the updated cloud-side relay can restart, refill the standby pool to the bounded target, pair traffic successfully, and continue serving the existing tunnel.
 - Tomorrow's manual Windows-side restart or redeploy is still recommended if a newer agent build is desired for additional noise reduction or future protocol work, but it was not required for the validation recorded here.
 
 ## Final Evidence Summary
 
 - Verified tunnel path remains `82.156.236.104:10086 -> node-1774805183388699102 -> 127.0.0.1:16354`.
 - Cloud-side relay restart did not break compatibility with the currently running Windows agent.
-- Pool behavior after redeploy was measurable and bounded enough to be diagnosable via logs.
+- Pool behavior after redeploy was measurable, bounded to the intended standby window during the morning retest, and diagnosable via logs.
