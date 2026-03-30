@@ -21,6 +21,11 @@
   - env under `/etc/cloud-relay-platform`
   - binaries under `/opt/cloud-relay-platform/bin`
   - no Docker regression
+- Added the minimum management loop on top of the working relay path:
+  - tunnel CRUD in `server-api`
+  - active TCP `publicPort` conflict validation
+  - relay runtime summary API skeleton
+  - minimal `admin-web` for nodes, tunnel list, tunnel create, tunnel enable/pause/delete
 
 ## Verification Commands
 
@@ -41,6 +46,17 @@ curl -fsS 'http://127.0.0.1:7710/api/nodes'
 curl -fsS 'http://127.0.0.1:7710/api/tunnels?nodeId=node-1774805183388699102'
 journalctl -u cloud-relay-tcp --since '2026-03-30 04:42:35' --no-pager
 curl -sS -o /dev/null -w 'code=%{http_code} total=%{time_total}\n' http://82.156.236.104:10086
+
+env -u GOOS -u GOARCH GOCACHE=/root/cloud-relay-platform/.gocache CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o deploy/bin/linux-amd64/server-api ./apps/server-api/cmd/server-api
+install -m 0755 deploy/bin/linux-amd64/server-api /opt/cloud-relay-platform/bin/server-api
+systemctl restart cloud-relay-server-api
+
+cd /root/cloud-relay-platform/apps/admin-web
+npm install
+npm run build
+mkdir -p /opt/cloud-relay-platform/admin-web
+cp -r dist/* /opt/cloud-relay-platform/admin-web/
+python3 -m http.server 18081 --directory /opt/cloud-relay-platform/admin-web
 ```
 
 Windows-side evidence already available before this overnight cycle:
@@ -129,6 +145,18 @@ code=200 total=0.068908
 code=200 total=0.052019
 ```
 
+- The tunnel management API now supports a minimal CRUD loop without manual SQL:
+
+```text
+GET  /api/tunnels/{id}           -> 200
+PUT  /api/tunnels/{id}           -> 200
+DELETE /api/tunnels/{id}         -> 200
+POST /api/tunnels (conflict)     -> 409
+GET  /api/relay/tcp/runtime      -> 200
+```
+
+- A minimal admin web build now succeeds and static assets were staged to `/opt/cloud-relay-platform/admin-web` with a lightweight HTTP serve on `:18081` for immediate use.
+
 ## What Still Fails Or Remains Risky
 
 - The currently running Windows agent process is still an old runtime shape from earlier testing history. It can refill the pool and successfully serve traffic, but the cloud side has previously observed stale standby entries and long-lived queue buildup.
@@ -136,6 +164,7 @@ code=200 total=0.052019
 - Because the Windows agent was treated as fixed tonight, this result should be considered a cloud-side stabilization step, not the final completed design for long-term pool management.
 - A longer soak test is still useful, but the latest retest now proves the current online Windows agent can pair successfully with the first elastic standby pool implementation.
 - A longer soak test is still useful, especially because the current Windows agent can later refill the pool above the initial target over time. The latest retest does, however, prove that the cloud-side implementation can restart cleanly, repopulate to the intended standby window, and serve traffic successfully with the currently running Windows agent.
+- The relay runtime summary endpoint is intentionally minimal in this round. It exposes pool keys and configured bounds, but not yet the in-process live standby counts from `relay-tcp`.
 
 ## Windows-Side Restart Requirement
 
@@ -149,3 +178,4 @@ code=200 total=0.052019
 - Cloud-side relay restart did not break compatibility with the currently running Windows agent.
 - Pool behavior after redeploy was measurable, bounded to the intended standby window during the latest retest, and diagnosable via logs including `totalStandby`.
 - The current remaining risk is not protocol compatibility but policy quality: with the current fixed Windows agent process, the relay now bounds and evicts correctly, but smarter adaptive pool control is still future work.
+- Management no longer depends on manual SQL for the basic tunnel lifecycle.

@@ -81,6 +81,22 @@ type ServerMetrics struct {
 	ProtocolRelayCount int       `json:"protocolRelayCount"`
 }
 
+type RelayPoolSummary struct {
+	PoolKey      string `json:"poolKey"`
+	NodeID       string `json:"nodeId"`
+	PublicPort   int    `json:"publicPort"`
+	StandbyCount int    `json:"standbyCount"`
+	TargetSize   int    `json:"targetSize"`
+	MaxSize      int    `json:"maxSize"`
+}
+
+type RelayRuntimeSummary struct {
+	Service      string             `json:"service"`
+	ObservedAt   time.Time          `json:"observedAt"`
+	TotalStandby int                `json:"totalStandby"`
+	Pools        []RelayPoolSummary `json:"pools"`
+}
+
 type HealthResponse struct {
 	Status     string            `json:"status"`
 	Service    string            `json:"service"`

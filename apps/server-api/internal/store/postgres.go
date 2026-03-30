@@ -165,6 +165,17 @@ func (s *PostgresStore) ListNodes(ctx context.Context) ([]types.NodeSummary, err
 
 func (s *PostgresStore) CreateTunnel(ctx context.Context, spec types.TunnelSpec) (types.TunnelSpec, error) {
 	tunnel := normalizeTunnel(spec)
+	if tunnel.Metadata == nil {
+		tunnel.Metadata = map[string]string{}
+	}
+	tunnel.Metadata["nodeId"] = tunnel.NodeID
+	conflict, err := s.hasPublicPortConflict(ctx, tunnel.ID, tunnel.Type, tunnel.Status, tunnel.PublicPort)
+	if err != nil {
+		return types.TunnelSpec{}, err
+	}
+	if conflict {
+		return types.TunnelSpec{}, ErrConflict
+	}
 	meta, err := marshalMap(tunnel.Metadata)
 	if err != nil {
 		return types.TunnelSpec{}, err
@@ -190,6 +201,92 @@ func (s *PostgresStore) CreateTunnel(ctx context.Context, spec types.TunnelSpec)
 		return types.TunnelSpec{}, err
 	}
 	return tunnel, nil
+}
+
+func (s *PostgresStore) GetTunnel(ctx context.Context, id string) (types.TunnelSpec, error) {
+	row := s.pool.QueryRow(ctx, `
+		select id, coalesce(node_id, ''), name, type, transport_policy, status, target_host, target_port, coalesce(public_port, 0), coalesce(domain, ''), coalesce(tls_mode, ''), metadata
+		from tunnels
+		where id = $1
+	`, id)
+	var item types.TunnelSpec
+	var nodeID string
+	var metadataJSON []byte
+	if err := row.Scan(&item.ID, &nodeID, &item.Name, &item.Type, &item.TransportPolicy, &item.Status, &item.TargetHost, &item.TargetPort, &item.PublicPort, &item.Domain, &item.TLSMode, &metadataJSON); err != nil {
+		return types.TunnelSpec{}, ErrNotFound
+	}
+	item.NodeID = nodeID
+	metadata, err := unmarshalMap(metadataJSON)
+	if err != nil {
+		return types.TunnelSpec{}, err
+	}
+	item.Metadata = metadata
+	if item.Metadata == nil {
+		item.Metadata = map[string]string{}
+	}
+	if nodeID != "" {
+		item.Metadata["nodeId"] = nodeID
+	}
+	return item, nil
+}
+
+func (s *PostgresStore) UpdateTunnel(ctx context.Context, spec types.TunnelSpec) (types.TunnelSpec, error) {
+	tunnel := normalizeTunnel(spec)
+	if tunnel.ID == "" {
+		return types.TunnelSpec{}, ErrNotFound
+	}
+	if tunnel.Metadata == nil {
+		tunnel.Metadata = map[string]string{}
+	}
+	tunnel.Metadata["nodeId"] = tunnel.NodeID
+	if _, err := s.GetTunnel(ctx, tunnel.ID); err != nil {
+		return types.TunnelSpec{}, err
+	}
+	conflict, err := s.hasPublicPortConflict(ctx, tunnel.ID, tunnel.Type, tunnel.Status, tunnel.PublicPort)
+	if err != nil {
+		return types.TunnelSpec{}, err
+	}
+	if conflict {
+		return types.TunnelSpec{}, ErrConflict
+	}
+	meta, err := marshalMap(tunnel.Metadata)
+	if err != nil {
+		return types.TunnelSpec{}, err
+	}
+	commandTag, err := s.pool.Exec(ctx, `
+		update tunnels
+		set node_id = $2,
+			name = $3,
+			type = $4,
+			transport_policy = $5,
+			status = $6,
+			target_host = $7,
+			target_port = $8,
+			public_port = $9,
+			domain = $10,
+			tls_mode = $11,
+			metadata = $12,
+			updated_at = now()
+		where id = $1
+	`, tunnel.ID, tunnel.NodeID, tunnel.Name, tunnel.Type, tunnel.TransportPolicy, tunnel.Status, tunnel.TargetHost, tunnel.TargetPort, tunnel.PublicPort, emptyStringToNil(tunnel.Domain), emptyStringToNil(tunnel.TLSMode), meta)
+	if err != nil {
+		return types.TunnelSpec{}, err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return types.TunnelSpec{}, ErrNotFound
+	}
+	return tunnel, nil
+}
+
+func (s *PostgresStore) DeleteTunnel(ctx context.Context, id string) error {
+	commandTag, err := s.pool.Exec(ctx, `delete from tunnels where id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) ListTunnels(ctx context.Context, filter TunnelFilter) ([]types.TunnelSpec, error) {
@@ -285,4 +382,23 @@ func emptyStringToNil(input string) any {
 		return nil
 	}
 	return input
+}
+
+func (s *PostgresStore) hasPublicPortConflict(ctx context.Context, excludeID, tunnelType, status string, publicPort int) (bool, error) {
+	if tunnelType != "tcp" || status != "active" || publicPort == 0 {
+		return false, nil
+	}
+	var count int
+	err := s.pool.QueryRow(ctx, `
+		select count(*)
+		from tunnels
+		where id <> $1
+		  and type = 'tcp'
+		  and status = 'active'
+		  and public_port = $2
+	`, excludeID, publicPort).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }

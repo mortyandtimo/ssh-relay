@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -44,7 +45,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/agent/tunnels", s.handleAgentTunnels)
 	s.mux.HandleFunc("/api/nodes", s.handleNodes)
 	s.mux.HandleFunc("/api/tunnels", s.handleTunnels)
+	s.mux.HandleFunc("/api/tunnels/", s.handleTunnelByID)
 	s.mux.HandleFunc("/api/server/metrics", s.handleServerMetrics)
+	s.mux.HandleFunc("/api/relay/tcp/runtime", s.handleRelayTCPRuntime)
 	s.mux.HandleFunc("/internal/routes/tcp", s.handleTCPRoutes)
 }
 
@@ -191,12 +194,84 @@ func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {
 		spec.Metadata["nodeId"] = req.NodeID
 		tunnel, err := s.store.CreateTunnel(r.Context(), spec)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrConflict) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusCreated, tunnel)
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+	}
+}
+
+func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/tunnels/")
+	id = strings.TrimSpace(id)
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "tunnel id is required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		tunnel, err := s.store.GetTunnel(r.Context(), id)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, tunnel)
+	case http.MethodPut:
+		var req struct {
+			NodeID string `json:"nodeId"`
+			types.TunnelSpec
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid tunnel payload")
+			return
+		}
+		if req.NodeID == "" {
+			writeError(w, http.StatusBadRequest, "nodeId is required")
+			return
+		}
+		spec := req.TunnelSpec
+		spec.ID = id
+		spec.NodeID = req.NodeID
+		if spec.Metadata == nil {
+			spec.Metadata = map[string]string{}
+		}
+		spec.Metadata["nodeId"] = req.NodeID
+		tunnel, err := s.store.UpdateTunnel(r.Context(), spec)
+		if err != nil {
+			status := http.StatusInternalServerError
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				status = http.StatusNotFound
+			case errors.Is(err, store.ErrConflict):
+				status = http.StatusConflict
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, tunnel)
+	case http.MethodDelete:
+		err := s.store.DeleteTunnel(r.Context(), id)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut+", "+http.MethodDelete)
 	}
 }
 
@@ -231,6 +306,38 @@ func (s *Server) handleTCPRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleRelayTCPRuntime(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	items, err := s.store.ListTunnels(r.Context(), store.TunnelFilter{Type: "tcp", Status: "active"})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	pools := make([]types.RelayPoolSummary, 0, len(items))
+	for _, item := range items {
+		if item.PublicPort == 0 {
+			continue
+		}
+		pools = append(pools, types.RelayPoolSummary{
+			PoolKey:      fmt.Sprintf("%s:%d", item.NodeID, item.PublicPort),
+			NodeID:       item.NodeID,
+			PublicPort:   item.PublicPort,
+			StandbyCount: 0,
+			TargetSize:   8,
+			MaxSize:      8,
+		})
+	}
+	writeJSON(w, http.StatusOK, types.RelayRuntimeSummary{
+		Service:      "relay-tcp",
+		ObservedAt:   time.Now().UTC(),
+		TotalStandby: 0,
+		Pools:        pools,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

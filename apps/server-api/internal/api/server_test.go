@@ -153,3 +153,113 @@ func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 		t.Fatalf("expected 1 configured tunnel, got %d", metricsOut.ConfiguredTunnels)
 	}
 }
+
+func TestTunnelCRUDAndConflictHandling(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore())
+
+	registerBody, err := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "edge-a",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{TCPRelay: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register status 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, err := json.Marshal(map[string]any{
+		"id":         "tunnel-a",
+		"nodeId":     registerOut.NodeID,
+		"name":       "svc-a",
+		"type":       "tcp",
+		"targetHost": "127.0.0.1",
+		"targetPort": 16354,
+		"publicPort": 10086,
+		"status":     "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create status 201, got %d", createRes.Code)
+	}
+
+	conflictBody, err := json.Marshal(map[string]any{
+		"id":         "tunnel-b",
+		"nodeId":     registerOut.NodeID,
+		"name":       "svc-b",
+		"type":       "tcp",
+		"targetHost": "127.0.0.1",
+		"targetPort": 18081,
+		"publicPort": 10086,
+		"status":     "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(conflictBody))
+	conflictRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(conflictRes, conflictReq)
+	if conflictRes.Code != http.StatusConflict {
+		t.Fatalf("expected conflict status 409, got %d", conflictRes.Code)
+	}
+
+	updateBody, err := json.Marshal(map[string]any{
+		"nodeId":     registerOut.NodeID,
+		"name":       "svc-a-paused",
+		"type":       "tcp",
+		"targetHost": "127.0.0.1",
+		"targetPort": 16354,
+		"publicPort": 10086,
+		"status":     "paused",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/tunnels/tunnel-a", bytes.NewReader(updateBody))
+	updateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(updateRes, updateReq)
+	if updateRes.Code != http.StatusOK {
+		t.Fatalf("expected update status 200, got %d", updateRes.Code)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/tunnel-a", nil)
+	getRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(getRes, getReq)
+	if getRes.Code != http.StatusOK {
+		t.Fatalf("expected get status 200, got %d", getRes.Code)
+	}
+	var tunnelOut types.TunnelSpec
+	if err := json.NewDecoder(getRes.Body).Decode(&tunnelOut); err != nil {
+		t.Fatal(err)
+	}
+	if tunnelOut.Status != "paused" {
+		t.Fatalf("expected paused tunnel, got %s", tunnelOut.Status)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/tunnels/tunnel-a", nil)
+	deleteRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deleteRes, deleteReq)
+	if deleteRes.Code != http.StatusOK {
+		t.Fatalf("expected delete status 200, got %d", deleteRes.Code)
+	}
+
+	missingReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/tunnel-a", nil)
+	missingRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(missingRes, missingReq)
+	if missingRes.Code != http.StatusNotFound {
+		t.Fatalf("expected missing status 404, got %d", missingRes.Code)
+	}
+}

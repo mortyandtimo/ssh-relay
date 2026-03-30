@@ -127,6 +127,59 @@ th {
   color: #8d2b15;
 }
 
+.notice {
+  margin-top: 20px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: #e8f4df;
+  color: #295e18;
+}
+
+.tunnel-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+.tunnel-form label {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  color: #3b4659;
+}
+
+.tunnel-form input,
+.tunnel-form select,
+.tunnel-form button,
+.actions-row button {
+  border-radius: 12px;
+  border: 1px solid rgba(21, 34, 52, 0.14);
+  padding: 10px 12px;
+  font: inherit;
+}
+
+.tunnel-form button,
+.actions-row button {
+  background: #152234;
+  color: #f6f2e8;
+  cursor: pointer;
+}
+
+.actions-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.actions-row .danger {
+  background: #8d2b15;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 @media (max-width: 720px) {
   .shell {
     padding: 20px 14px 36px;
@@ -142,4 +195,3 @@ th {
     font-size: 22px;
   }
 }
-

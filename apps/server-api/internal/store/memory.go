@@ -92,6 +92,10 @@ func (s *InMemoryStore) CreateTunnel(_ context.Context, spec types.TunnelSpec) (
 	}
 	tunnel.Metadata["nodeId"] = tunnel.NodeID
 	s.mu.Lock()
+	if s.findPublicPortConflictLocked(tunnel.ID, tunnel.Type, tunnel.Status, tunnel.PublicPort) {
+		s.mu.Unlock()
+		return types.TunnelSpec{}, ErrConflict
+	}
 	s.tunnels[tunnel.ID] = tunnel
 	if record, ok := s.nodes[tunnel.NodeID]; ok {
 		record.Summary.ActiveTunnels = s.countActiveTunnelsForNode(record.Summary.NodeID)
@@ -99,6 +103,63 @@ func (s *InMemoryStore) CreateTunnel(_ context.Context, spec types.TunnelSpec) (
 	}
 	s.mu.Unlock()
 	return tunnel, nil
+}
+
+func (s *InMemoryStore) GetTunnel(_ context.Context, id string) (types.TunnelSpec, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tunnel, ok := s.tunnels[id]
+	if !ok {
+		return types.TunnelSpec{}, ErrNotFound
+	}
+	return tunnel, nil
+}
+
+func (s *InMemoryStore) UpdateTunnel(_ context.Context, spec types.TunnelSpec) (types.TunnelSpec, error) {
+	tunnel := normalizeTunnel(spec)
+	if tunnel.ID == "" {
+		return types.TunnelSpec{}, ErrNotFound
+	}
+	if tunnel.NodeID == "" {
+		tunnel.NodeID = tunnel.Metadata["nodeId"]
+	}
+	if tunnel.Metadata == nil {
+		tunnel.Metadata = map[string]string{}
+	}
+	tunnel.Metadata["nodeId"] = tunnel.NodeID
+
+	s.mu.Lock()
+	if _, ok := s.tunnels[tunnel.ID]; !ok {
+		s.mu.Unlock()
+		return types.TunnelSpec{}, ErrNotFound
+	}
+	if s.findPublicPortConflictLocked(tunnel.ID, tunnel.Type, tunnel.Status, tunnel.PublicPort) {
+		s.mu.Unlock()
+		return types.TunnelSpec{}, ErrConflict
+	}
+	s.tunnels[tunnel.ID] = tunnel
+	for nodeID, record := range s.nodes {
+		record.Summary.ActiveTunnels = s.countActiveTunnelsForNode(nodeID)
+		s.nodes[nodeID] = record
+	}
+	s.mu.Unlock()
+	return tunnel, nil
+}
+
+func (s *InMemoryStore) DeleteTunnel(_ context.Context, id string) error {
+	s.mu.Lock()
+	tunnel, ok := s.tunnels[id]
+	if !ok {
+		s.mu.Unlock()
+		return ErrNotFound
+	}
+	delete(s.tunnels, id)
+	if record, ok := s.nodes[tunnel.NodeID]; ok {
+		record.Summary.ActiveTunnels = s.countActiveTunnelsForNode(record.Summary.NodeID)
+		s.nodes[record.Summary.NodeID] = record
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *InMemoryStore) ListTunnels(_ context.Context, filter TunnelFilter) ([]types.TunnelSpec, error) {
@@ -149,6 +210,21 @@ func (s *InMemoryStore) countActiveTunnelsForNode(nodeID string) int {
 		}
 	}
 	return count
+}
+
+func (s *InMemoryStore) findPublicPortConflictLocked(excludeID, tunnelType, status string, publicPort int) bool {
+	if tunnelType != "tcp" || status != "active" || publicPort == 0 {
+		return false
+	}
+	for id, tunnel := range s.tunnels {
+		if id == excludeID {
+			continue
+		}
+		if tunnel.Type == "tcp" && tunnel.Status == "active" && tunnel.PublicPort == publicPort {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {

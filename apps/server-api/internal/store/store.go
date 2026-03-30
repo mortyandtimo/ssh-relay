@@ -8,6 +8,7 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrConflict = errors.New("conflict")
 
 type TunnelFilter struct {
 	NodeID string
@@ -27,6 +28,9 @@ type Store interface {
 	HeartbeatNode(ctx context.Context, req types.NodeHeartbeatRequest) (types.NodeSummary, error)
 	ListNodes(ctx context.Context) ([]types.NodeSummary, error)
 	CreateTunnel(ctx context.Context, spec types.TunnelSpec) (types.TunnelSpec, error)
+	GetTunnel(ctx context.Context, id string) (types.TunnelSpec, error)
+	UpdateTunnel(ctx context.Context, spec types.TunnelSpec) (types.TunnelSpec, error)
+	DeleteTunnel(ctx context.Context, id string) error
 	ListTunnels(ctx context.Context, filter TunnelFilter) ([]types.TunnelSpec, error)
 	Counts(ctx context.Context) (Counts, error)
 	Close() error
