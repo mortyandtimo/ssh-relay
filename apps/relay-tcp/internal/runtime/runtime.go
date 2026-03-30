@@ -543,6 +543,34 @@ func (s *Service) closeStandbyItems(items []standbyConn) {
 	}
 }
 
+func (s *Service) RuntimeSummary() types.RelayRuntimeSummary {
+	s.mu.Lock()
+	pools := make([]types.RelayPoolSummary, 0, len(s.pools))
+	for key, pool := range s.pools {
+		pool.mu.Lock()
+		standbyCount := len(pool.items)
+		targetSize := pool.target
+		maxSize := pool.max
+		pool.mu.Unlock()
+		nodeID, publicPort := parseRoutePoolKey(key)
+		pools = append(pools, types.RelayPoolSummary{
+			PoolKey:      key,
+			NodeID:       nodeID,
+			PublicPort:   publicPort,
+			StandbyCount: standbyCount,
+			TargetSize:   targetSize,
+			MaxSize:      maxSize,
+		})
+	}
+	s.mu.Unlock()
+	return types.RelayRuntimeSummary{
+		Service:      "relay-tcp",
+		ObservedAt:   time.Now().UTC(),
+		TotalStandby: int(atomic.LoadInt64(&totalStandby)),
+		Pools:        pools,
+	}
+}
+
 func helloMatchesRoute(hello types.AgentRelayHello, route types.TunnelSpec) bool {
 	return hello.NodeID == route.NodeID &&
 		hello.TunnelID == route.ID &&
@@ -561,6 +589,16 @@ func sameRoute(left, right types.TunnelSpec) bool {
 
 func routePoolKey(nodeID string, publicPort int) string {
 	return nodeID + ":" + itoa(publicPort)
+}
+
+func parseRoutePoolKey(key string) (string, int) {
+	parts := strings.SplitN(key, ":", 2)
+	if len(parts) != 2 {
+		return key, 0
+	}
+	var publicPort int
+	_, _ = fmt.Sscanf(parts[1], "%d", &publicPort)
+	return parts[0], publicPort
 }
 
 func itoa(v int) string {
