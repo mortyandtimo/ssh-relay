@@ -13,7 +13,7 @@ import (
 )
 
 func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
-	server := NewServer("test", store.NewInMemoryStore())
+	server := NewServer("test", store.NewInMemoryStore(), "")
 
 	registerBody, err := json.Marshal(types.NodeRegisterRequest{
 		NodeName:     "edge-a",
@@ -155,7 +155,7 @@ func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 }
 
 func TestTunnelCRUDAndConflictHandling(t *testing.T) {
-	server := NewServer("test", store.NewInMemoryStore())
+	server := NewServer("test", store.NewInMemoryStore(), "")
 
 	registerBody, err := json.Marshal(types.NodeRegisterRequest{
 		NodeName:     "edge-a",

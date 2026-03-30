@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 
@@ -23,6 +24,10 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(types.AgentRelayConnectPath, service.HandleAgentReverse)
+	mux.HandleFunc("/runtime", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(service.RuntimeSummary())
+	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"relay-tcp"}`))

@@ -13,25 +13,29 @@ import (
 )
 
 type Server struct {
-	version   string
-	startedAt time.Time
-	store     store.Store
-	mux       *http.ServeMux
+	version            string
+	startedAt          time.Time
+	store              store.Store
+	relayTCPRuntimeURL string
+	httpClient         *http.Client
+	mux                *http.ServeMux
 }
 
-func NewServer(version string, backend store.Store) *Server {
+func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *Server {
 	s := &Server{
-		version:   version,
-		startedAt: time.Now().UTC(),
-		store:     backend,
-		mux:       http.NewServeMux(),
+		version:            version,
+		startedAt:          time.Now().UTC(),
+		store:              backend,
+		relayTCPRuntimeURL: relayTCPRuntimeURL,
+		httpClient:         &http.Client{Timeout: 5 * time.Second},
+		mux:                http.NewServeMux(),
 	}
 	s.routes()
 	return s
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return withCORS(s.mux)
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -313,31 +317,35 @@ func (s *Server) handleRelayTCPRuntime(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	items, err := s.store.ListTunnels(r.Context(), store.TunnelFilter{Type: "tcp", Status: "active"})
+	if s.relayTCPRuntimeURL == "" {
+		writeJSON(w, http.StatusOK, types.RelayRuntimeSummary{
+			Service:    "relay-tcp",
+			ObservedAt: time.Now().UTC(),
+			Pools:      []types.RelayPoolSummary{},
+		})
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, s.relayTCPRuntimeURL, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	pools := make([]types.RelayPoolSummary, 0, len(items))
-	for _, item := range items {
-		if item.PublicPort == 0 {
-			continue
-		}
-		pools = append(pools, types.RelayPoolSummary{
-			PoolKey:      fmt.Sprintf("%s:%d", item.NodeID, item.PublicPort),
-			NodeID:       item.NodeID,
-			PublicPort:   item.PublicPort,
-			StandbyCount: 0,
-			TargetSize:   8,
-			MaxSize:      8,
-		})
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
 	}
-	writeJSON(w, http.StatusOK, types.RelayRuntimeSummary{
-		Service:      "relay-tcp",
-		ObservedAt:   time.Now().UTC(),
-		TotalStandby: 0,
-		Pools:        pools,
-	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("relay-tcp runtime returned %s", resp.Status))
+		return
+	}
+	var payload types.RelayRuntimeSummary
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -353,4 +361,17 @@ func writeError(w http.ResponseWriter, status int, message string) {
 func writeMethodNotAllowed(w http.ResponseWriter, method string) {
 	w.Header().Set("Allow", method)
 	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

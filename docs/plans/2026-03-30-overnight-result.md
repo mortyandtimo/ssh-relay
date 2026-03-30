@@ -156,6 +156,15 @@ GET  /api/relay/tcp/runtime      -> 200
 ```
 
 - A minimal admin web build now succeeds and static assets were staged to `/opt/cloud-relay-platform/admin-web` with a lightweight HTTP serve on `:18081` for immediate use.
+- The latest cloud-side management loop verification also confirmed:
+
+```text
+GET /api/tunnels/tunnel-1774809656590623537 -> 200
+GET /api/relay/tcp/runtime                    -> 200
+GET http://82.156.236.104:18081/             -> 200
+```
+
+- The management API can now be used for create/update/delete and conflict-aware validation instead of manual SQL, and the lightweight web console can operate against the live cloud API.
 
 ## What Still Fails Or Remains Risky
 
@@ -165,6 +174,7 @@ GET  /api/relay/tcp/runtime      -> 200
 - A longer soak test is still useful, but the latest retest now proves the current online Windows agent can pair successfully with the first elastic standby pool implementation.
 - A longer soak test is still useful, especially because the current Windows agent can later refill the pool above the initial target over time. The latest retest does, however, prove that the cloud-side implementation can restart cleanly, repopulate to the intended standby window, and serve traffic successfully with the currently running Windows agent.
 - The relay runtime summary endpoint is intentionally minimal in this round. It exposes pool keys and configured bounds, but not yet the in-process live standby counts from `relay-tcp`.
+- The temporary admin web is currently served by a lightweight Python HTTP process on `:18081`, not yet a formal systemd/nginx integration.
 
 ## Windows-Side Restart Requirement
 

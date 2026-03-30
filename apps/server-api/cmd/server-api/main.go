@@ -13,6 +13,7 @@ import (
 func main() {
 	addr := config.GetEnv("SERVER_API_ADDR", ":8080")
 	databaseURL := config.GetEnv("DATABASE_URL", "")
+	relayTCPRuntimeURL := config.GetEnv("RELAY_TCP_RUNTIME_URL", "http://127.0.0.1:9090/runtime")
 
 	var apiStore store.Store
 	var err error
@@ -26,7 +27,7 @@ func main() {
 	}
 	defer apiStore.Close()
 
-	server := api.NewServer("dev", apiStore)
+	server := api.NewServer("dev", apiStore, relayTCPRuntimeURL)
 	log.Printf("server-api listening on %s", addr)
 	if err := server.ListenAndServe(addr); err != nil {
 		log.Fatal(err)

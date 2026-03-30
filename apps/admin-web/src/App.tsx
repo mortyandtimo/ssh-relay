@@ -96,7 +96,7 @@ export default function App() {
         ]);
 
         if (!nodesResponse.ok || !tunnelsResponse.ok || !metricsResponse.ok || !relayResponse.ok) {
-          throw new Error("failed to load management data");
+          throw new Error("加载管理数据失败");
         }
 
         const nodesPayload = await nodesResponse.json();
@@ -118,7 +118,7 @@ export default function App() {
         }
       } catch (loadError) {
         if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : "unknown error");
+          setError(loadError instanceof Error ? loadError.message : "未知错误");
         }
       }
     }
@@ -139,7 +139,7 @@ export default function App() {
       fetch(`${apiBaseUrl}/api/relay/tcp/runtime`),
     ]);
     if (!nodesResponse.ok || !tunnelsResponse.ok || !metricsResponse.ok || !relayResponse.ok) {
-      throw new Error("failed to refresh management data");
+      throw new Error("刷新管理数据失败");
     }
     const nodesPayload = await nodesResponse.json();
     const tunnelsPayload = await tunnelsResponse.json();
@@ -172,14 +172,14 @@ export default function App() {
         }),
       });
       if (!response.ok) {
-        const payload = await response.json().catch(() => ({ error: "failed to create tunnel" }));
-        throw new Error(payload.error || "failed to create tunnel");
+        const payload = await response.json().catch(() => ({ error: "创建隧道失败" }));
+        throw new Error(payload.error || "创建隧道失败");
       }
       setTunnelForm((current) => ({ ...initialTunnelForm, nodeId: current.nodeId }));
-      setMessage("Tunnel created.");
+	      setMessage("隧道已创建。");
       await refresh();
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "failed to create tunnel");
+      setError(submitError instanceof Error ? submitError.message : "创建隧道失败");
     } finally {
       setBusyAction("");
     }
@@ -206,13 +206,13 @@ export default function App() {
         }),
       });
       if (!response.ok) {
-        const payload = await response.json().catch(() => ({ error: "failed to update tunnel" }));
-        throw new Error(payload.error || "failed to update tunnel");
+        const payload = await response.json().catch(() => ({ error: "更新隧道失败" }));
+        throw new Error(payload.error || "更新隧道失败");
       }
-      setMessage(`Tunnel ${status === "active" ? "enabled" : "paused"}.`);
+      setMessage(status === "active" ? "隧道已启用。" : "隧道已暂停。");
       await refresh();
     } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : "failed to update tunnel");
+      setError(actionError instanceof Error ? actionError.message : "更新隧道失败");
     } finally {
       setBusyAction("");
     }
@@ -226,13 +226,13 @@ export default function App() {
     try {
       const response = await fetch(`${apiBaseUrl}/api/tunnels/${tunnel.id}`, { method: "DELETE" });
       if (!response.ok) {
-        const payload = await response.json().catch(() => ({ error: "failed to delete tunnel" }));
-        throw new Error(payload.error || "failed to delete tunnel");
+        const payload = await response.json().catch(() => ({ error: "删除隧道失败" }));
+        throw new Error(payload.error || "删除隧道失败");
       }
-      setMessage("Tunnel deleted.");
+      setMessage("隧道已删除。");
       await refresh();
     } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : "failed to delete tunnel");
+      setError(actionError instanceof Error ? actionError.message : "删除隧道失败");
     } finally {
       setBusyAction("");
     }
@@ -243,19 +243,18 @@ export default function App() {
       <header className="hero">
         <div>
           <p className="eyebrow">Cloud Relay Platform</p>
-          <h1>Minimal relay management loop.</h1>
+          <h1>最小可用管理闭环</h1>
           <p className="summary">
-            Manage nodes and TCP tunnels without hand-written SQL and keep an eye on
-            relay runtime state from one page.
+            直接管理节点和 TCP 隧道，不再依赖手写 SQL，并在一个页面里查看中继运行状态。
           </p>
         </div>
         {metrics ? (
           <div className="metrics-grid">
-            <MetricCard label="Registered Nodes" value={String(metrics.registeredNodes)} />
-            <MetricCard label="Online Nodes" value={String(metrics.onlineNodes)} />
-            <MetricCard label="Configured Tunnels" value={String(metrics.configuredTunnels)} />
-            <MetricCard label="Relay Services" value={String(metrics.protocolRelayCount)} />
-            <MetricCard label="Total Standby" value={String(relayRuntime?.totalStandby ?? 0)} />
+            <MetricCard label="注册节点" value={String(metrics.registeredNodes)} />
+            <MetricCard label="在线节点" value={String(metrics.onlineNodes)} />
+            <MetricCard label="隧道数量" value={String(metrics.configuredTunnels)} />
+            <MetricCard label="中继服务" value={String(metrics.protocolRelayCount)} />
+            <MetricCard label="待命连接" value={String(relayRuntime?.totalStandby ?? 0)} />
           </div>
         ) : null}
       </header>
@@ -266,19 +265,19 @@ export default function App() {
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Create Tunnel</p>
-            <h2>Expose a node service</h2>
+            <p className="eyebrow">创建隧道</p>
+            <h2>暴露节点本地服务</h2>
           </div>
         </div>
         <form className="tunnel-form" onSubmit={submitTunnel}>
           <label>
-            <span>Node</span>
+            <span>节点</span>
             <select
               value={tunnelForm.nodeId}
               onChange={(event) => setTunnelForm((current) => ({ ...current, nodeId: event.target.value }))}
               required
             >
-              <option value="">Select node</option>
+              <option value="">选择节点</option>
               {nodes.map((node) => (
                 <option key={node.nodeId} value={node.nodeId}>
                   {node.nodeName} ({node.nodeId})
@@ -287,7 +286,7 @@ export default function App() {
             </select>
           </label>
           <label>
-            <span>Name</span>
+            <span>名称</span>
             <input
               value={tunnelForm.name}
               onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))}
@@ -296,7 +295,7 @@ export default function App() {
             />
           </label>
           <label>
-            <span>Target Host</span>
+            <span>目标主机</span>
             <input
               value={tunnelForm.targetHost}
               onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))}
@@ -304,7 +303,7 @@ export default function App() {
             />
           </label>
           <label>
-            <span>Target Port</span>
+            <span>目标端口</span>
             <input
               value={tunnelForm.targetPort}
               onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))}
@@ -313,7 +312,7 @@ export default function App() {
             />
           </label>
           <label>
-            <span>Public Port</span>
+            <span>公网端口</span>
             <input
               value={tunnelForm.publicPort}
               onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))}
@@ -322,7 +321,7 @@ export default function App() {
             />
           </label>
           <button type="submit" disabled={busyAction === "create-tunnel"}>
-            {busyAction === "create-tunnel" ? "Creating..." : "Create Tunnel"}
+            {busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}
           </button>
         </form>
       </section>
@@ -330,20 +329,20 @@ export default function App() {
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Relay Runtime</p>
-            <h2>Standby pool summary</h2>
+            <p className="eyebrow">中继状态</p>
+            <h2>待命池摘要</h2>
           </div>
         </div>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Pool</th>
-                <th>Node</th>
-                <th>Public Port</th>
-                <th>Standby</th>
-                <th>Target</th>
-                <th>Max</th>
+                <th>池键</th>
+                <th>节点</th>
+                <th>公网端口</th>
+                <th>待命数</th>
+                <th>目标值</th>
+                <th>上限</th>
               </tr>
             </thead>
             <tbody>
@@ -360,7 +359,7 @@ export default function App() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={6}>No relay pool state available.</td>
+                  <td colSpan={6}>暂无中继池状态。</td>
                 </tr>
               )}
             </tbody>
@@ -371,26 +370,26 @@ export default function App() {
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Tunnels</p>
-            <h2>Configured tunnel inventory</h2>
+            <p className="eyebrow">隧道</p>
+            <h2>当前隧道列表</h2>
           </div>
         </div>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Node</th>
-                <th>Status</th>
-                <th>Public</th>
-                <th>Target</th>
-                <th>Actions</th>
+                <th>名称</th>
+                <th>节点</th>
+                <th>状态</th>
+                <th>公网</th>
+                <th>目标</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
               {tunnels.length === 0 ? (
                 <tr>
-                  <td colSpan={6}>No tunnels configured.</td>
+                  <td colSpan={6}>暂无隧道。</td>
                 </tr>
               ) : (
                 tunnels.map((tunnel) => (
@@ -412,14 +411,14 @@ export default function App() {
                           disabled={busyAction === `${tunnel.id}:active` || tunnel.status === "active"}
                           onClick={() => updateTunnelStatus(tunnel, "active")}
                         >
-                          Enable
+                          启用
                         </button>
                         <button
                           type="button"
                           disabled={busyAction === `${tunnel.id}:paused` || tunnel.status === "paused"}
                           onClick={() => updateTunnelStatus(tunnel, "paused")}
                         >
-                          Pause
+                          暂停
                         </button>
                         <button
                           type="button"
@@ -427,7 +426,7 @@ export default function App() {
                           disabled={busyAction === `${tunnel.id}:delete`}
                           onClick={() => deleteTunnel(tunnel)}
                         >
-                          Delete
+                          删除
                         </button>
                       </div>
                     </td>
@@ -442,8 +441,8 @@ export default function App() {
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Nodes</p>
-            <h2>Online state and capability surface</h2>
+            <p className="eyebrow">节点</p>
+            <h2>节点在线状态</h2>
           </div>
         </div>
 
@@ -451,18 +450,18 @@ export default function App() {
           <table>
             <thead>
               <tr>
-                <th>Node</th>
-                <th>Status</th>
+                <th>节点</th>
+                <th>状态</th>
                 <th>Agent</th>
-                <th>Tunnels</th>
-                <th>Capabilities</th>
-                <th>Last Seen</th>
+                <th>隧道数</th>
+                <th>能力</th>
+                <th>最后心跳</th>
               </tr>
             </thead>
             <tbody>
               {nodes.length === 0 ? (
                 <tr>
-                  <td colSpan={6}>No nodes registered yet.</td>
+                  <td colSpan={6}>暂无节点。</td>
                 </tr>
               ) : (
                 nodes.map((node) => (
