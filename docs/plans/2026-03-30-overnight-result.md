@@ -4,8 +4,14 @@
 
 - Tightened `relay-tcp` standby pool handling in `apps/relay-tcp/internal/runtime/runtime.go`.
 - Added standby connection age tracking and bounded eviction behavior instead of treating a full queue as an unconditional hard reject.
+- Implemented the first elastic standby pool shape on the cloud side only:
+  - strict per-key hard cap
+  - explicit `min/target/max` constants for the first version
+  - atomic `totalStandby` accounting
+  - `totalStandby` included in relay logs for real diagnostics
 - Added clearer relay logs for:
   - standby admitted with `poolSize`
+  - standby admitted with `totalStandby`
   - stale standby discarded during pairing
   - expired standby eviction
   - pairing lifecycle summaries
@@ -86,12 +92,27 @@ StatusCode : 200
 Content    : <!DOCTYPE html>...
 ```
 
+- Final elastic-pool retest with the currently running Windows agent and the redeployed cloud relay confirmed the first elastic version works without requiring a Windows-side restart or protocol change.
+
+```text
+2026/03/30 15:44:40 standby reverse connection ready: ... poolSize=1 totalStandby=1
+2026/03/30 15:44:41 standby reverse connection ready: ... poolSize=2 totalStandby=2
+...
+2026/03/30 15:44:42 standby reverse connection ready: ... poolSize=8 totalStandby=8
+```
+
+- A fresh cloud-side request against the current online Windows agent still succeeded after the elastic-pool relay deploy:
+
+```text
+code=200 total=0.068908
+```
+
 ## What Still Fails Or Remains Risky
 
 - The currently running Windows agent process is still an old runtime shape from earlier testing history. It can refill the pool and successfully serve traffic, but the cloud side has previously observed stale standby entries and long-lived queue buildup.
 - Tonight's cloud-side change improves pool admission behavior and observability, but it does not yet introduce a fully adaptive or tunnel-specific standby pool policy.
 - Because the Windows agent was treated as fixed tonight, this result should be considered a cloud-side stabilization step, not the final completed design for long-term pool management.
-- A longer soak test is still useful, but the morning retest now proves the current online Windows agent can pair successfully with the bounded standby pool implementation.
+- A longer soak test is still useful, but the latest retest now proves the current online Windows agent can pair successfully with the first elastic standby pool implementation.
 
 ## Windows-Side Restart Requirement
 
@@ -103,4 +124,4 @@ Content    : <!DOCTYPE html>...
 
 - Verified tunnel path remains `82.156.236.104:10086 -> node-1774805183388699102 -> 127.0.0.1:16354`.
 - Cloud-side relay restart did not break compatibility with the currently running Windows agent.
-- Pool behavior after redeploy was measurable, bounded to the intended standby window during the morning retest, and diagnosable via logs.
+- Pool behavior after redeploy was measurable, bounded to the intended standby window during the latest retest, and diagnosable via logs including `totalStandby`.

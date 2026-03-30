@@ -19,8 +19,10 @@ import (
 
 const (
 	routeSyncInterval     = 5 * time.Second
-	standbyPoolBufferSize = 64
-	standbyPoolTargetSize = 8
+	standbyPoolMinSize    = 1
+	standbyPoolTargetSize = 2
+	standbyPoolMaxSize    = 16
+	globalMaxStandby      = 200
 	standbyConnMaxAge     = 90 * time.Second
 	defaultAcquireTimeout = 10 * time.Second
 )
@@ -44,6 +46,7 @@ type Service struct {
 }
 
 var connectionCounter uint64
+var totalStandby int64
 
 func NewService(apiBaseURL string) *Service {
 	return &Service{
@@ -127,13 +130,13 @@ func (s *Service) HandleAgentReverse(w http.ResponseWriter, r *http.Request) {
 
 	key := routePoolKey(route.NodeID, route.PublicPort)
 	item := standbyConn{conn: conn, hello: hello, registeredAt: time.Now().UTC()}
-	poolSize, err := s.enqueueStandbyConn(key, item)
+	poolSize, totalStandbyCount, err := s.enqueueStandbyConn(key, item)
 	if err != nil {
 		log.Printf("standby reverse connection rejected for %s tunnel %s: %v", key, hello.TunnelID, err)
 		_ = conn.Close()
 		return
 	}
-	log.Printf("standby reverse connection ready: node=%s tunnel=%s publicPort=%d poolSize=%d", hello.NodeID, hello.TunnelID, hello.PublicPort, poolSize)
+	log.Printf("standby reverse connection ready: node=%s tunnel=%s publicPort=%d poolSize=%d totalStandby=%d", hello.NodeID, hello.TunnelID, hello.PublicPort, poolSize, totalStandbyCount)
 }
 
 func (s *Service) syncRoutes(ctx context.Context) error {
@@ -243,23 +246,23 @@ func (s *Service) handlePublicConnection(src net.Conn, route types.TunnelSpec) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.acquireTimeout)
 	defer cancel()
 	for {
-		standby, err := s.acquireStandbyConn(ctx, route)
+		standby, poolSize, totalStandbyCount, err := s.acquireStandbyConn(ctx, route)
 		if err != nil {
 			log.Printf("tcp connection %d no standby reverse connection for node=%s publicPort=%d: %v", connID, route.NodeID, route.PublicPort, err)
 			return
 		}
 
 		if err := standby.prepareForStart(); err != nil {
-			log.Printf("tcp connection %d discarded stale standby reverse connection for tunnel %s age=%s: %v", connID, route.ID, standby.age(), err)
+			log.Printf("tcp connection %d discarded stale standby reverse connection for tunnel %s age=%s poolSize=%d totalStandby=%d: %v", connID, route.ID, standby.age(), poolSize, totalStandbyCount, err)
 			_ = standby.conn.Close()
 			continue
 		}
 		if _, err := standby.conn.Write([]byte{types.AgentRelayStartByte}); err != nil {
-			log.Printf("tcp connection %d failed to start reverse session for tunnel %s: %v", connID, route.ID, err)
+			log.Printf("tcp connection %d failed to start reverse session for tunnel %s poolSize=%d totalStandby=%d: %v", connID, route.ID, poolSize, totalStandbyCount, err)
 			_ = standby.conn.Close()
 			continue
 		}
-		log.Printf("tcp connection %d paired with standby reverse connection for tunnel %s standbyAge=%s", connID, route.ID, standby.age())
+		log.Printf("tcp connection %d paired with standby reverse connection for tunnel %s standbyAge=%s poolSize=%d totalStandby=%d", connID, route.ID, standby.age(), poolSize, totalStandbyCount)
 		defer standby.conn.Close()
 		proxyConnections(connID, src, standby.conn, start)
 		return
@@ -307,13 +310,15 @@ func (s *Service) activeRouteForHello(hello types.AgentRelayHello) (types.Tunnel
 	return route, true
 }
 
-func (s *Service) acquireStandbyConn(ctx context.Context, route types.TunnelSpec) (standbyConn, error) {
+func (s *Service) acquireStandbyConn(ctx context.Context, route types.TunnelSpec) (standbyConn, int, int64, error) {
 	queue := s.poolForKey(routePoolKey(route.NodeID, route.PublicPort))
 	for {
 		select {
 		case item := <-queue:
+			poolSize := len(queue)
+			totalStandbyCount := atomic.AddInt64(&totalStandby, -1)
 			if item.expired() {
-				log.Printf("evict expired standby reverse connection for node=%s publicPort=%d tunnel=%s age=%s", route.NodeID, route.PublicPort, item.hello.TunnelID, item.age())
+				log.Printf("evict expired standby reverse connection for node=%s publicPort=%d tunnel=%s age=%s poolSize=%d totalStandby=%d", route.NodeID, route.PublicPort, item.hello.TunnelID, item.age(), poolSize, totalStandbyCount)
 				_ = item.conn.Close()
 				continue
 			}
@@ -321,50 +326,68 @@ func (s *Service) acquireStandbyConn(ctx context.Context, route types.TunnelSpec
 				_ = item.conn.Close()
 				continue
 			}
-			return item, nil
+			return item, poolSize, totalStandbyCount, nil
 		case <-ctx.Done():
-			return standbyConn{}, ctx.Err()
+			return standbyConn{}, len(queue), atomic.LoadInt64(&totalStandby), ctx.Err()
 		}
 	}
 }
 
-func (s *Service) enqueueStandbyConn(key string, item standbyConn) (int, error) {
+func (s *Service) enqueueStandbyConn(key string, item standbyConn) (int, int64, error) {
 	queue := s.poolForKey(key)
-	if len(queue) >= standbyPoolTargetSize {
+	if globalMaxStandby > 0 && atomic.LoadInt64(&totalStandby) >= globalMaxStandby {
+		return len(queue), atomic.LoadInt64(&totalStandby), errors.New("global standby pool full")
+	}
+	if len(queue) >= standbyPoolMaxSize {
 		select {
 		case evicted := <-queue:
-			log.Printf("evict standby reverse connection for key=%s tunnel=%s age=%s to keep target pool size=%d", key, evicted.hello.TunnelID, evicted.age(), standbyPoolTargetSize)
+			remaining := len(queue)
+			totalAfterEvict := atomic.AddInt64(&totalStandby, -1)
+			if evicted.expired() {
+				log.Printf("evict expired standby reverse connection for key=%s tunnel=%s age=%s poolSize=%d totalStandby=%d to admit new standby", key, evicted.hello.TunnelID, evicted.age(), remaining, totalAfterEvict)
+			} else {
+				log.Printf("evict standby reverse connection for key=%s tunnel=%s age=%s poolSize=%d totalStandby=%d to keep max pool size=%d", key, evicted.hello.TunnelID, evicted.age(), remaining, totalAfterEvict, standbyPoolMaxSize)
+			}
 			_ = evicted.conn.Close()
 		case queue <- item:
-			return len(queue), nil
+			poolSize := len(queue)
+			totalAfterAdd := atomic.AddInt64(&totalStandby, 1)
+			return poolSize, totalAfterAdd, nil
 		default:
 		}
 	}
 	select {
 	case queue <- item:
-		return len(queue), nil
+		poolSize := len(queue)
+		totalAfterAdd := atomic.AddInt64(&totalStandby, 1)
+		return poolSize, totalAfterAdd, nil
 	default:
 		select {
 		case evicted := <-queue:
+			remaining := len(queue)
+			totalAfterEvict := atomic.AddInt64(&totalStandby, -1)
 			if evicted.expired() {
-				log.Printf("evict expired standby reverse connection for key=%s tunnel=%s age=%s to admit new standby", key, evicted.hello.TunnelID, evicted.age())
+				log.Printf("evict expired standby reverse connection for key=%s tunnel=%s age=%s poolSize=%d totalStandby=%d to admit new standby", key, evicted.hello.TunnelID, evicted.age(), remaining, totalAfterEvict)
 				_ = evicted.conn.Close()
 				select {
 				case queue <- item:
-					return len(queue), nil
+					poolSize := len(queue)
+					totalAfterAdd := atomic.AddInt64(&totalStandby, 1)
+					return poolSize, totalAfterAdd, nil
 				default:
 					_ = item.conn.Close()
-					return len(queue), errors.New("standby pool full after expired eviction")
+					return len(queue), atomic.LoadInt64(&totalStandby), errors.New("standby pool full after expired eviction")
 				}
 			}
 			select {
 			case queue <- evicted:
+				_ = atomic.AddInt64(&totalStandby, 1)
 			default:
 				_ = evicted.conn.Close()
 			}
 		default:
 		}
-		return len(queue), errors.New("standby pool full")
+		return len(queue), atomic.LoadInt64(&totalStandby), errors.New("standby pool full")
 	}
 }
 
@@ -375,7 +398,7 @@ func (s *Service) poolForKey(key string) chan standbyConn {
 	if ok {
 		return queue
 	}
-	queue = make(chan standbyConn, standbyPoolBufferSize)
+	queue = make(chan standbyConn, standbyPoolMaxSize)
 	s.pools[key] = queue
 	return queue
 }
@@ -418,6 +441,7 @@ func drainStandbyQueue(queue chan standbyConn) {
 	for {
 		select {
 		case item := <-queue:
+			_ = atomic.AddInt64(&totalStandby, -1)
 			_ = item.conn.Close()
 		default:
 			return
