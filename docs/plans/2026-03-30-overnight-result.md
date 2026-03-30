@@ -175,6 +175,8 @@ GET http://82.156.236.104:18081/             -> 200
 - A longer soak test is still useful, especially because the current Windows agent can later refill the pool above the initial target over time. The latest retest does, however, prove that the cloud-side implementation can restart cleanly, repopulate to the intended standby window, and serve traffic successfully with the currently running Windows agent.
 - The relay runtime summary endpoint is intentionally minimal in this round. It exposes pool keys and configured bounds, but not yet the in-process live standby counts from `relay-tcp`.
 - The temporary admin web is currently served by a lightweight Python HTTP process on `:18081`, not yet a formal systemd/nginx integration.
+- Authentication is not yet enabled for the admin loop.
+- HTTPS same-origin deployment for the admin web is intentionally deferred until a dedicated subdomain is chosen; the current temporary UI endpoint should be treated as a staging path only.
 
 ## Windows-Side Restart Requirement
 

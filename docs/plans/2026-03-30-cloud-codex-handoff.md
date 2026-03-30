@@ -86,6 +86,10 @@ AGENT_REVERSE_POOL_SIZE=8
   - larger pool for browser-facing HTTP workloads carried over TCP relay
   - optional tunnel-level override in control-plane metadata
   - adaptive refill based on recent concurrency or queue pressure
+- Management follow-up still needed:
+  - minimal admin login flow using the existing `users` table
+  - same-origin HTTPS deployment for admin-web instead of the temporary `:18081` HTTP preview
+  - do not bind the final deployment to the main domain yet; wait for a dedicated subdomain choice
 
 ## Exact Next Goal
 
