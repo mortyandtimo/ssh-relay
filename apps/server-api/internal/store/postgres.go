@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/25743/cloud-relay-platform/packages/protocol/types"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type PostgresStore struct {
@@ -401,4 +403,233 @@ func (s *PostgresStore) hasPublicPortConflict(ctx context.Context, excludeID, tu
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (s *PostgresStore) BootstrapStatus(ctx context.Context) (bool, error) {
+	var count int
+	if err := s.pool.QueryRow(ctx, `select count(*) from users`).Scan(&count); err != nil {
+		return false, err
+	}
+	return count == 0, nil
+}
+
+func (s *PostgresStore) BootstrapAdmin(ctx context.Context, params CreateUserParams) (types.UserSummary, error) {
+	required, err := s.BootstrapStatus(ctx)
+	if err != nil {
+		return types.UserSummary{}, err
+	}
+	if !required {
+		return types.UserSummary{}, ErrConflict
+	}
+	params.Role = types.UserRoleAdmin
+	return s.CreateUser(ctx, params)
+}
+
+func (s *PostgresStore) AuthenticateUser(ctx context.Context, params AuthenticateUserParams) (types.UserSummary, error) {
+	email := normalizeEmail(params.Email)
+	row := s.pool.QueryRow(ctx, `
+		select id, email, display_name, role, password_hash, created_at, updated_at
+		from users
+		where lower(email) = $1
+	`, email)
+	var summary types.UserSummary
+	var passwordHash string
+	if err := row.Scan(&summary.ID, &summary.Email, &summary.DisplayName, &summary.Role, &passwordHash, &summary.CreatedAt, &summary.UpdatedAt); err != nil {
+		return types.UserSummary{}, ErrUnauthorized
+	}
+	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(params.Password)) != nil {
+		return types.UserSummary{}, ErrUnauthorized
+	}
+	return summary, nil
+}
+
+func (s *PostgresStore) ListUsers(ctx context.Context) ([]types.UserSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		select id, email, display_name, role, created_at, updated_at
+		from users
+		order by email
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]types.UserSummary, 0)
+	for rows.Next() {
+		var item types.UserSummary
+		if err := rows.Scan(&item.ID, &item.Email, &item.DisplayName, &item.Role, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *PostgresStore) GetUser(ctx context.Context, id string) (types.UserSummary, error) {
+	row := s.pool.QueryRow(ctx, `
+		select id, email, display_name, role, created_at, updated_at
+		from users
+		where id = $1
+	`, id)
+	var item types.UserSummary
+	if err := row.Scan(&item.ID, &item.Email, &item.DisplayName, &item.Role, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return types.UserSummary{}, ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *PostgresStore) CreateUser(ctx context.Context, params CreateUserParams) (types.UserSummary, error) {
+	email := normalizeEmail(params.Email)
+	if email == "" || strings.TrimSpace(params.DisplayName) == "" || params.Password == "" {
+		return types.UserSummary{}, ErrConflict
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return types.UserSummary{}, err
+	}
+	id := fmt.Sprintf("user-%d", time.Now().UnixNano())
+	role := normalizeUserRole(params.Role)
+	row := s.pool.QueryRow(ctx, `
+		insert into users (id, email, display_name, password_hash, role)
+		values ($1, $2, $3, $4, $5)
+		returning id, email, display_name, role, created_at, updated_at
+	`, id, email, strings.TrimSpace(params.DisplayName), string(hash), role)
+	var summary types.UserSummary
+	if err := row.Scan(&summary.ID, &summary.Email, &summary.DisplayName, &summary.Role, &summary.CreatedAt, &summary.UpdatedAt); err != nil {
+		return types.UserSummary{}, ErrConflict
+	}
+	return summary, nil
+}
+
+func (s *PostgresStore) UpdateUser(ctx context.Context, params UpdateUserParams) (types.UserSummary, error) {
+	current, err := s.GetUser(ctx, params.ID)
+	if err != nil {
+		return types.UserSummary{}, err
+	}
+	displayName := current.DisplayName
+	if strings.TrimSpace(params.DisplayName) != "" {
+		displayName = strings.TrimSpace(params.DisplayName)
+	}
+	role := current.Role
+	if params.Role != "" {
+		role = normalizeUserRole(params.Role)
+	}
+	passwordHashSQL := "password_hash"
+	passwordArg := any(nil)
+	if params.Password != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
+		if err != nil {
+			return types.UserSummary{}, err
+		}
+		passwordHashSQL = "$4"
+		passwordArg = string(hash)
+		_, err = s.pool.Exec(ctx, `
+			update users
+			set display_name = $2, role = $3, password_hash = $4, updated_at = now()
+			where id = $1
+		`, params.ID, displayName, role, passwordArg)
+		if err != nil {
+			return types.UserSummary{}, err
+		}
+		return s.GetUser(ctx, params.ID)
+	}
+	_ = passwordHashSQL
+	_ = passwordArg
+	commandTag, err := s.pool.Exec(ctx, `
+		update users
+		set display_name = $2, role = $3, updated_at = now()
+		where id = $1
+	`, params.ID, displayName, role)
+	if err != nil {
+		return types.UserSummary{}, err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return types.UserSummary{}, ErrNotFound
+	}
+	return s.GetUser(ctx, params.ID)
+}
+
+func (s *PostgresStore) DeleteUser(ctx context.Context, id string) error {
+	if err := s.DeleteUserSessions(ctx, id); err != nil {
+		return err
+	}
+	commandTag, err := s.pool.Exec(ctx, `delete from users where id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) CreateWebSession(ctx context.Context, params CreateSessionParams) (WebSession, error) {
+	sessionID := params.SessionID
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("sess-%d", time.Now().UnixNano())
+	}
+	now := time.Now().UTC()
+	_, err := s.pool.Exec(ctx, `
+		insert into web_sessions (id, user_id, refresh_token_hash, refresh_expires_at, remote_addr, user_agent, created_at, last_seen_at, last_refreshed_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $7, $7)
+	`, sessionID, params.UserID, params.RefreshTokenHash, params.RefreshExpiresAt, params.RemoteAddr, params.UserAgent, now)
+	if err != nil {
+		return WebSession{}, err
+	}
+	return WebSession{SessionID: sessionID, UserID: params.UserID, RefreshTokenHash: params.RefreshTokenHash, RefreshExpiresAt: params.RefreshExpiresAt, LastRefreshedAt: now, LastSeenAt: now, RemoteAddr: params.RemoteAddr, UserAgent: params.UserAgent, CreatedAt: now}, nil
+}
+
+func (s *PostgresStore) GetWebSessionByID(ctx context.Context, sessionID string) (WebSession, error) {
+	row := s.pool.QueryRow(ctx, `
+		select id, user_id, refresh_token_hash, refresh_expires_at, remote_addr, user_agent, created_at, last_seen_at, last_refreshed_at, revoked_at
+		from web_sessions
+		where id = $1
+	`, sessionID)
+	var session WebSession
+	if err := row.Scan(&session.SessionID, &session.UserID, &session.RefreshTokenHash, &session.RefreshExpiresAt, &session.RemoteAddr, &session.UserAgent, &session.CreatedAt, &session.LastSeenAt, &session.LastRefreshedAt, &session.RevokedAt); err != nil {
+		return WebSession{}, ErrNotFound
+	}
+	if session.RevokedAt != nil {
+		return WebSession{}, ErrUnauthorized
+	}
+	return session, nil
+}
+
+func (s *PostgresStore) RotateWebSession(ctx context.Context, sessionID string, refreshTokenHash string, refreshExpiresAt time.Time, remoteAddr, userAgent string) (WebSession, error) {
+	now := time.Now().UTC()
+	commandTag, err := s.pool.Exec(ctx, `
+		update web_sessions
+		set refresh_token_hash = $2, refresh_expires_at = $3, remote_addr = $4, user_agent = $5, last_seen_at = $6, last_refreshed_at = $6
+		where id = $1 and revoked_at is null
+	`, sessionID, refreshTokenHash, refreshExpiresAt, remoteAddr, userAgent, now)
+	if err != nil {
+		return WebSession{}, err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return WebSession{}, ErrNotFound
+	}
+	return s.GetWebSessionByID(ctx, sessionID)
+}
+
+func (s *PostgresStore) DeleteWebSession(ctx context.Context, sessionID string) error {
+	commandTag, err := s.pool.Exec(ctx, `
+		update web_sessions
+		set revoked_at = now()
+		where id = $1 and revoked_at is null
+	`, sessionID)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteUserSessions(ctx context.Context, userID string) error {
+	_, err := s.pool.Exec(ctx, `
+		update web_sessions
+		set revoked_at = now()
+		where user_id = $1 and revoked_at is null
+	`, userID)
+	return err
 }

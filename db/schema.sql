@@ -92,3 +92,18 @@ create table if not exists audit_logs (
     created_at timestamptz not null default now()
 );
 
+
+create table if not exists web_sessions (
+    id text primary key,
+    user_id text not null references users(id) on delete cascade,
+    refresh_token_hash text not null,
+    refresh_expires_at timestamptz not null,
+    remote_addr text,
+    user_agent text,
+    created_at timestamptz not null default now(),
+    last_seen_at timestamptz not null default now(),
+    last_refreshed_at timestamptz not null default now(),
+    revoked_at timestamptz
+);
+
+create index if not exists idx_web_sessions_user_id on web_sessions(user_id);

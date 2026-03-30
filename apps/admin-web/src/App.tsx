@@ -63,15 +63,26 @@ type TunnelForm = {
   publicPort: string;
 };
 
+type UserRole = "admin" | "manager" | "user";
+
+type UserSummary = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type DashboardPayload = {
   nodes: NodeSummary[];
   tunnels: TunnelSpec[];
   metrics: ServerMetrics;
   relayRuntime: RelayRuntimeSummary;
+  users: UserSummary[];
 };
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
-const adminTokenStorageKey = "cloud-relay-admin-token";
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
 
 const initialTunnelForm: TunnelForm = {
   nodeId: "",
@@ -81,196 +92,201 @@ const initialTunnelForm: TunnelForm = {
   publicPort: "",
 };
 
-function readStoredAdminToken() {
-  if (typeof window === "undefined") {
-    return "";
-  }
-  return window.localStorage.getItem(adminTokenStorageKey) || "";
-}
-
 export default function App() {
+  const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
+  const [currentUser, setCurrentUser] = useState<UserSummary | null>(null);
   const [nodes, setNodes] = useState<NodeSummary[]>([]);
   const [tunnels, setTunnels] = useState<TunnelSpec[]>([]);
+  const [users, setUsers] = useState<UserSummary[]>([]);
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null);
   const [relayRuntime, setRelayRuntime] = useState<RelayRuntimeSummary | null>(null);
   const [tunnelForm, setTunnelForm] = useState<TunnelForm>(initialTunnelForm);
-  const [tokenInput, setTokenInput] = useState<string>(readStoredAdminToken);
-  const [adminToken, setAdminToken] = useState<string>(readStoredAdminToken);
+  const [loginForm, setLoginForm] = useState({ email: "", password: "" });
+  const [bootstrapForm, setBootstrapForm] = useState({ email: "", displayName: "管理员", password: "" });
+  const [userForm, setUserForm] = useState({ email: "", displayName: "", password: "", role: "manager" as UserRole });
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [busyAction, setBusyAction] = useState("");
   const [hasInitializedNodeId, setHasInitializedNodeId] = useState(false);
-  const [error, setError] = useState<string>("");
-  const [message, setMessage] = useState<string>("");
-  const [busyAction, setBusyAction] = useState<string>("");
 
   useEffect(() => {
-    if (!adminToken) {
-      setNodes([]);
-      setTunnels([]);
-      setMetrics(null);
-      setRelayRuntime(null);
-      setError("");
-      return;
-    }
-
     let cancelled = false;
 
-    async function loadSilently() {
+    async function init() {
       try {
-        const payload = await loadDashboard(adminToken);
+        const status = await requestJSON<{ required: boolean }>("/api/auth/bootstrap-status");
         if (cancelled) {
           return;
         }
-        applyDashboardPayload(payload);
-        setError("");
-      } catch (loadError) {
+        setBootstrapRequired(status.required);
+        if (status.required) {
+          return;
+        }
+        const me = await requestJSON<{ user: UserSummary }>("/api/auth/me");
+        if (cancelled) {
+          return;
+        }
+        setCurrentUser(me.user);
+        await refreshDashboard(false, me.user, cancelled);
+      } catch {
         if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : "加载管理数据失败");
+          setCurrentUser(null);
         }
       }
     }
 
-    void loadSilently();
-    const timer = window.setInterval(() => {
-      void loadSilently();
-    }, 10000);
+    void init();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
+  useEffect(() => {
+    if (!currentUser) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void refreshDashboard(false, currentUser, cancelled);
+    }, 10000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [adminToken, hasInitializedNodeId]);
+  }, [currentUser, hasInitializedNodeId]);
 
-  function applyDashboardPayload(payload: DashboardPayload) {
-    setNodes(payload.nodes);
-    setTunnels(payload.tunnels);
-    setMetrics(payload.metrics);
-    setRelayRuntime(payload.relayRuntime);
-
-    if (!hasInitializedNodeId) {
-      const defaultNodeId = payload.nodes[0]?.nodeId || "";
-      if (defaultNodeId !== "") {
-        setTunnelForm((current) => {
-          if (current.nodeId !== "") {
-            return current;
-          }
-          return { ...current, nodeId: defaultNodeId };
-        });
-        setHasInitializedNodeId(true);
-      }
-    }
-  }
-
-  async function requestJSON<T>(path: string, init?: { method?: string; body?: string; token?: string }): Promise<T> {
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-    };
-    if (init?.body) {
-      headers["Content-Type"] = "application/json";
-    }
-    if (init?.token) {
-      headers.Authorization = "Bearer " + init.token;
-    }
-
+  async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(apiBaseUrl + path, {
-      method: init?.method || "GET",
-      headers,
-      body: init?.body,
+      credentials: "include",
+      ...init,
+      headers: {
+        Accept: "application/json",
+        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...(init?.headers || {}),
+      },
     });
-
     const payload = await response.json().catch(() => null);
-    if (response.status === 401) {
-      throw new Error("管理令牌无效或缺失");
-    }
     if (!response.ok) {
-      const responseError = payload && typeof payload.error === "string" ? payload.error : "请求失败";
-      throw new Error(responseError);
+      throw new Error(payload && typeof payload.error === "string" ? payload.error : "请求失败");
     }
     return payload as T;
   }
 
-  async function loadDashboard(token: string): Promise<DashboardPayload> {
-    const [nodesPayload, tunnelsPayload, metricsPayload, relayPayload] = await Promise.all([
-      requestJSON<{ items: NodeSummary[] }>("/api/nodes", { token }),
-      requestJSON<{ items: TunnelSpec[] }>("/api/tunnels", { token }),
-      requestJSON<ServerMetrics>("/api/server/metrics", { token }),
-      requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime", { token }),
-    ]);
-
-    return {
-      nodes: nodesPayload.items || [],
-      tunnels: tunnelsPayload.items || [],
-      metrics: metricsPayload,
-      relayRuntime: relayPayload,
-    };
-  }
-
-  async function refreshDashboard(showNotice: boolean) {
-    if (!adminToken) {
-      setError("请先输入管理令牌");
+  async function refreshDashboard(showNotice: boolean, user = currentUser, cancelled = false) {
+    if (!user) {
       return;
     }
-    setBusyAction("refresh");
-    setError("");
     try {
-      const payload = await loadDashboard(adminToken);
-      applyDashboardPayload(payload);
+      const requests = [
+        requestJSON<{ items: NodeSummary[] }>("/api/nodes"),
+        requestJSON<{ items: TunnelSpec[] }>("/api/tunnels"),
+        requestJSON<ServerMetrics>("/api/server/metrics"),
+        requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime"),
+      ] as const;
+      const userRequests = user.role === "admin" ? [requestJSON<{ items: UserSummary[] }>("/api/users")] : [];
+      const results = await Promise.all([...requests, ...userRequests]);
+      if (cancelled) {
+        return;
+      }
+      const [nodesPayload, tunnelsPayload, metricsPayload, relayPayload, usersPayload] = results as unknown as [
+        { items: NodeSummary[] },
+        { items: TunnelSpec[] },
+        ServerMetrics,
+        RelayRuntimeSummary,
+        { items: UserSummary[] } | undefined,
+      ];
+      setNodes(nodesPayload.items || []);
+      setTunnels(tunnelsPayload.items || []);
+      setMetrics(metricsPayload);
+      setRelayRuntime(relayPayload);
+      setUsers(usersPayload?.items || []);
+      if (!hasInitializedNodeId) {
+        const defaultNodeId = nodesPayload.items?.[0]?.nodeId || "";
+        if (defaultNodeId) {
+          setTunnelForm((current) => ({ ...current, nodeId: current.nodeId || defaultNodeId }));
+          setHasInitializedNodeId(true);
+        }
+      }
       if (showNotice) {
         setMessage("管理数据已刷新。");
       }
+      setError("");
     } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : "刷新管理数据失败");
+      setError(refreshError instanceof Error ? refreshError.message : "加载管理数据失败");
+    }
+  }
+
+  async function submitBootstrap(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusyAction("bootstrap");
+    setError("");
+    setMessage("");
+    try {
+      const payload = await requestJSON<{ user: UserSummary }>("/api/auth/bootstrap", {
+        method: "POST",
+        body: JSON.stringify(bootstrapForm),
+      });
+      setCurrentUser(payload.user);
+      setBootstrapRequired(false);
+      setMessage("管理员账户已初始化。");
+      await refreshDashboard(false, payload.user);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "初始化失败");
     } finally {
       setBusyAction("");
     }
   }
 
-  async function reloadAfterMutation() {
-    if (!adminToken) {
-      return;
-    }
-    const payload = await loadDashboard(adminToken);
-    applyDashboardPayload(payload);
-  }
-
-  function submitAdminToken(event: FormEvent<HTMLFormElement>) {
+  async function submitLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const nextToken = tokenInput.trim();
-    if (nextToken === "") {
-      setError("请输入管理令牌");
-      return;
+    setBusyAction("login");
+    setError("");
+    setMessage("");
+    try {
+      const payload = await requestJSON<{ user: UserSummary }>("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify(loginForm),
+      });
+      setCurrentUser(payload.user);
+      setMessage("登录成功。");
+      await refreshDashboard(false, payload.user);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "登录失败");
+    } finally {
+      setBusyAction("");
     }
-    window.localStorage.setItem(adminTokenStorageKey, nextToken);
-    setAdminToken(nextToken);
-    setError("");
-    setMessage("管理令牌已保存。");
   }
 
-  function clearAdminToken() {
-    window.localStorage.removeItem(adminTokenStorageKey);
-    setAdminToken("");
-    setTokenInput("");
-    setNodes([]);
-    setTunnels([]);
-    setMetrics(null);
-    setRelayRuntime(null);
-    setTunnelForm(initialTunnelForm);
-    setHasInitializedNodeId(false);
+  async function logout() {
+    setBusyAction("logout");
     setError("");
-    setMessage("已清除管理令牌。");
+    setMessage("");
+    try {
+      await requestJSON<{ status: string }>("/api/auth/logout", { method: "POST" });
+      setCurrentUser(null);
+      setNodes([]);
+      setTunnels([]);
+      setUsers([]);
+      setMetrics(null);
+      setRelayRuntime(null);
+      setTunnelForm(initialTunnelForm);
+      setHasInitializedNodeId(false);
+      setMessage("已退出登录。");
+    } catch (logoutError) {
+      setError(logoutError instanceof Error ? logoutError.message : "退出失败");
+    } finally {
+      setBusyAction("");
+    }
   }
 
-  async function submitTunnel(event: FormEvent<HTMLFormElement>) {
+  async function createTunnel(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!adminToken) {
-      setError("请先输入管理令牌");
-      return;
-    }
     setBusyAction("create-tunnel");
     setError("");
     setMessage("");
     try {
       await requestJSON<TunnelSpec>("/api/tunnels", {
         method: "POST",
-        token: adminToken,
         body: JSON.stringify({
           nodeId: tunnelForm.nodeId,
           name: tunnelForm.name,
@@ -284,19 +300,15 @@ export default function App() {
       });
       setTunnelForm((current) => ({ ...initialTunnelForm, nodeId: current.nodeId }));
       setMessage("隧道已创建。");
-      await reloadAfterMutation();
-    } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "创建隧道失败");
+      await refreshDashboard(false);
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : "创建隧道失败");
     } finally {
       setBusyAction("");
     }
   }
 
   async function updateTunnelStatus(tunnel: TunnelSpec, status: "active" | "paused") {
-    if (!adminToken) {
-      setError("请先输入管理令牌");
-      return;
-    }
     const actionKey = tunnel.id + ":" + status;
     setBusyAction(actionKey);
     setError("");
@@ -304,7 +316,6 @@ export default function App() {
     try {
       await requestJSON<TunnelSpec>("/api/tunnels/" + tunnel.id, {
         method: "PUT",
-        token: adminToken,
         body: JSON.stringify({
           nodeId: tunnel.nodeId,
           name: tunnel.name,
@@ -317,7 +328,7 @@ export default function App() {
         }),
       });
       setMessage(status === "active" ? "隧道已启用。" : "隧道已暂停。");
-      await reloadAfterMutation();
+      await refreshDashboard(false);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "更新隧道失败");
     } finally {
@@ -326,21 +337,14 @@ export default function App() {
   }
 
   async function deleteTunnel(tunnel: TunnelSpec) {
-    if (!adminToken) {
-      setError("请先输入管理令牌");
-      return;
-    }
     const actionKey = tunnel.id + ":delete";
     setBusyAction(actionKey);
     setError("");
     setMessage("");
     try {
-      await requestJSON<{ status: string; id: string }>("/api/tunnels/" + tunnel.id, {
-        method: "DELETE",
-        token: adminToken,
-      });
+      await requestJSON<{ status: string }>("/api/tunnels/" + tunnel.id, { method: "DELETE" });
       setMessage("隧道已删除。");
-      await reloadAfterMutation();
+      await refreshDashboard(false);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "删除隧道失败");
     } finally {
@@ -348,13 +352,77 @@ export default function App() {
     }
   }
 
+  async function createUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusyAction("create-user");
+    setError("");
+    setMessage("");
+    try {
+      await requestJSON<UserSummary>("/api/users", {
+        method: "POST",
+        body: JSON.stringify(userForm),
+      });
+      setUserForm({ email: "", displayName: "", password: "", role: "manager" });
+      setMessage("用户已创建。");
+      await refreshDashboard(false);
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : "创建用户失败");
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  if (bootstrapRequired === null) {
+    return <div className="shell"><div className="panel">正在检查管理面初始化状态...</div></div>;
+  }
+
+  if (bootstrapRequired) {
+    return (
+      <div className="shell auth-shell">
+        <section className="panel auth-panel">
+          <p className="eyebrow">初始化</p>
+          <h1>创建首个管理员账户</h1>
+          {error ? <div className="error">{error}</div> : null}
+          <form className="tunnel-form" onSubmit={submitBootstrap}>
+            <label><span>邮箱</span><input value={bootstrapForm.email} onChange={(event) => setBootstrapForm((current) => ({ ...current, email: event.target.value }))} required /></label>
+            <label><span>显示名称</span><input value={bootstrapForm.displayName} onChange={(event) => setBootstrapForm((current) => ({ ...current, displayName: event.target.value }))} required /></label>
+            <label><span>密码</span><input type="password" value={bootstrapForm.password} onChange={(event) => setBootstrapForm((current) => ({ ...current, password: event.target.value }))} required /></label>
+            <button type="submit" disabled={busyAction === "bootstrap"}>{busyAction === "bootstrap" ? "初始化中..." : "创建管理员"}</button>
+          </form>
+        </section>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <div className="shell auth-shell">
+        <section className="panel auth-panel">
+          <p className="eyebrow">登录</p>
+          <h1>管理面登录</h1>
+          {error ? <div className="error">{error}</div> : null}
+          <form className="tunnel-form" onSubmit={submitLogin}>
+            <label><span>邮箱</span><input value={loginForm.email} onChange={(event) => setLoginForm((current) => ({ ...current, email: event.target.value }))} required /></label>
+            <label><span>密码</span><input type="password" value={loginForm.password} onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))} required /></label>
+            <button type="submit" disabled={busyAction === "login"}>{busyAction === "login" ? "登录中..." : "登录"}</button>
+          </form>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="shell">
       <header className="hero">
         <div>
           <p className="eyebrow">云中继平台</p>
-          <h1>管理面最小可用闭环</h1>
-          <p className="summary">统一查看节点、隧道、服务指标和反向 TCP 待命池状态，并通过管理令牌保护云端接口。</p>
+          <h1>管理中心</h1>
+          <p className="summary">已通过会话登录保护管理面，支持管理员、管理用户、普通用户三级权限。</p>
+          <p className="inline-note">当前登录：{currentUser.displayName} / {currentUser.role}</p>
+        </div>
+        <div className="hero-actions">
+          <button className="secondary" type="button" onClick={() => void refreshDashboard(true)} disabled={busyAction === "refresh"}>刷新</button>
+          <button type="button" onClick={() => void logout()} disabled={busyAction === "logout"}>{busyAction === "logout" ? "退出中..." : "退出登录"}</button>
         </div>
         {metrics ? (
           <div className="metrics-grid">
@@ -370,270 +438,116 @@ export default function App() {
       {error ? <div className="error">{error}</div> : null}
       {message ? <div className="notice">{message}</div> : null}
 
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">管理认证</p>
-            <h2>管理员令牌</h2>
-          </div>
-        </div>
-        <form className="tunnel-form" onSubmit={submitAdminToken}>
-          <label>
-            <span>Bearer Token</span>
-            <input
-              type="password"
-              value={tokenInput}
-              onChange={(event) => setTokenInput(event.target.value)}
-              placeholder="输入 SERVER_API_ADMIN_TOKEN"
-              required
-            />
-          </label>
-          <button type="submit" disabled={tokenInput.trim() === ""}>
-            保存令牌
-          </button>
-          <button type="button" className="secondary" disabled={adminToken === "" || busyAction === "refresh"} onClick={() => void refreshDashboard(true)}>
-            {busyAction === "refresh" ? "刷新中..." : "立即刷新"}
-          </button>
-          <button type="button" className="secondary" disabled={adminToken === ""} onClick={clearAdminToken}>
-            清除令牌
-          </button>
-        </form>
-        <p className="inline-note">当前状态：{adminToken === "" ? "未认证" : "已认证"}</p>
-      </section>
+      {currentUser.role !== "user" ? (
+        <section className="panel">
+          <div className="panel-header"><div><p className="eyebrow">创建隧道</p><h2>暴露节点本地服务</h2></div></div>
+          <form className="tunnel-form" onSubmit={createTunnel}>
+            <label>
+              <span>节点</span>
+              <select value={tunnelForm.nodeId} onChange={(event) => { setTunnelForm((current) => ({ ...current, nodeId: event.target.value })); setHasInitializedNodeId(true); }} required>
+                <option value="">选择节点</option>
+                {nodes.map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
+              </select>
+            </label>
+            <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
+            <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required /></label>
+            <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required /></label>
+            <label><span>公网端口</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
+            <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
+          </form>
+        </section>
+      ) : null}
 
       <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">创建隧道</p>
-            <h2>暴露节点本地服务</h2>
-          </div>
-        </div>
-        <form className="tunnel-form" onSubmit={submitTunnel}>
-          <label>
-            <span>节点</span>
-            <select
-              value={tunnelForm.nodeId}
-              onChange={(event) => {
-                setTunnelForm((current) => ({ ...current, nodeId: event.target.value }));
-                setHasInitializedNodeId(true);
-              }}
-              required
-            >
-              <option value="">选择节点</option>
-              {nodes.map((node) => (
-                <option key={node.nodeId} value={node.nodeId}>
-                  {node.nodeName} ({node.nodeId})
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>名称</span>
-            <input
-              value={tunnelForm.name}
-              onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))}
-              placeholder="windows-16354"
-              required
-            />
-          </label>
-          <label>
-            <span>目标主机</span>
-            <input
-              value={tunnelForm.targetHost}
-              onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))}
-              required
-            />
-          </label>
-          <label>
-            <span>目标端口</span>
-            <input
-              value={tunnelForm.targetPort}
-              onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))}
-              inputMode="numeric"
-              required
-            />
-          </label>
-          <label>
-            <span>公网端口</span>
-            <input
-              value={tunnelForm.publicPort}
-              onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))}
-              inputMode="numeric"
-              required
-            />
-          </label>
-          <button type="submit" disabled={busyAction === "create-tunnel" || adminToken === ""}>
-            {busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}
-          </button>
-        </form>
-      </section>
-
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">中继状态</p>
-            <h2>待命池摘要</h2>
-          </div>
-        </div>
+        <div className="panel-header"><div><p className="eyebrow">中继状态</p><h2>待命池摘要</h2></div></div>
         <div className="table-wrap">
           <table>
-            <thead>
-              <tr>
-                <th>池键</th>
-                <th>节点</th>
-                <th>公网端口</th>
-                <th>待命数</th>
-                <th>目标值</th>
-                <th>上限</th>
-              </tr>
-            </thead>
+            <thead><tr><th>池键</th><th>节点</th><th>公网端口</th><th>待命数</th><th>目标值</th><th>上限</th></tr></thead>
             <tbody>
-              {relayRuntime?.pools?.length ? (
-                relayRuntime.pools.map((pool) => (
-                  <tr key={pool.poolKey}>
-                    <td>{pool.poolKey}</td>
-                    <td>{pool.nodeId}</td>
-                    <td>{pool.publicPort}</td>
-                    <td>{pool.standbyCount}</td>
-                    <td>{pool.targetSize}</td>
-                    <td>{pool.maxSize}</td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={6}>{adminToken === "" ? "认证后显示实时待命池摘要。" : "暂无中继池状态。"}</td>
-                </tr>
-              )}
+              {relayRuntime?.pools?.length ? relayRuntime.pools.map((pool) => (
+                <tr key={pool.poolKey}><td>{pool.poolKey}</td><td>{pool.nodeId}</td><td>{pool.publicPort}</td><td>{pool.standbyCount}</td><td>{pool.targetSize}</td><td>{pool.maxSize}</td></tr>
+              )) : <tr><td colSpan={6}>暂无中继池状态。</td></tr>}
             </tbody>
           </table>
         </div>
       </section>
 
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">隧道</p>
-            <h2>当前隧道列表</h2>
-          </div>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>名称</th>
-                <th>节点</th>
-                <th>状态</th>
-                <th>公网</th>
-                <th>目标</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tunnels.length === 0 ? (
-                <tr>
-                  <td colSpan={6}>{adminToken === "" ? "认证后显示隧道列表。" : "暂无隧道。"}</td>
-                </tr>
-              ) : (
-                tunnels.map((tunnel) => (
+      {currentUser.role !== "user" ? (
+        <section className="panel">
+          <div className="panel-header"><div><p className="eyebrow">隧道</p><h2>当前隧道列表</h2></div></div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>名称</th><th>节点</th><th>状态</th><th>公网</th><th>目标</th><th>操作</th></tr></thead>
+              <tbody>
+                {tunnels.length === 0 ? <tr><td colSpan={6}>暂无隧道。</td></tr> : tunnels.map((tunnel) => (
                   <tr key={tunnel.id}>
-                    <td>
-                      <strong>{tunnel.name}</strong>
-                      <div className="muted">{tunnel.id}</div>
-                    </td>
+                    <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
                     <td>{tunnel.nodeId}</td>
                     <td>{tunnel.status}</td>
                     <td>{tunnel.publicPort}</td>
-                    <td>
-                      {tunnel.targetHost}:{tunnel.targetPort}
-                    </td>
-                    <td>
-                      <div className="actions-row">
-                        <button
-                          type="button"
-                          disabled={busyAction === tunnel.id + ":active" || tunnel.status === "active" || adminToken === ""}
-                          onClick={() => void updateTunnelStatus(tunnel, "active")}
-                        >
-                          启用
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busyAction === tunnel.id + ":paused" || tunnel.status === "paused" || adminToken === ""}
-                          onClick={() => void updateTunnelStatus(tunnel, "paused")}
-                        >
-                          暂停
-                        </button>
-                        <button
-                          type="button"
-                          className="danger"
-                          disabled={busyAction === tunnel.id + ":delete" || adminToken === ""}
-                          onClick={() => void deleteTunnel(tunnel)}
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </td>
+                    <td>{tunnel.targetHost}:{tunnel.targetPort}</td>
+                    <td><div className="actions-row">
+                      <button type="button" disabled={busyAction === tunnel.id + ":active" || tunnel.status === "active"} onClick={() => void updateTunnelStatus(tunnel, "active")}>启用</button>
+                      <button type="button" disabled={busyAction === tunnel.id + ":paused" || tunnel.status === "paused"} onClick={() => void updateTunnelStatus(tunnel, "paused")}>暂停</button>
+                      <button type="button" className="danger" disabled={busyAction === tunnel.id + ":delete"} onClick={() => void deleteTunnel(tunnel)}>删除</button>
+                    </div></td>
                   </tr>
-                ))
-              )}
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      <section className="panel">
+        <div className="panel-header"><div><p className="eyebrow">节点</p><h2>节点在线状态</h2></div></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>节点</th><th>状态</th><th>Agent</th><th>隧道数</th><th>能力</th><th>最后心跳</th></tr></thead>
+            <tbody>
+              {nodes.length === 0 ? <tr><td colSpan={6}>暂无节点。</td></tr> : nodes.map((node) => (
+                <tr key={node.nodeId}>
+                  <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div></td>
+                  <td>{node.status}</td>
+                  <td>{node.agentVersion}</td>
+                  <td>{node.activeTunnels}</td>
+                  <td>{capabilitySummary(node.capabilities)}</td>
+                  <td>{new Date(node.lastSeenAt).toLocaleString()}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
       </section>
 
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">节点</p>
-            <h2>节点在线状态</h2>
+      {currentUser.role === "admin" ? (
+        <section className="panel">
+          <div className="panel-header"><div><p className="eyebrow">用户</p><h2>用户与角色</h2></div></div>
+          <form className="tunnel-form" onSubmit={createUser}>
+            <label><span>邮箱</span><input value={userForm.email} onChange={(event) => setUserForm((current) => ({ ...current, email: event.target.value }))} required /></label>
+            <label><span>显示名称</span><input value={userForm.displayName} onChange={(event) => setUserForm((current) => ({ ...current, displayName: event.target.value }))} required /></label>
+            <label><span>密码</span><input type="password" value={userForm.password} onChange={(event) => setUserForm((current) => ({ ...current, password: event.target.value }))} required /></label>
+            <label><span>角色</span><select value={userForm.role} onChange={(event) => setUserForm((current) => ({ ...current, role: event.target.value as UserRole }))}><option value="manager">管理用户</option><option value="user">普通用户</option><option value="admin">管理员</option></select></label>
+            <button type="submit" disabled={busyAction === "create-user"}>{busyAction === "create-user" ? "创建中..." : "创建用户"}</button>
+          </form>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>邮箱</th><th>显示名称</th><th>角色</th><th>创建时间</th></tr></thead>
+              <tbody>
+                {users.length === 0 ? <tr><td colSpan={4}>暂无用户。</td></tr> : users.map((user) => (
+                  <tr key={user.id}><td>{user.email}</td><td>{user.displayName}</td><td>{user.role}</td><td>{new Date(user.createdAt).toLocaleString()}</td></tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>节点</th>
-                <th>状态</th>
-                <th>Agent</th>
-                <th>隧道数</th>
-                <th>能力</th>
-                <th>最后心跳</th>
-              </tr>
-            </thead>
-            <tbody>
-              {nodes.length === 0 ? (
-                <tr>
-                  <td colSpan={6}>{adminToken === "" ? "认证后显示节点状态。" : "暂无节点。"}</td>
-                </tr>
-              ) : (
-                nodes.map((node) => (
-                  <tr key={node.nodeId}>
-                    <td>
-                      <strong>{node.nodeName}</strong>
-                      <div className="muted">{node.nodeId}</div>
-                    </td>
-                    <td>{node.status}</td>
-                    <td>{node.agentVersion}</td>
-                    <td>{node.activeTunnels}</td>
-                    <td>{capabilitySummary(node.capabilities)}</td>
-                    <td>{new Date(node.lastSeenAt).toLocaleString()}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+        </section>
+      ) : null}
     </div>
   );
 }
 
 function MetricCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
+  return <div className="metric-card"><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function capabilitySummary(capabilities: NodeCapabilities) {

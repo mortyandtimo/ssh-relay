@@ -97,6 +97,55 @@ type RelayRuntimeSummary struct {
 	Pools        []RelayPoolSummary `json:"pools"`
 }
 
+type UserRole string
+
+const (
+	UserRoleAdmin   UserRole = "admin"
+	UserRoleManager UserRole = "manager"
+	UserRoleUser    UserRole = "user"
+)
+
+type UserSummary struct {
+	ID          string    `json:"id"`
+	Email       string    `json:"email"`
+	DisplayName string    `json:"displayName"`
+	Role        UserRole  `json:"role"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+type AuthLoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type AuthUserResponse struct {
+	User UserSummary `json:"user"`
+}
+
+type AuthBootstrapStatusResponse struct {
+	Required bool `json:"required"`
+}
+
+type CreateUserRequest struct {
+	Email       string   `json:"email"`
+	DisplayName string   `json:"displayName"`
+	Password    string   `json:"password,omitempty"`
+	Role        UserRole `json:"role"`
+}
+
+type UpdateUserRequest struct {
+	DisplayName string   `json:"displayName,omitempty"`
+	Password    string   `json:"password,omitempty"`
+	Role        UserRole `json:"role,omitempty"`
+}
+
+type BootstrapAdminRequest struct {
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Password    string `json:"password"`
+}
+
 type HealthResponse struct {
 	Status     string            `json:"status"`
 	Service    string            `json:"service"`

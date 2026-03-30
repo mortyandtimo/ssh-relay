@@ -4,16 +4,21 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/25743/cloud-relay-platform/packages/protocol/types"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type InMemoryStore struct {
-	mu      sync.RWMutex
-	nodes   map[string]nodeRecord
-	tunnels map[string]types.TunnelSpec
+	mu       sync.RWMutex
+	nodes    map[string]nodeRecord
+	tunnels  map[string]types.TunnelSpec
+	users    map[string]UserRecord
+	userByEM map[string]string
+	sessions map[string]WebSession
 }
 
 type nodeRecord struct {
@@ -23,8 +28,11 @@ type nodeRecord struct {
 
 func NewInMemoryStore() *InMemoryStore {
 	return &InMemoryStore{
-		nodes:   make(map[string]nodeRecord),
-		tunnels: make(map[string]types.TunnelSpec),
+		nodes:    make(map[string]nodeRecord),
+		tunnels:  make(map[string]types.TunnelSpec),
+		users:    make(map[string]UserRecord),
+		userByEM: make(map[string]string),
+		sessions: make(map[string]WebSession),
 	}
 }
 
@@ -198,6 +206,204 @@ func (s *InMemoryStore) Counts(_ context.Context) (Counts, error) {
 	}, nil
 }
 
+func (s *InMemoryStore) BootstrapStatus(_ context.Context) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.users) == 0, nil
+}
+
+func (s *InMemoryStore) BootstrapAdmin(ctx context.Context, params CreateUserParams) (types.UserSummary, error) {
+	required, err := s.BootstrapStatus(ctx)
+	if err != nil {
+		return types.UserSummary{}, err
+	}
+	if !required {
+		return types.UserSummary{}, ErrConflict
+	}
+	params.Role = types.UserRoleAdmin
+	return s.CreateUser(ctx, params)
+}
+
+func (s *InMemoryStore) AuthenticateUser(_ context.Context, params AuthenticateUserParams) (types.UserSummary, error) {
+	email := normalizeEmail(params.Email)
+	s.mu.RLock()
+	userID, ok := s.userByEM[email]
+	if !ok {
+		s.mu.RUnlock()
+		return types.UserSummary{}, ErrUnauthorized
+	}
+	record := s.users[userID]
+	s.mu.RUnlock()
+	if bcrypt.CompareHashAndPassword([]byte(record.PasswordHash), []byte(params.Password)) != nil {
+		return types.UserSummary{}, ErrUnauthorized
+	}
+	return record.Summary, nil
+}
+
+func (s *InMemoryStore) ListUsers(_ context.Context) ([]types.UserSummary, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]types.UserSummary, 0, len(s.users))
+	for _, record := range s.users {
+		items = append(items, record.Summary)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Email < items[j].Email })
+	return items, nil
+}
+
+func (s *InMemoryStore) GetUser(_ context.Context, id string) (types.UserSummary, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, ok := s.users[id]
+	if !ok {
+		return types.UserSummary{}, ErrNotFound
+	}
+	return record.Summary, nil
+}
+
+func (s *InMemoryStore) CreateUser(_ context.Context, params CreateUserParams) (types.UserSummary, error) {
+	role := normalizeUserRole(params.Role)
+	email := normalizeEmail(params.Email)
+	if email == "" || strings.TrimSpace(params.DisplayName) == "" || params.Password == "" {
+		return types.UserSummary{}, ErrConflict
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return types.UserSummary{}, err
+	}
+	now := time.Now().UTC()
+	id := fmt.Sprintf("user-%d", now.UnixNano())
+	summary := types.UserSummary{ID: id, Email: email, DisplayName: strings.TrimSpace(params.DisplayName), Role: role, CreatedAt: now, UpdatedAt: now}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.userByEM[email]; exists {
+		return types.UserSummary{}, ErrConflict
+	}
+	s.users[id] = UserRecord{Summary: summary, PasswordHash: string(hash)}
+	s.userByEM[email] = id
+	return summary, nil
+}
+
+func (s *InMemoryStore) UpdateUser(_ context.Context, params UpdateUserParams) (types.UserSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.users[params.ID]
+	if !ok {
+		return types.UserSummary{}, ErrNotFound
+	}
+	if strings.TrimSpace(params.DisplayName) != "" {
+		record.Summary.DisplayName = strings.TrimSpace(params.DisplayName)
+	}
+	if params.Role != "" {
+		record.Summary.Role = normalizeUserRole(params.Role)
+	}
+	if params.Password != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
+		if err != nil {
+			return types.UserSummary{}, err
+		}
+		record.PasswordHash = string(hash)
+	}
+	record.Summary.UpdatedAt = time.Now().UTC()
+	s.users[params.ID] = record
+	return record.Summary, nil
+}
+
+func (s *InMemoryStore) DeleteUser(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.users[id]
+	if !ok {
+		return ErrNotFound
+	}
+	delete(s.userByEM, record.Summary.Email)
+	delete(s.users, id)
+	for sid, sess := range s.sessions {
+		if sess.UserID == id {
+			delete(s.sessions, sid)
+		}
+	}
+	return nil
+}
+
+func (s *InMemoryStore) CreateWebSession(_ context.Context, params CreateSessionParams) (WebSession, error) {
+	now := time.Now().UTC()
+	sessionID := params.SessionID
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("sess-%d", now.UnixNano())
+	}
+	session := WebSession{
+		SessionID:        sessionID,
+		UserID:           params.UserID,
+		RefreshTokenHash: params.RefreshTokenHash,
+		RefreshExpiresAt: params.RefreshExpiresAt,
+		LastRefreshedAt:  now,
+		LastSeenAt:       now,
+		RemoteAddr:       params.RemoteAddr,
+		UserAgent:        params.UserAgent,
+		CreatedAt:        now,
+	}
+	s.mu.Lock()
+	s.sessions[session.SessionID] = session
+	s.mu.Unlock()
+	return session, nil
+}
+
+func (s *InMemoryStore) GetWebSessionByID(_ context.Context, sessionID string) (WebSession, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	session, ok := s.sessions[sessionID]
+	if !ok {
+		return WebSession{}, ErrNotFound
+	}
+	if session.RevokedAt != nil {
+		return WebSession{}, ErrUnauthorized
+	}
+	return session, nil
+}
+
+func (s *InMemoryStore) RotateWebSession(_ context.Context, sessionID string, refreshTokenHash string, refreshExpiresAt time.Time, remoteAddr, userAgent string) (WebSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[sessionID]
+	if !ok {
+		return WebSession{}, ErrNotFound
+	}
+	if session.RevokedAt != nil {
+		return WebSession{}, ErrUnauthorized
+	}
+	now := time.Now().UTC()
+	session.RefreshTokenHash = refreshTokenHash
+	session.RefreshExpiresAt = refreshExpiresAt
+	session.LastRefreshedAt = now
+	session.LastSeenAt = now
+	session.RemoteAddr = remoteAddr
+	session.UserAgent = userAgent
+	s.sessions[sessionID] = session
+	return session, nil
+}
+
+func (s *InMemoryStore) DeleteWebSession(_ context.Context, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.sessions[sessionID]; !ok {
+		return ErrNotFound
+	}
+	delete(s.sessions, sessionID)
+	return nil
+}
+
+func (s *InMemoryStore) DeleteUserSessions(_ context.Context, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for sid, session := range s.sessions {
+		if session.UserID == userID {
+			delete(s.sessions, sid)
+		}
+	}
+	return nil
+}
+
 func (s *InMemoryStore) Close() error {
 	return nil
 }
@@ -245,4 +451,17 @@ func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {
 		tunnel.Metadata = map[string]string{}
 	}
 	return tunnel
+}
+
+func normalizeEmail(input string) string {
+	return strings.ToLower(strings.TrimSpace(input))
+}
+
+func normalizeUserRole(role types.UserRole) types.UserRole {
+	switch role {
+	case types.UserRoleAdmin, types.UserRoleManager, types.UserRoleUser:
+		return role
+	default:
+		return types.UserRoleUser
+	}
 }

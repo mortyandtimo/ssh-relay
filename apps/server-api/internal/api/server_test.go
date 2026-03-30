@@ -15,6 +15,7 @@ import (
 
 func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
 
 	registerBody, err := json.Marshal(types.NodeRegisterRequest{
 		NodeName:     "edge-a",
@@ -70,6 +71,7 @@ func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 	}
 
 	tunnelReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(tunnelBody))
+	applyCookies(tunnelReq, adminCookies)
 	tunnelRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(tunnelRes, tunnelReq)
 	if tunnelRes.Code != http.StatusCreated {
@@ -77,6 +79,7 @@ func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 	}
 
 	nodesReq := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
+	applyCookies(nodesReq, adminCookies)
 	nodesRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(nodesRes, nodesReq)
 	if nodesRes.Code != http.StatusOK {
@@ -137,6 +140,7 @@ func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 	}
 
 	metricsReq := httptest.NewRequest(http.MethodGet, "/api/server/metrics", nil)
+	applyCookies(metricsReq, adminCookies)
 	metricsRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(metricsRes, metricsReq)
 	if metricsRes.Code != http.StatusOK {
@@ -157,6 +161,7 @@ func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 
 func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
 
 	registerBody, err := json.Marshal(types.NodeRegisterRequest{
 		NodeName:     "edge-a",
@@ -191,6 +196,7 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 		t.Fatal(err)
 	}
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
 	createRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(createRes, createReq)
 	if createRes.Code != http.StatusCreated {
@@ -211,6 +217,7 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 		t.Fatal(err)
 	}
 	conflictReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(conflictBody))
+	applyCookies(conflictReq, adminCookies)
 	conflictRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(conflictRes, conflictReq)
 	if conflictRes.Code != http.StatusConflict {
@@ -230,6 +237,7 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 		t.Fatal(err)
 	}
 	updateReq := httptest.NewRequest(http.MethodPut, "/api/tunnels/tunnel-a", bytes.NewReader(updateBody))
+	applyCookies(updateReq, adminCookies)
 	updateRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(updateRes, updateReq)
 	if updateRes.Code != http.StatusOK {
@@ -237,6 +245,7 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/tunnel-a", nil)
+	applyCookies(getReq, adminCookies)
 	getRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(getRes, getReq)
 	if getRes.Code != http.StatusOK {
@@ -251,6 +260,7 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 	}
 
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/tunnels/tunnel-a", nil)
+	applyCookies(deleteReq, adminCookies)
 	deleteRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(deleteRes, deleteReq)
 	if deleteRes.Code != http.StatusOK {
@@ -258,6 +268,7 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 	}
 
 	missingReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/tunnel-a", nil)
+	applyCookies(missingReq, adminCookies)
 	missingRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(missingRes, missingReq)
 	if missingRes.Code != http.StatusNotFound {
@@ -265,7 +276,7 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 	}
 }
 
-func TestAdminBearerTokenProtectsManagementEndpoints(t *testing.T) {
+func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 	runtimeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(types.RelayRuntimeSummary{
 			Service:      "relay-tcp",
@@ -285,9 +296,43 @@ func TestAdminBearerTokenProtectsManagementEndpoints(t *testing.T) {
 
 	backend := store.NewInMemoryStore()
 	server := NewServer("test", backend, runtimeUpstream.URL)
-	server.SetAdminToken("secret-token")
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/auth/bootstrap-status", nil)
+	statusRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(statusRes, statusReq)
+	if statusRes.Code != http.StatusOK {
+		t.Fatalf("expected bootstrap status 200, got %d", statusRes.Code)
+	}
+
+	bootstrapBody, err := json.Marshal(types.BootstrapAdminRequest{
+		Email:       "admin@example.com",
+		DisplayName: "管理员",
+		Password:    "AdminPass#2026",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapReq := httptest.NewRequest(http.MethodPost, "/api/auth/bootstrap", bytes.NewReader(bootstrapBody))
+	bootstrapRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(bootstrapRes, bootstrapReq)
+	if bootstrapRes.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap 201, got %d", bootstrapRes.Code)
+	}
+	adminCookies := bootstrapRes.Result().Cookies()
+	if len(adminCookies) < 3 {
+		t.Fatalf("expected auth cookies after bootstrap, got %d", len(adminCookies))
+	}
 
 	registerOut := registerNodeThroughAgent(t, server, "edge-secure")
+	if _, err := backend.CreateUser(context.Background(), store.CreateUserParams{Email: "manager@example.com", DisplayName: "管理用户", Password: "ManagerPass#2026", Role: types.UserRoleManager}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.CreateUser(context.Background(), store.CreateUserParams{Email: "user@example.com", DisplayName: "普通用户", Password: "UserPass#2026", Role: types.UserRoleUser}); err != nil {
+		t.Fatal(err)
+	}
+
+	managerCookies := loginAndCollectCookies(t, server, "manager@example.com", "ManagerPass#2026")
+	userCookies := loginAndCollectCookies(t, server, "user@example.com", "UserPass#2026")
 
 	unauthorizedReq := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
 	unauthorizedRes := httptest.NewRecorder()
@@ -296,15 +341,7 @@ func TestAdminBearerTokenProtectsManagementEndpoints(t *testing.T) {
 		t.Fatalf("expected unauthorized nodes status 401, got %d", unauthorizedRes.Code)
 	}
 
-	invalidReq := httptest.NewRequest(http.MethodGet, "/api/tunnels", nil)
-	invalidReq.Header.Set("Authorization", "Bearer wrong-token")
-	invalidRes := httptest.NewRecorder()
-	server.Handler().ServeHTTP(invalidRes, invalidReq)
-	if invalidRes.Code != http.StatusUnauthorized {
-		t.Fatalf("expected invalid token status 401, got %d", invalidRes.Code)
-	}
-
-	createBody, err := json.Marshal(map[string]any{
+	managerCreateTunnelBody, err := json.Marshal(map[string]any{
 		"id":         "tunnel-auth",
 		"nodeId":     registerOut.NodeID,
 		"name":       "secure-svc",
@@ -317,69 +354,96 @@ func TestAdminBearerTokenProtectsManagementEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
-	withBearer(createReq, "secret-token")
-	createRes := httptest.NewRecorder()
-	server.Handler().ServeHTTP(createRes, createReq)
-	if createRes.Code != http.StatusCreated {
-		t.Fatalf("expected authorized create status 201, got %d", createRes.Code)
+	managerCreateReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(managerCreateTunnelBody))
+	applyCookies(managerCreateReq, managerCookies)
+	managerCreateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(managerCreateRes, managerCreateReq)
+	if managerCreateRes.Code != http.StatusCreated {
+		t.Fatalf("expected manager create tunnel 201, got %d", managerCreateRes.Code)
 	}
 
-	nodesReq := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
-	withBearer(nodesReq, "secret-token")
-	nodesRes := httptest.NewRecorder()
-	server.Handler().ServeHTTP(nodesRes, nodesReq)
-	if nodesRes.Code != http.StatusOK {
-		t.Fatalf("expected authorized nodes status 200, got %d", nodesRes.Code)
+	managerNodesReq := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
+	applyCookies(managerNodesReq, managerCookies)
+	managerNodesRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(managerNodesRes, managerNodesReq)
+	if managerNodesRes.Code != http.StatusOK {
+		t.Fatalf("expected manager nodes status 200, got %d", managerNodesRes.Code)
 	}
 
-	metricsReq := httptest.NewRequest(http.MethodGet, "/api/server/metrics", nil)
-	withBearer(metricsReq, "secret-token")
-	metricsRes := httptest.NewRecorder()
-	server.Handler().ServeHTTP(metricsRes, metricsReq)
-	if metricsRes.Code != http.StatusOK {
-		t.Fatalf("expected authorized metrics status 200, got %d", metricsRes.Code)
-	}
-
-	runtimeReq := httptest.NewRequest(http.MethodGet, "/api/relay/tcp/runtime", nil)
-	withBearer(runtimeReq, "secret-token")
-	runtimeRes := httptest.NewRecorder()
-	server.Handler().ServeHTTP(runtimeRes, runtimeReq)
-	if runtimeRes.Code != http.StatusOK {
-		t.Fatalf("expected authorized runtime status 200, got %d", runtimeRes.Code)
+	managerRuntimeReq := httptest.NewRequest(http.MethodGet, "/api/relay/tcp/runtime", nil)
+	applyCookies(managerRuntimeReq, managerCookies)
+	managerRuntimeRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(managerRuntimeRes, managerRuntimeReq)
+	if managerRuntimeRes.Code != http.StatusOK {
+		t.Fatalf("expected manager runtime status 200, got %d", managerRuntimeRes.Code)
 	}
 	var runtimeOut types.RelayRuntimeSummary
-	if err := json.NewDecoder(runtimeRes.Body).Decode(&runtimeOut); err != nil {
+	if err := json.NewDecoder(managerRuntimeRes.Body).Decode(&runtimeOut); err != nil {
 		t.Fatal(err)
 	}
 	if runtimeOut.TotalStandby != 3 {
 		t.Fatalf("expected runtime total standby 3, got %d", runtimeOut.TotalStandby)
 	}
-	if len(runtimeOut.Pools) != 1 || runtimeOut.Pools[0].StandbyCount != 3 {
-		t.Fatalf("expected runtime pool standby count 3, got %+v", runtimeOut.Pools)
+
+	userNodesReq := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
+	applyCookies(userNodesReq, userCookies)
+	userNodesRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(userNodesRes, userNodesReq)
+	if userNodesRes.Code != http.StatusForbidden {
+		t.Fatalf("expected basic user nodes status 403, got %d", userNodesRes.Code)
 	}
 
-	getTunnelReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/tunnel-auth", nil)
-	withBearer(getTunnelReq, "secret-token")
-	getTunnelRes := httptest.NewRecorder()
-	server.Handler().ServeHTTP(getTunnelRes, getTunnelReq)
-	if getTunnelRes.Code != http.StatusOK {
-		t.Fatalf("expected authorized tunnel get status 200, got %d", getTunnelRes.Code)
+	adminUsersReq := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	applyCookies(adminUsersReq, adminCookies)
+	adminUsersRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(adminUsersRes, adminUsersReq)
+	if adminUsersRes.Code != http.StatusOK {
+		t.Fatalf("expected admin users status 200, got %d", adminUsersRes.Code)
+	}
+
+	managerUsersReq := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	applyCookies(managerUsersReq, managerCookies)
+	managerUsersRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(managerUsersRes, managerUsersReq)
+	if managerUsersRes.Code != http.StatusForbidden {
+		t.Fatalf("expected manager users status 403, got %d", managerUsersRes.Code)
+	}
+
+	meReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	applyCookies(meReq, userCookies)
+	meRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(meRes, meReq)
+	if meRes.Code != http.StatusOK {
+		t.Fatalf("expected me status 200, got %d", meRes.Code)
+	}
+
+	refreshReq := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", nil)
+	applyCookies(refreshReq, managerCookies)
+	refreshRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(refreshRes, refreshReq)
+	if refreshRes.Code != http.StatusOK {
+		t.Fatalf("expected refresh status 200, got %d", refreshRes.Code)
+	}
+	if len(refreshRes.Result().Cookies()) == 0 {
+		t.Fatal("expected refreshed cookies")
+	}
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	applyCookies(logoutReq, managerCookies)
+	logoutRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(logoutRes, logoutReq)
+	if logoutRes.Code != http.StatusOK {
+		t.Fatalf("expected logout status 200, got %d", logoutRes.Code)
 	}
 }
 
-func TestAgentEndpointsRemainAccessibleWhenAdminTokenEnabled(t *testing.T) {
+func TestAgentEndpointsRemainAccessibleWithSessionAuthEnabled(t *testing.T) {
 	backend := store.NewInMemoryStore()
 	server := NewServer("test", backend, "")
-	server.SetAdminToken("secret-token")
 
 	registerOut := registerNodeThroughAgent(t, server, "edge-open-agent")
 
-	heartbeatBody, err := json.Marshal(types.NodeHeartbeatRequest{
-		NodeID:        registerOut.NodeID,
-		ObservedAt:    time.Now().UTC(),
-		ActiveTunnels: 1,
-	})
+	heartbeatBody, err := json.Marshal(types.NodeHeartbeatRequest{NodeID: registerOut.NodeID, ObservedAt: time.Now().UTC(), ActiveTunnels: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,17 +454,7 @@ func TestAgentEndpointsRemainAccessibleWhenAdminTokenEnabled(t *testing.T) {
 		t.Fatalf("expected heartbeat status 200, got %d", heartbeatRes.Code)
 	}
 
-	if _, err := backend.CreateTunnel(context.Background(), types.TunnelSpec{
-		ID:         "tunnel-agent",
-		NodeID:     registerOut.NodeID,
-		Name:       "agent-visible",
-		Type:       "tcp",
-		Status:     "active",
-		PublicPort: 10086,
-		TargetHost: "127.0.0.1",
-		TargetPort: 16354,
-		Metadata:   map[string]string{"nodeId": registerOut.NodeID},
-	}); err != nil {
+	if _, err := backend.CreateTunnel(context.Background(), types.TunnelSpec{ID: "tunnel-agent", NodeID: registerOut.NodeID, Name: "agent-visible", Type: "tcp", Status: "active", PublicPort: 10086, TargetHost: "127.0.0.1", TargetPort: 16354, Metadata: map[string]string{"nodeId": registerOut.NodeID}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -416,6 +470,27 @@ func TestAgentEndpointsRemainAccessibleWhenAdminTokenEnabled(t *testing.T) {
 	server.Handler().ServeHTTP(internalRoutesRes, internalRoutesReq)
 	if internalRoutesRes.Code != http.StatusOK {
 		t.Fatalf("expected internal routes status 200, got %d", internalRoutesRes.Code)
+	}
+}
+
+func loginAndCollectCookies(t *testing.T, server *Server, email, password string) []*http.Cookie {
+	t.Helper()
+	body, err := json.Marshal(types.AuthLoginRequest{Email: email, Password: password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected login 200 for %s, got %d", email, res.Code)
+	}
+	return res.Result().Cookies()
+}
+
+func applyCookies(req *http.Request, cookies []*http.Cookie) {
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
 	}
 }
 
@@ -442,6 +517,17 @@ func registerNodeThroughAgent(t *testing.T, server *Server, nodeName string) typ
 	return out
 }
 
-func withBearer(req *http.Request, token string) {
-	req.Header.Set("Authorization", "Bearer "+token)
+func bootstrapAdminAndCollectCookies(t *testing.T, server *Server) []*http.Cookie {
+	t.Helper()
+	body, err := json.Marshal(types.BootstrapAdminRequest{Email: "admin-bootstrap@example.com", DisplayName: "管理员", Password: "AdminPass#2026"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/bootstrap", bytes.NewReader(body))
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap status 201, got %d", res.Code)
+	}
+	return res.Result().Cookies()
 }

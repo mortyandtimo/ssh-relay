@@ -1,11 +1,17 @@
 package api
 
 import (
-	"crypto/subtle"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,24 +19,49 @@ import (
 	"github.com/25743/cloud-relay-platform/packages/protocol/types"
 )
 
+const (
+	accessCookieName  = "crp_access"
+	refreshCookieName = "crp_refresh"
+	sessionCookieName = "crp_session"
+)
+
+type contextKey string
+
+const authUserContextKey contextKey = "auth-user"
+
+type authClaims struct {
+	UserID string
+	Role   types.UserRole
+	Expiry time.Time
+}
+
 type Server struct {
-	version            string
-	startedAt          time.Time
-	store              store.Store
-	relayTCPRuntimeURL string
-	adminToken         string
-	httpClient         *http.Client
-	mux                *http.ServeMux
+	version              string
+	startedAt            time.Time
+	store                store.Store
+	relayTCPRuntimeURL   string
+	httpClient           *http.Client
+	mux                  *http.ServeMux
+	accessSecret         string
+	adminWebDir          string
+	accessTokenTTL       time.Duration
+	refreshTokenTTL      time.Duration
+	adminBootstrapSecret string
 }
 
 func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *Server {
 	s := &Server{
-		version:            version,
-		startedAt:          time.Now().UTC(),
-		store:              backend,
-		relayTCPRuntimeURL: relayTCPRuntimeURL,
-		httpClient:         &http.Client{Timeout: 5 * time.Second},
-		mux:                http.NewServeMux(),
+		version:              version,
+		startedAt:            time.Now().UTC(),
+		store:                backend,
+		relayTCPRuntimeURL:   relayTCPRuntimeURL,
+		httpClient:           &http.Client{Timeout: 5 * time.Second},
+		mux:                  http.NewServeMux(),
+		accessSecret:         envOrDefault("SERVER_API_ACCESS_SECRET", "cloud-relay-access-secret-dev"),
+		adminWebDir:          envOrDefault("SERVER_API_ADMIN_WEB_DIR", "/opt/cloud-relay-platform/admin-web"),
+		accessTokenTTL:       15 * time.Minute,
+		refreshTokenTTL:      7 * 24 * time.Hour,
+		adminBootstrapSecret: strings.TrimSpace(os.Getenv("SERVER_API_ADMIN_BOOTSTRAP_SECRET")),
 	}
 	s.routes()
 	return s
@@ -38,10 +69,6 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 
 func (s *Server) Handler() http.Handler {
 	return withCORS(s.mux)
-}
-
-func (s *Server) SetAdminToken(token string) {
-	s.adminToken = strings.TrimSpace(token)
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -53,38 +80,25 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/agent/register", s.handleRegister)
 	s.mux.HandleFunc("/agent/heartbeat", s.handleHeartbeat)
 	s.mux.HandleFunc("/agent/tunnels", s.handleAgentTunnels)
-	s.mux.Handle("/api/nodes", s.requireAdmin(http.HandlerFunc(s.handleNodes)))
-	s.mux.Handle("/api/tunnels", s.requireAdmin(http.HandlerFunc(s.handleTunnels)))
-	s.mux.Handle("/api/tunnels/", s.requireAdmin(http.HandlerFunc(s.handleTunnelByID)))
-	s.mux.Handle("/api/server/metrics", s.requireAdmin(http.HandlerFunc(s.handleServerMetrics)))
-	s.mux.Handle("/api/relay/tcp/runtime", s.requireAdmin(http.HandlerFunc(s.handleRelayTCPRuntime)))
 	s.mux.HandleFunc("/internal/routes/tcp", s.handleTCPRoutes)
-}
 
-func (s *Server) requireAdmin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := s.authorizeRequest(r); err != nil {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="cloud-relay-admin"`)
-			writeError(w, http.StatusUnauthorized, err.Error())
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
+	s.mux.HandleFunc("/api/auth/bootstrap-status", s.handleBootstrapStatus)
+	s.mux.HandleFunc("/api/auth/bootstrap", s.handleBootstrap)
+	s.mux.HandleFunc("/api/auth/login", s.handleLogin)
+	s.mux.HandleFunc("/api/auth/refresh", s.handleRefresh)
+	s.mux.HandleFunc("/api/auth/logout", s.handleLogout)
+	s.mux.Handle("/api/auth/me", s.requireRole(types.UserRoleUser, http.HandlerFunc(s.handleAuthMe)))
 
-func (s *Server) authorizeRequest(r *http.Request) error {
-	if s.adminToken == "" {
-		return nil
-	}
-	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
-	parts := strings.Fields(authHeader)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return errors.New("missing or invalid bearer token")
-	}
-	if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(s.adminToken)) != 1 {
-		return errors.New("missing or invalid bearer token")
-	}
-	return nil
+	s.mux.Handle("/api/users", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleUsers)))
+	s.mux.Handle("/api/users/", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleUserByID)))
+	s.mux.Handle("/api/nodes", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodes)))
+	s.mux.Handle("/api/tunnels", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnels)))
+	s.mux.Handle("/api/tunnels/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelByID)))
+	s.mux.Handle("/api/server/metrics", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleServerMetrics)))
+	s.mux.Handle("/api/relay/tcp/runtime", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleRelayTCPRuntime)))
+
+	s.mux.Handle("/admin/", s.adminSPAHandler())
+	s.mux.Handle("/admin", s.adminSPAHandler())
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -120,11 +134,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, types.NodeRegisterResponse{
-		NodeID:            summary.NodeID,
-		RegisteredAt:      summary.LastSeenAt,
-		RecommendedPeriod: 30,
-	})
+	writeJSON(w, http.StatusOK, types.NodeRegisterResponse{NodeID: summary.NodeID, RegisteredAt: summary.LastSeenAt, RecommendedPeriod: 30})
 }
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +142,6 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w, http.MethodPost)
 		return
 	}
-
 	var req types.NodeHeartbeatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid heartbeat payload")
@@ -142,7 +151,6 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "nodeId is required")
 		return
 	}
-
 	_, err := s.store.HeartbeatNode(r.Context(), req)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -152,10 +160,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":     "accepted",
-		"observedAt": time.Now().UTC(),
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "accepted", "observedAt": time.Now().UTC()})
 }
 
 func (s *Server) handleAgentTunnels(w http.ResponseWriter, r *http.Request) {
@@ -168,11 +173,7 @@ func (s *Server) handleAgentTunnels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "nodeId is required")
 		return
 	}
-	filter := store.TunnelFilter{
-		NodeID: nodeID,
-		Type:   r.URL.Query().Get("type"),
-		Status: r.URL.Query().Get("status"),
-	}
+	filter := store.TunnelFilter{NodeID: nodeID, Type: r.URL.Query().Get("type"), Status: r.URL.Query().Get("status")}
 	if filter.Type == "" {
 		filter.Type = "tcp"
 	}
@@ -185,6 +186,196 @@ func (s *Server) handleAgentTunnels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleBootstrapStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	required, err := s.store.BootstrapStatus(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, types.AuthBootstrapStatusResponse{Required: required})
+}
+
+func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	required, err := s.store.BootstrapStatus(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !required {
+		writeError(w, http.StatusConflict, "bootstrap already completed")
+		return
+	}
+	var req types.BootstrapAdminRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid bootstrap payload")
+		return
+	}
+	user, err := s.store.BootstrapAdmin(r.Context(), store.CreateUserParams{Email: req.Email, DisplayName: req.DisplayName, Password: req.Password, Role: types.UserRoleAdmin})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.issueAuthSession(w, r, user); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, types.AuthUserResponse{User: user})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var req types.AuthLoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid login payload")
+		return
+	}
+	user, err := s.store.AuthenticateUser(r.Context(), store.AuthenticateUserParams{Email: req.Email, Password: req.Password})
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid email or password")
+		return
+	}
+	if err := s.issueAuthSession(w, r, user); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, types.AuthUserResponse{User: user})
+}
+
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	session, refreshToken, err := s.requireRefreshSession(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if time.Now().UTC().After(session.RefreshExpiresAt) {
+		_ = s.store.DeleteWebSession(r.Context(), session.SessionID)
+		s.clearAuthCookies(w)
+		writeError(w, http.StatusUnauthorized, "refresh token expired")
+		return
+	}
+	if hashOpaqueToken(refreshToken) != session.RefreshTokenHash {
+		_ = s.store.DeleteWebSession(r.Context(), session.SessionID)
+		s.clearAuthCookies(w)
+		writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		return
+	}
+	user, err := s.store.GetUser(r.Context(), session.UserID)
+	if err != nil {
+		s.clearAuthCookies(w)
+		writeError(w, http.StatusUnauthorized, "session user not found")
+		return
+	}
+	if err := s.rotateAuthSession(w, r, session, user); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, types.AuthUserResponse{User: user})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if sessionCookie, err := r.Cookie(sessionCookieName); err == nil {
+		_ = s.store.DeleteWebSession(r.Context(), sessionCookie.Value)
+	}
+	s.clearAuthCookies(w)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "logged_out"})
+}
+
+func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	user, ok := authUserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	writeJSON(w, http.StatusOK, types.AuthUserResponse{User: user})
+}
+
+func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.store.ListUsers(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	case http.MethodPost:
+		var req types.CreateUserRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid user payload")
+			return
+		}
+		user, err := s.store.CreateUser(r.Context(), store.CreateUserParams{Email: req.Email, DisplayName: req.DisplayName, Password: req.Password, Role: req.Role})
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrConflict) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, user)
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+	}
+}
+
+func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/users/"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "user id is required")
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var req types.UpdateUserRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid user payload")
+			return
+		}
+		user, err := s.store.UpdateUser(r.Context(), store.UpdateUserParams{ID: id, DisplayName: req.DisplayName, Password: req.Password, Role: req.Role})
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, user)
+	case http.MethodDelete:
+		if err := s.store.DeleteUser(r.Context(), id); err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
+	default:
+		writeMethodNotAllowed(w, http.MethodPut+", "+http.MethodDelete)
+	}
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
@@ -244,8 +435,7 @@ func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/tunnels/")
-	id = strings.TrimSpace(id)
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/tunnels/"))
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "tunnel id is required")
 		return
@@ -296,8 +486,7 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, tunnel)
 	case http.MethodDelete:
-		err := s.store.DeleteTunnel(r.Context(), id)
-		if err != nil {
+		if err := s.store.DeleteTunnel(r.Context(), id); err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, store.ErrNotFound) {
 				status = http.StatusNotFound
@@ -321,14 +510,7 @@ func (s *Server) handleServerMetrics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, types.ServerMetrics{
-		Service:            "server-api",
-		StartedAt:          s.startedAt,
-		RegisteredNodes:    counts.RegisteredNodes,
-		OnlineNodes:        counts.OnlineNodes,
-		ConfiguredTunnels:  counts.ConfiguredTunnels,
-		ProtocolRelayCount: 3,
-	})
+	writeJSON(w, http.StatusOK, types.ServerMetrics{Service: "server-api", StartedAt: s.startedAt, RegisteredNodes: counts.RegisteredNodes, OnlineNodes: counts.OnlineNodes, ConfiguredTunnels: counts.ConfiguredTunnels, ProtocolRelayCount: 3})
 }
 
 func (s *Server) handleTCPRoutes(w http.ResponseWriter, r *http.Request) {
@@ -350,11 +532,7 @@ func (s *Server) handleRelayTCPRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.relayTCPRuntimeURL == "" {
-		writeJSON(w, http.StatusOK, types.RelayRuntimeSummary{
-			Service:    "relay-tcp",
-			ObservedAt: time.Now().UTC(),
-			Pools:      []types.RelayPoolSummary{},
-		})
+		writeJSON(w, http.StatusOK, types.RelayRuntimeSummary{Service: "relay-tcp", ObservedAt: time.Now().UTC(), Pools: []types.RelayPoolSummary{}})
 		return
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, s.relayTCPRuntimeURL, nil)
@@ -380,6 +558,218 @@ func (s *Server) handleRelayTCPRuntime(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
+func (s *Server) requireRole(minRole types.UserRole, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, err := s.authenticateRequest(r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, err.Error())
+			return
+		}
+		if !roleAllowed(user.Role, minRole) {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authUserContextKey, user)))
+	})
+}
+
+func (s *Server) authenticateRequest(r *http.Request) (types.UserSummary, error) {
+	claims, err := s.readAccessClaims(r)
+	if err != nil {
+		return types.UserSummary{}, err
+	}
+	user, err := s.store.GetUser(r.Context(), claims.UserID)
+	if err != nil {
+		return types.UserSummary{}, store.ErrUnauthorized
+	}
+	if user.Role != claims.Role {
+		return types.UserSummary{}, store.ErrUnauthorized
+	}
+	return user, nil
+}
+
+func (s *Server) issueAuthSession(w http.ResponseWriter, r *http.Request, user types.UserSummary) error {
+	sessionID, err := randomToken(24)
+	if err != nil {
+		return err
+	}
+	refreshToken, err := randomToken(32)
+	if err != nil {
+		return err
+	}
+	refreshExpiry := time.Now().UTC().Add(s.refreshTokenTTL)
+	_, err = s.store.CreateWebSession(r.Context(), store.CreateSessionParams{SessionID: sessionID, UserID: user.ID, RefreshTokenHash: hashOpaqueToken(refreshToken), RefreshExpiresAt: refreshExpiry, RemoteAddr: clientIP(r), UserAgent: r.UserAgent()})
+	if err != nil {
+		return err
+	}
+	return s.writeAuthCookies(w, sessionID, refreshToken, refreshExpiry, user)
+}
+
+func (s *Server) rotateAuthSession(w http.ResponseWriter, r *http.Request, session store.WebSession, user types.UserSummary) error {
+	refreshToken, err := randomToken(32)
+	if err != nil {
+		return err
+	}
+	refreshExpiry := time.Now().UTC().Add(s.refreshTokenTTL)
+	_, err = s.store.RotateWebSession(r.Context(), session.SessionID, hashOpaqueToken(refreshToken), refreshExpiry, clientIP(r), r.UserAgent())
+	if err != nil {
+		return err
+	}
+	return s.writeAuthCookies(w, session.SessionID, refreshToken, refreshExpiry, user)
+}
+
+func (s *Server) requireRefreshSession(r *http.Request) (store.WebSession, string, error) {
+	sessionCookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return store.WebSession{}, "", store.ErrUnauthorized
+	}
+	refreshCookie, err := r.Cookie(refreshCookieName)
+	if err != nil {
+		return store.WebSession{}, "", store.ErrUnauthorized
+	}
+	session, err := s.store.GetWebSessionByID(r.Context(), sessionCookie.Value)
+	if err != nil {
+		return store.WebSession{}, "", err
+	}
+	return session, refreshCookie.Value, nil
+}
+
+func (s *Server) writeAuthCookies(w http.ResponseWriter, sessionID, refreshToken string, refreshExpiry time.Time, user types.UserSummary) error {
+	accessToken, accessExpiry, err := s.createAccessToken(user)
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{Name: accessCookieName, Value: accessToken, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: accessExpiry})
+	http.SetCookie(w, &http.Cookie{Name: refreshCookieName, Value: refreshToken, Path: "/api/auth", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: refreshExpiry})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: sessionID, Path: "/api/auth", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: refreshExpiry})
+	return nil
+}
+
+func (s *Server) clearAuthCookies(w http.ResponseWriter) {
+	for _, item := range []struct{ name, path string }{{accessCookieName, "/"}, {refreshCookieName, "/api/auth"}, {sessionCookieName, "/api/auth"}} {
+		http.SetCookie(w, &http.Cookie{Name: item.name, Value: "", Path: item.path, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(0, 0)})
+	}
+}
+
+func (s *Server) createAccessToken(user types.UserSummary) (string, time.Time, error) {
+	expiry := time.Now().UTC().Add(s.accessTokenTTL)
+	payload := fmt.Sprintf("%s|%s|%d", user.ID, user.Role, expiry.Unix())
+	sig := signValue(payload, s.accessSecret)
+	token := base64.RawURLEncoding.EncodeToString([]byte(payload + "|" + sig))
+	return token, expiry, nil
+}
+
+func (s *Server) readAccessClaims(r *http.Request) (authClaims, error) {
+	cookie, err := r.Cookie(accessCookieName)
+	if err != nil {
+		return authClaims{}, store.ErrUnauthorized
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cookie.Value)
+	if err != nil {
+		return authClaims{}, store.ErrUnauthorized
+	}
+	parts := strings.Split(string(raw), "|")
+	if len(parts) != 4 {
+		return authClaims{}, store.ErrUnauthorized
+	}
+	payload := strings.Join(parts[:3], "|")
+	if signValue(payload, s.accessSecret) != parts[3] {
+		return authClaims{}, store.ErrUnauthorized
+	}
+	expUnix, err := parseInt64(parts[2])
+	if err != nil {
+		return authClaims{}, store.ErrUnauthorized
+	}
+	expiry := time.Unix(expUnix, 0).UTC()
+	if time.Now().UTC().After(expiry) {
+		return authClaims{}, store.ErrUnauthorized
+	}
+	return authClaims{UserID: parts[0], Role: types.UserRole(parts[1]), Expiry: expiry}, nil
+}
+
+func (s *Server) adminSPAHandler() http.Handler {
+	fileServer := http.FileServer(http.Dir(s.adminWebDir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := os.Stat(s.adminWebDir); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		cleanPath := strings.TrimPrefix(r.URL.Path, "/admin")
+		cleanPath = strings.TrimPrefix(cleanPath, "/")
+		if cleanPath == "" {
+			http.ServeFile(w, r, filepath.Join(s.adminWebDir, "index.html"))
+			return
+		}
+		target := filepath.Join(s.adminWebDir, cleanPath)
+		if info, err := os.Stat(target); err == nil && !info.IsDir() {
+			http.StripPrefix("/admin/", fileServer).ServeHTTP(w, r)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(s.adminWebDir, "index.html"))
+	})
+}
+
+func authUserFromContext(ctx context.Context) (types.UserSummary, bool) {
+	user, ok := ctx.Value(authUserContextKey).(types.UserSummary)
+	return user, ok
+}
+
+func roleAllowed(actual, required types.UserRole) bool {
+	rank := func(role types.UserRole) int {
+		switch role {
+		case types.UserRoleAdmin:
+			return 3
+		case types.UserRoleManager:
+			return 2
+		case types.UserRoleUser:
+			return 1
+		default:
+			return 0
+		}
+	}
+	return rank(actual) >= rank(required)
+}
+
+func randomToken(bytesLen int) (string, error) {
+	buf := make([]byte, bytesLen)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func hashOpaqueToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func signValue(value, secret string) string {
+	sum := sha256.Sum256([]byte(secret + ":" + value))
+	return hex.EncodeToString(sum[:])
+}
+
+func parseInt64(raw string) (int64, error) {
+	var value int64
+	_, err := fmt.Sscanf(raw, "%d", &value)
+	return value, err
+}
+
+func clientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	return r.RemoteAddr
+}
+
+func envOrDefault(key, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -397,9 +787,10 @@ func writeMethodNotAllowed(w http.ResponseWriter, method string) {
 
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

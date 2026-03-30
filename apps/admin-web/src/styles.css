@@ -206,3 +206,17 @@ button:disabled {
     font-size: 22px;
   }
 }
+
+.auth-shell {
+  max-width: 640px;
+}
+
+.auth-panel {
+  margin-top: 64px;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}

@@ -267,3 +267,69 @@ code=200 total=0.039750
 
 - The current Bearer token is a minimal management guard, not a full user system or HTTPS same-origin hardening solution.
 - Admin token is currently static env configuration and should later move behind dedicated domain + TLS + stronger credential lifecycle.
+
+
+## 2026-03-31 Web Session Auth Upgrade
+
+### What Changed In This Round
+
+- Replaced the temporary Bearer-token management access pattern with a real Web session model.
+- Added server-side auth/session endpoints:
+  - `GET /api/auth/bootstrap-status`
+  - `POST /api/auth/bootstrap`
+  - `POST /api/auth/login`
+  - `POST /api/auth/refresh`
+  - `POST /api/auth/logout`
+  - `GET /api/auth/me`
+- Added role-aware user management endpoints:
+  - `GET /api/users`
+  - `POST /api/users`
+  - `PUT /api/users/{id}`
+  - `DELETE /api/users/{id}`
+- Added three role levels:
+  - `admin`
+  - `manager`
+  - `user`
+- Moved management authentication to cookie-backed Web sessions with dedicated `web_sessions` persistence.
+- Switched admin UI from temporary token-entry page to a real same-origin management application under `/admin/`.
+- Added bootstrap flow for first admin creation, login page, logout, and role-based page behavior.
+- Preserved current reverse TCP protocol and current Windows agent compatibility.
+
+### Live Verification In This Round
+
+```bash
+psql postgres://postgres:wdblsw12138@127.0.0.1:5432/cloud_relay?sslmode=disable -f db/schema.sql
+
+env -u GOOS -u GOARCH GOCACHE=/root/cloud-relay-platform/.gocache go test ./apps/server-api/internal/api ./apps/server-api/internal/store ./apps/relay-tcp/internal/runtime
+npm --prefix apps/admin-web run build
+
+curl http://127.0.0.1:7710/api/auth/bootstrap-status
+curl -i -H 'Content-Type: application/json' -d '{...}' http://127.0.0.1:7710/api/auth/bootstrap
+curl -i -H 'Content-Type: application/json' -d '{...}' http://127.0.0.1:7710/api/auth/login
+curl http://127.0.0.1:7710/admin/
+curl http://127.0.0.1:7710/admin/assets/index-DH-GNW08.js
+curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
+' http://82.156.236.104:10086
+```
+
+### Observed Results In This Round
+
+- Same-origin admin page is now served from `server-api` itself:
+  - `GET http://82.156.236.104:7710/admin/ -> 200`
+- Static admin assets are also same-origin and load from `/admin/assets/...`.
+- First admin bootstrap succeeded and persisted in PostgreSQL.
+- Login now issues session cookies:
+  - `crp_access`
+  - `crp_refresh`
+  - `crp_session`
+- Management API without login now returns `401`.
+- Reverse TCP production path still remained healthy after the auth/system changes:
+
+```text
+code=200 total=0.040986
+```
+
+### Remaining Risk
+
+- Current access token is a signed opaque payload rather than a full JWT stack, which is acceptable for the current self-hosted scope but still a lightweight implementation.
+- HTTPS and dedicated subdomain deployment still remain the next required hardening step before exposing the management plane more broadly.
