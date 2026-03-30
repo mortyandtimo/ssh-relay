@@ -110,10 +110,23 @@ Content    : <!DOCTYPE html>...
 2026/03/30 16:05:27 standby reverse connection ready: ... poolSize=8 totalStandby=8
 ```
 
+- After refactoring relay standby storage from anonymous channel queues toward an explicit pool lifecycle model and redeploying again, the current online Windows agent continued to work without a protocol change, and the cloud relay kept the pool bounded at `8` while evicting the oldest standby before each new admission:
+
+```text
+2026/03/31 01:47:03 evict standby reverse connection ... poolSize=7 totalStandby=7 to keep target pool size=8
+2026/03/31 01:47:03 standby reverse connection ready: ... poolSize=8 totalStandby=8
+```
+
 - A fresh cloud-side request against the current online Windows agent still succeeded after the elastic-pool relay deploy:
 
 ```text
 code=200 total=0.068908
+```
+
+- A fresh cloud-side request still succeeded after the standby pool lifecycle refactor:
+
+```text
+code=200 total=0.052019
 ```
 
 ## What Still Fails Or Remains Risky
@@ -135,3 +148,4 @@ code=200 total=0.068908
 - Verified tunnel path remains `82.156.236.104:10086 -> node-1774805183388699102 -> 127.0.0.1:16354`.
 - Cloud-side relay restart did not break compatibility with the currently running Windows agent.
 - Pool behavior after redeploy was measurable, bounded to the intended standby window during the latest retest, and diagnosable via logs including `totalStandby`.
+- The current remaining risk is not protocol compatibility but policy quality: with the current fixed Windows agent process, the relay now bounds and evicts correctly, but smarter adaptive pool control is still future work.

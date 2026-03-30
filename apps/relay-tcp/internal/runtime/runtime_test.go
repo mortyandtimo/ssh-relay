@@ -20,6 +20,7 @@ import (
 )
 
 func TestTCPRelayServiceForwardsTrafficViaReverseAgentConnection(t *testing.T) {
+	atomic.StoreInt64(&totalStandby, 0)
 	tunnel := types.TunnelSpec{
 		ID:         "t-1",
 		NodeID:     "node-1",
@@ -116,6 +117,7 @@ func TestTCPRelayServiceForwardsTrafficViaReverseAgentConnection(t *testing.T) {
 }
 
 func TestHandleAgentReverseRejectsInactiveTunnel(t *testing.T) {
+	atomic.StoreInt64(&totalStandby, 0)
 	service := NewService("http://127.0.0.1:1")
 	req := httptest.NewRequest(http.MethodPost, types.AgentRelayConnectPath, bytes.NewReader([]byte(`{"nodeId":"node-1","tunnelId":"t-1","publicPort":10086,"targetHost":"127.0.0.1","targetPort":23546}`)))
 	req.Header.Set("Upgrade", types.AgentRelayUpgrade)
@@ -128,6 +130,7 @@ func TestHandleAgentReverseRejectsInactiveTunnel(t *testing.T) {
 }
 
 func TestPublicConnectionFailsWithoutStandbyAgentConnection(t *testing.T) {
+	atomic.StoreInt64(&totalStandby, 0)
 	tunnel := types.TunnelSpec{
 		ID:         "t-2",
 		NodeID:     "node-2",
@@ -169,8 +172,11 @@ func TestPublicConnectionFailsWithoutStandbyAgentConnection(t *testing.T) {
 }
 
 func TestEnqueueStandbyConnMaintainsStrictPerKeyCap(t *testing.T) {
+	atomic.StoreInt64(&totalStandby, 0)
 	service := NewService("http://127.0.0.1:1")
 	key := routePoolKey("node-1", 10086)
+	pool := newStandbyPool(key, standbyPoolTargetSize, standbyPoolMaxSize)
+	service.pools[key] = pool
 	var maxObserved int64
 	var wg sync.WaitGroup
 
@@ -180,7 +186,7 @@ func TestEnqueueStandbyConnMaintainsStrictPerKeyCap(t *testing.T) {
 		wg.Add(1)
 		go func(idx int, conn net.Conn) {
 			defer wg.Done()
-			_, _, err := service.enqueueStandbyConn(key, standbyConn{
+			_, _, err := service.enqueueStandbyConn(pool, key, standbyConn{
 				conn: conn,
 				hello: types.AgentRelayHello{
 					NodeID:     "node-1",
@@ -195,7 +201,9 @@ func TestEnqueueStandbyConnMaintainsStrictPerKeyCap(t *testing.T) {
 				t.Errorf("enqueue standby %d: %v", idx, err)
 				return
 			}
-			queueLen := len(service.poolForKey(key))
+			pool.mu.Lock()
+			queueLen := len(pool.items)
+			pool.mu.Unlock()
 			for {
 				current := atomic.LoadInt64(&maxObserved)
 				if int64(queueLen) <= current {
@@ -209,13 +217,110 @@ func TestEnqueueStandbyConnMaintainsStrictPerKeyCap(t *testing.T) {
 	}
 
 	wg.Wait()
-	if got := len(service.poolForKey(key)); got > standbyPoolTargetSize {
+	pool.mu.Lock()
+	got := len(pool.items)
+	pool.mu.Unlock()
+	if got > standbyPoolTargetSize {
 		t.Fatalf("expected queue length <= %d, got %d", standbyPoolTargetSize, got)
 	}
 	if maxObserved > int64(standbyPoolTargetSize) {
 		t.Fatalf("expected max observed queue <= %d, got %d", standbyPoolTargetSize, maxObserved)
 	}
-	drainStandbyQueue(service.poolForKey(key))
+	service.closeStandbyItems(pool.closeAndDrain())
+	if got := atomic.LoadInt64(&totalStandby); got != 0 {
+		t.Fatalf("expected totalStandby 0 after drain, got %d", got)
+	}
+}
+
+func TestDrainPoolResetsTotalStandby(t *testing.T) {
+	atomic.StoreInt64(&totalStandby, 0)
+	service := NewService("http://127.0.0.1:1")
+	key := routePoolKey("node-1", 10086)
+	pool := newStandbyPool(key, standbyPoolTargetSize, standbyPoolMaxSize)
+	service.pools[key] = pool
+
+	for i := 0; i < 3; i++ {
+		serverConn, clientConn := net.Pipe()
+		defer clientConn.Close()
+		if _, _, err := service.enqueueStandbyConn(pool, key, standbyConn{conn: serverConn, hello: types.AgentRelayHello{NodeID: "node-1", TunnelID: fmt.Sprintf("t-%d", i), PublicPort: 10086, TargetHost: "127.0.0.1", TargetPort: 80}, registeredAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service.drainPool(key)
+	if got := atomic.LoadInt64(&totalStandby); got != 0 {
+		t.Fatalf("expected totalStandby 0 after drain, got %d", got)
+	}
+	if _, ok := service.pools[key]; ok {
+		t.Fatal("expected pool to be removed after drain")
+	}
+}
+
+func TestRouteDeletionDuringReverseAdmissionDoesNotCreateOrphanPool(t *testing.T) {
+	atomic.StoreInt64(&totalStandby, 0)
+	service := NewService("http://127.0.0.1:1")
+	route := types.TunnelSpec{ID: "t-1", NodeID: "node-1", PublicPort: 10086, TargetHost: "127.0.0.1", TargetPort: 80}
+	key := routePoolKey(route.NodeID, route.PublicPort)
+	service.routes[route.PublicPort] = route
+	service.pools[key] = newStandbyPool(key, standbyPoolTargetSize, standbyPoolMaxSize)
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	_, _, pool, ok := service.activeRouteAndPoolForHello(types.AgentRelayHello{NodeID: route.NodeID, TunnelID: route.ID, PublicPort: route.PublicPort, TargetHost: route.TargetHost, TargetPort: route.TargetPort})
+	if !ok {
+		t.Fatal("expected active route lookup to succeed")
+	}
+	service.drainPool(key)
+	if _, _, err := service.enqueueStandbyConn(pool, key, standbyConn{conn: serverConn, hello: types.AgentRelayHello{NodeID: route.NodeID, TunnelID: route.ID, PublicPort: route.PublicPort, TargetHost: route.TargetHost, TargetPort: route.TargetPort}, registeredAt: time.Now().UTC()}); err == nil {
+		t.Fatal("expected enqueue into drained pool to fail")
+	}
+	if got := atomic.LoadInt64(&totalStandby); got != 0 {
+		t.Fatalf("expected totalStandby 0 after failed enqueue into drained pool, got %d", got)
+	}
+}
+
+func TestSyncRoutesRejectsDuplicatePublicPort(t *testing.T) {
+	atomic.StoreInt64(&totalStandby, 0)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []types.TunnelSpec{
+			{ID: "t-1", NodeID: "node-1", Type: "tcp", Status: "active", PublicPort: 10086, TargetHost: "127.0.0.1", TargetPort: 80},
+			{ID: "t-2", NodeID: "node-2", Type: "tcp", Status: "active", PublicPort: 10086, TargetHost: "127.0.0.1", TargetPort: 81},
+		}})
+	}))
+	defer api.Close()
+	service := NewService(api.URL)
+	if err := service.syncRoutes(context.Background()); err == nil {
+		t.Fatal("expected duplicate public port sync to fail")
+	}
+	if len(service.listeners) != 0 {
+		t.Fatalf("expected no listeners on duplicate public port conflict, got %d", len(service.listeners))
+	}
+}
+
+func TestStandbyPoolPrefersExpiredEviction(t *testing.T) {
+	atomic.StoreInt64(&totalStandby, 0)
+	pool := newStandbyPool("node-1:10086", standbyPoolTargetSize, standbyPoolMaxSize)
+	oldConns := make([]net.Conn, 0)
+	for i := 0; i < standbyPoolTargetSize; i++ {
+		serverConn, clientConn := net.Pipe()
+		defer clientConn.Close()
+		oldConns = append(oldConns, serverConn)
+		pool.items = append(pool.items, standbyConn{conn: serverConn, hello: types.AgentRelayHello{NodeID: "node-1", TunnelID: fmt.Sprintf("expired-%d", i), PublicPort: 10086, TargetHost: "127.0.0.1", TargetPort: 80}, registeredAt: time.Now().Add(-2 * standbyConnMaxAge)})
+	}
+	newServer, newClient := net.Pipe()
+	defer newClient.Close()
+	queueLen, evicted, err := pool.enqueue(standbyConn{conn: newServer, hello: types.AgentRelayHello{NodeID: "node-1", TunnelID: "fresh", PublicPort: 10086, TargetHost: "127.0.0.1", TargetPort: 80}, registeredAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queueLen != standbyPoolTargetSize {
+		t.Fatalf("expected queueLen %d, got %d", standbyPoolTargetSize, queueLen)
+	}
+	if len(evicted) != 1 {
+		t.Fatalf("expected 1 evicted standby, got %d", len(evicted))
+	}
+	if !evicted[0].expired() {
+		t.Fatal("expected expired standby to be evicted first")
+	}
 }
 
 func dialTestUpgrade(relayURL string, hello types.AgentRelayHello) (net.Conn, error) {

@@ -20,7 +20,7 @@ import (
 const (
 	routeSyncInterval     = 5 * time.Second
 	standbyPoolTargetSize = 8
-	standbyPoolBufferSize = 64
+	standbyPoolMaxSize    = 16
 	globalMaxStandby      = 200
 	standbyConnMaxAge     = 90 * time.Second
 	defaultAcquireTimeout = 10 * time.Second
@@ -32,15 +32,138 @@ type standbyConn struct {
 	registeredAt time.Time
 }
 
+func (s standbyConn) age() time.Duration {
+	return time.Since(s.registeredAt)
+}
+
+func (s standbyConn) expired() bool {
+	return s.age() > standbyConnMaxAge
+}
+
+func (s standbyConn) prepareForStart() error {
+	buf := make([]byte, 1)
+	for {
+		if err := s.conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond)); err != nil {
+			return err
+		}
+		_, err := io.ReadFull(s.conn, buf)
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			_ = s.conn.SetReadDeadline(time.Time{})
+			return nil
+		}
+		if err != nil {
+			_ = s.conn.SetReadDeadline(time.Time{})
+			return err
+		}
+		if buf[0] != types.AgentRelayKeepaliveByte {
+			_ = s.conn.SetReadDeadline(time.Time{})
+			return fmt.Errorf("unexpected pre-start byte %d", buf[0])
+		}
+	}
+}
+
+type standbyPool struct {
+	mu     sync.Mutex
+	items  []standbyConn
+	closed bool
+	key    string
+	target int
+	max    int
+}
+
+func newStandbyPool(key string, target, max int) *standbyPool {
+	if target < 1 {
+		target = 1
+	}
+	if max < target {
+		max = target
+	}
+	return &standbyPool{key: key, target: target, max: max}
+}
+
+func (p *standbyPool) lenLocked() int {
+	return len(p.items)
+}
+
+func (p *standbyPool) enqueue(item standbyConn) (int, []standbyConn, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return len(p.items), nil, errors.New("pool closed")
+	}
+	var evicted []standbyConn
+	for len(p.items) >= p.target {
+		idx := p.oldestIndexLocked()
+		evicted = append(evicted, p.items[idx])
+		p.items = append(p.items[:idx], p.items[idx+1:]...)
+	}
+	p.items = append(p.items, item)
+	return len(p.items), evicted, nil
+}
+
+func (p *standbyPool) acquire(route types.TunnelSpec) (standbyConn, int, []standbyConn, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return standbyConn{}, len(p.items), nil, errors.New("pool closed")
+	}
+	if len(p.items) == 0 {
+		return standbyConn{}, 0, nil, ErrPoolEmpty
+	}
+	var evicted []standbyConn
+	for len(p.items) > 0 {
+		item := p.items[0]
+		p.items = p.items[1:]
+		if item.expired() {
+			evicted = append(evicted, item)
+			continue
+		}
+		if !helloMatchesRoute(item.hello, route) {
+			evicted = append(evicted, item)
+			continue
+		}
+		return item, len(p.items), evicted, nil
+	}
+	return standbyConn{}, 0, evicted, ErrPoolEmpty
+}
+
+func (p *standbyPool) closeAndDrain() []standbyConn {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+	drained := append([]standbyConn(nil), p.items...)
+	p.items = nil
+	return drained
+}
+
+func (p *standbyPool) oldestIndexLocked() int {
+	if len(p.items) == 0 {
+		return 0
+	}
+	oldestIdx := 0
+	oldestAt := p.items[0].registeredAt
+	for i := 1; i < len(p.items); i++ {
+		if p.items[i].registeredAt.Before(oldestAt) {
+			oldestAt = p.items[i].registeredAt
+			oldestIdx = i
+		}
+	}
+	return oldestIdx
+}
+
+var ErrPoolEmpty = errors.New("standby pool empty")
+
 type Service struct {
 	apiBaseURL string
 	httpClient *http.Client
 
 	mu        sync.Mutex
-	poolOpMu  sync.Mutex
 	listeners map[int]net.Listener
 	routes    map[int]types.TunnelSpec
-	pools     map[string]chan standbyConn
+	pools     map[string]*standbyPool
 
 	acquireTimeout time.Duration
 }
@@ -54,7 +177,7 @@ func NewService(apiBaseURL string) *Service {
 		httpClient:     &http.Client{Timeout: 10 * time.Second},
 		listeners:      make(map[int]net.Listener),
 		routes:         make(map[int]types.TunnelSpec),
-		pools:          make(map[string]chan standbyConn),
+		pools:          make(map[string]*standbyPool),
 		acquireTimeout: defaultAcquireTimeout,
 	}
 }
@@ -99,7 +222,7 @@ func (s *Service) HandleAgentReverse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	route, ok := s.activeRouteForHello(hello)
+	route, key, pool, ok := s.activeRouteAndPoolForHello(hello)
 	if !ok {
 		http.Error(w, "inactive tunnel", http.StatusNotFound)
 		return
@@ -128,9 +251,13 @@ func (s *Service) HandleAgentReverse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := routePoolKey(route.NodeID, route.PublicPort)
+	if !helloMatchesRoute(hello, route) {
+		_ = conn.Close()
+		return
+	}
+
 	item := standbyConn{conn: conn, hello: hello, registeredAt: time.Now().UTC()}
-	poolSize, totalStandbyCount, err := s.enqueueStandbyConn(key, item)
+	poolSize, totalStandbyCount, err := s.enqueueStandbyConn(pool, key, item)
 	if err != nil {
 		log.Printf("standby reverse connection rejected for %s tunnel %s: %v", key, hello.TunnelID, err)
 		_ = conn.Close()
@@ -164,6 +291,10 @@ func (s *Service) syncRoutes(ctx context.Context) error {
 	for _, item := range payload.Items {
 		if item.PublicPort == 0 || item.NodeID == "" {
 			continue
+		}
+		if existing, ok := desired[item.PublicPort]; ok {
+			log.Printf("duplicate tcp public port detected: publicPort=%d existingTunnel=%s existingNode=%s conflictingTunnel=%s conflictingNode=%s", item.PublicPort, existing.ID, existing.NodeID, item.ID, item.NodeID)
+			return fmt.Errorf("duplicate public port %d", item.PublicPort)
 		}
 		desired[item.PublicPort] = item
 	}
@@ -210,6 +341,10 @@ func (s *Service) syncRoutes(ctx context.Context) error {
 		}
 		s.listeners[port] = listener
 		s.routes[port] = route
+		key := routePoolKey(route.NodeID, route.PublicPort)
+		if _, ok := s.pools[key]; !ok {
+			s.pools[key] = newStandbyPool(key, standbyPoolTargetSize, standbyPoolTargetSize)
+		}
 		starts = append(starts, listenerStart{listener: listener, route: route})
 		log.Printf("tcp route active: node=%s publicPort=%d tunnel=%s", route.NodeID, route.PublicPort, route.ID)
 	}
@@ -251,7 +386,6 @@ func (s *Service) handlePublicConnection(src net.Conn, route types.TunnelSpec) {
 			log.Printf("tcp connection %d no standby reverse connection for node=%s publicPort=%d: %v", connID, route.NodeID, route.PublicPort, err)
 			return
 		}
-
 		if err := standby.prepareForStart(); err != nil {
 			log.Printf("tcp connection %d discarded stale standby reverse connection for tunnel %s age=%s poolSize=%d totalStandby=%d: %v", connID, route.ID, standby.age(), poolSize, totalStandbyCount, err)
 			_ = standby.conn.Close()
@@ -297,156 +431,116 @@ func proxyConnections(connID uint64, left net.Conn, right net.Conn, startedAt ti
 	log.Printf("tcp connection %d closed after %s", connID, time.Since(startedAt))
 }
 
-func (s *Service) activeRouteForHello(hello types.AgentRelayHello) (types.TunnelSpec, bool) {
+func (s *Service) activeRouteAndPoolForHello(hello types.AgentRelayHello) (types.TunnelSpec, string, *standbyPool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	route, ok := s.routes[hello.PublicPort]
+	if !ok || !helloMatchesRoute(hello, route) {
+		return types.TunnelSpec{}, "", nil, false
+	}
+	key := routePoolKey(route.NodeID, route.PublicPort)
+	pool, ok := s.pools[key]
 	if !ok {
-		return types.TunnelSpec{}, false
+		pool = newStandbyPool(key, standbyPoolTargetSize, standbyPoolTargetSize)
+		s.pools[key] = pool
 	}
-	if !helloMatchesRoute(hello, route) {
-		return types.TunnelSpec{}, false
-	}
-	return route, true
+	return route, key, pool, true
+}
+
+func (s *Service) poolForRoute(route types.TunnelSpec) (*standbyPool, string, bool) {
+	key := routePoolKey(route.NodeID, route.PublicPort)
+	s.mu.Lock()
+	pool, ok := s.pools[key]
+	s.mu.Unlock()
+	return pool, key, ok
 }
 
 func (s *Service) acquireStandbyConn(ctx context.Context, route types.TunnelSpec) (standbyConn, int, int64, error) {
-	queue := s.poolForKey(routePoolKey(route.NodeID, route.PublicPort))
 	for {
-		select {
-		case item := <-queue:
-			poolSize := len(queue)
-			totalStandbyCount := atomic.AddInt64(&totalStandby, -1)
-			if item.expired() {
-				log.Printf("evict expired standby reverse connection for node=%s publicPort=%d tunnel=%s age=%s poolSize=%d totalStandby=%d", route.NodeID, route.PublicPort, item.hello.TunnelID, item.age(), poolSize, totalStandbyCount)
-				_ = item.conn.Close()
-				continue
-			}
-			if !helloMatchesRoute(item.hello, route) {
-				_ = item.conn.Close()
-				continue
-			}
-			return item, poolSize, totalStandbyCount, nil
-		case <-ctx.Done():
-			return standbyConn{}, len(queue), atomic.LoadInt64(&totalStandby), ctx.Err()
+		pool, _, ok := s.poolForRoute(route)
+		if !ok {
+			return standbyConn{}, 0, atomic.LoadInt64(&totalStandby), ErrPoolEmpty
 		}
+		item, poolSize, drained, err := pool.acquire(route)
+		if len(drained) > 0 {
+			s.closeStandbyItems(drained)
+		}
+		if err == nil {
+			totalStandbyCount := atomic.AddInt64(&totalStandby, -1)
+			return item, poolSize, totalStandbyCount, nil
+		}
+		if errors.Is(err, ErrPoolEmpty) {
+			select {
+			case <-ctx.Done():
+				return standbyConn{}, poolSize, atomic.LoadInt64(&totalStandby), ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+				continue
+			}
+		}
+		return standbyConn{}, poolSize, atomic.LoadInt64(&totalStandby), err
 	}
 }
 
-func (s *Service) enqueueStandbyConn(key string, item standbyConn) (int, int64, error) {
-	queue := s.poolForKey(key)
-
-	s.poolOpMu.Lock()
-	defer s.poolOpMu.Unlock()
-
+func (s *Service) enqueueStandbyConn(pool *standbyPool, key string, item standbyConn) (int, int64, error) {
 	if globalMaxStandby > 0 && atomic.LoadInt64(&totalStandby) >= globalMaxStandby {
-		return len(queue), atomic.LoadInt64(&totalStandby), errors.New("global standby pool full")
+		return pool.lenLocked(), atomic.LoadInt64(&totalStandby), errors.New("global standby pool full")
 	}
-
-	for len(queue) >= standbyPoolTargetSize {
-		evicted := <-queue
-		remaining := len(queue)
+	poolSize, evicted, err := pool.enqueue(item)
+	if err != nil {
+		return poolSize, atomic.LoadInt64(&totalStandby), err
+	}
+	for _, item := range evicted {
 		totalAfterEvict := atomic.AddInt64(&totalStandby, -1)
-		if evicted.expired() {
-			log.Printf("evict expired standby reverse connection for key=%s tunnel=%s age=%s poolSize=%d totalStandby=%d to keep target pool size=%d", key, evicted.hello.TunnelID, evicted.age(), remaining, totalAfterEvict, standbyPoolTargetSize)
+		if item.expired() {
+			log.Printf("evict expired standby reverse connection for key=%s tunnel=%s age=%s totalStandby=%d to keep target pool size=%d", key, item.hello.TunnelID, item.age(), totalAfterEvict, pool.target)
 		} else {
-			log.Printf("evict standby reverse connection for key=%s tunnel=%s age=%s poolSize=%d totalStandby=%d to keep target pool size=%d", key, evicted.hello.TunnelID, evicted.age(), remaining, totalAfterEvict, standbyPoolTargetSize)
+			log.Printf("evict standby reverse connection for key=%s tunnel=%s age=%s totalStandby=%d to keep target pool size=%d", key, item.hello.TunnelID, item.age(), totalAfterEvict, pool.target)
 		}
-		_ = evicted.conn.Close()
+		_ = item.conn.Close()
 	}
-
-	queue <- item
-	poolSize := len(queue)
 	totalAfterAdd := atomic.AddInt64(&totalStandby, 1)
 	return poolSize, totalAfterAdd, nil
 }
 
-func (s *Service) poolForKey(key string) chan standbyConn {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	queue, ok := s.pools[key]
-	if ok {
-		return queue
-	}
-	queue = make(chan standbyConn, standbyPoolBufferSize)
-	s.pools[key] = queue
-	return queue
-}
-
 func (s *Service) drainPool(key string) {
 	s.mu.Lock()
-	queue := s.pools[key]
+	pool := s.pools[key]
 	delete(s.pools, key)
 	s.mu.Unlock()
-	drainStandbyQueue(queue)
+	if pool == nil {
+		return
+	}
+	s.closeStandbyItems(pool.closeAndDrain())
 }
 
 func (s *Service) closeAll() {
 	s.mu.Lock()
 	listeners := make([]net.Listener, 0, len(s.listeners))
-	pools := make([]chan standbyConn, 0, len(s.pools))
+	pools := make([]*standbyPool, 0, len(s.pools))
 	for _, listener := range s.listeners {
 		listeners = append(listeners, listener)
 	}
-	for _, queue := range s.pools {
-		pools = append(pools, queue)
+	for _, pool := range s.pools {
+		pools = append(pools, pool)
 	}
 	s.listeners = make(map[int]net.Listener)
 	s.routes = make(map[int]types.TunnelSpec)
-	s.pools = make(map[string]chan standbyConn)
+	s.pools = make(map[string]*standbyPool)
 	s.mu.Unlock()
 
 	for _, listener := range listeners {
 		_ = listener.Close()
 	}
-	for _, queue := range pools {
-		drainStandbyQueue(queue)
+	for _, pool := range pools {
+		s.closeStandbyItems(pool.closeAndDrain())
 	}
 }
 
-func drainStandbyQueue(queue chan standbyConn) {
-	if queue == nil {
-		return
+func (s *Service) closeStandbyItems(items []standbyConn) {
+	for _, item := range items {
+		_ = atomic.AddInt64(&totalStandby, -1)
+		_ = item.conn.Close()
 	}
-	for {
-		select {
-		case item := <-queue:
-			_ = atomic.AddInt64(&totalStandby, -1)
-			_ = item.conn.Close()
-		default:
-			return
-		}
-	}
-}
-
-func (s standbyConn) prepareForStart() error {
-	buf := make([]byte, 1)
-	for {
-		if err := s.conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond)); err != nil {
-			return err
-		}
-		_, err := io.ReadFull(s.conn, buf)
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			_ = s.conn.SetReadDeadline(time.Time{})
-			return nil
-		}
-		if err != nil {
-			_ = s.conn.SetReadDeadline(time.Time{})
-			return err
-		}
-		if buf[0] != types.AgentRelayKeepaliveByte {
-			_ = s.conn.SetReadDeadline(time.Time{})
-			return fmt.Errorf("unexpected pre-start byte %d", buf[0])
-		}
-	}
-}
-
-func (s standbyConn) age() time.Duration {
-	return time.Since(s.registeredAt)
-}
-
-func (s standbyConn) expired() bool {
-	return s.age() > standbyConnMaxAge
 }
 
 func helloMatchesRoute(hello types.AgentRelayHello, route types.TunnelSpec) bool {
