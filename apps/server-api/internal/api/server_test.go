@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -262,4 +263,185 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 	if missingRes.Code != http.StatusNotFound {
 		t.Fatalf("expected missing status 404, got %d", missingRes.Code)
 	}
+}
+
+func TestAdminBearerTokenProtectsManagementEndpoints(t *testing.T) {
+	runtimeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(types.RelayRuntimeSummary{
+			Service:      "relay-tcp",
+			ObservedAt:   time.Now().UTC(),
+			TotalStandby: 3,
+			Pools: []types.RelayPoolSummary{{
+				PoolKey:      "node-1:10086",
+				NodeID:       "node-1",
+				PublicPort:   10086,
+				StandbyCount: 3,
+				TargetSize:   8,
+				MaxSize:      16,
+			}},
+		})
+	}))
+	defer runtimeUpstream.Close()
+
+	backend := store.NewInMemoryStore()
+	server := NewServer("test", backend, runtimeUpstream.URL)
+	server.SetAdminToken("secret-token")
+
+	registerOut := registerNodeThroughAgent(t, server, "edge-secure")
+
+	unauthorizedReq := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
+	unauthorizedRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthorizedRes, unauthorizedReq)
+	if unauthorizedRes.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized nodes status 401, got %d", unauthorizedRes.Code)
+	}
+
+	invalidReq := httptest.NewRequest(http.MethodGet, "/api/tunnels", nil)
+	invalidReq.Header.Set("Authorization", "Bearer wrong-token")
+	invalidRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(invalidRes, invalidReq)
+	if invalidRes.Code != http.StatusUnauthorized {
+		t.Fatalf("expected invalid token status 401, got %d", invalidRes.Code)
+	}
+
+	createBody, err := json.Marshal(map[string]any{
+		"id":         "tunnel-auth",
+		"nodeId":     registerOut.NodeID,
+		"name":       "secure-svc",
+		"type":       "tcp",
+		"targetHost": "127.0.0.1",
+		"targetPort": 16354,
+		"publicPort": 10086,
+		"status":     "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	withBearer(createReq, "secret-token")
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected authorized create status 201, got %d", createRes.Code)
+	}
+
+	nodesReq := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
+	withBearer(nodesReq, "secret-token")
+	nodesRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(nodesRes, nodesReq)
+	if nodesRes.Code != http.StatusOK {
+		t.Fatalf("expected authorized nodes status 200, got %d", nodesRes.Code)
+	}
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/api/server/metrics", nil)
+	withBearer(metricsReq, "secret-token")
+	metricsRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(metricsRes, metricsReq)
+	if metricsRes.Code != http.StatusOK {
+		t.Fatalf("expected authorized metrics status 200, got %d", metricsRes.Code)
+	}
+
+	runtimeReq := httptest.NewRequest(http.MethodGet, "/api/relay/tcp/runtime", nil)
+	withBearer(runtimeReq, "secret-token")
+	runtimeRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(runtimeRes, runtimeReq)
+	if runtimeRes.Code != http.StatusOK {
+		t.Fatalf("expected authorized runtime status 200, got %d", runtimeRes.Code)
+	}
+	var runtimeOut types.RelayRuntimeSummary
+	if err := json.NewDecoder(runtimeRes.Body).Decode(&runtimeOut); err != nil {
+		t.Fatal(err)
+	}
+	if runtimeOut.TotalStandby != 3 {
+		t.Fatalf("expected runtime total standby 3, got %d", runtimeOut.TotalStandby)
+	}
+	if len(runtimeOut.Pools) != 1 || runtimeOut.Pools[0].StandbyCount != 3 {
+		t.Fatalf("expected runtime pool standby count 3, got %+v", runtimeOut.Pools)
+	}
+
+	getTunnelReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/tunnel-auth", nil)
+	withBearer(getTunnelReq, "secret-token")
+	getTunnelRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(getTunnelRes, getTunnelReq)
+	if getTunnelRes.Code != http.StatusOK {
+		t.Fatalf("expected authorized tunnel get status 200, got %d", getTunnelRes.Code)
+	}
+}
+
+func TestAgentEndpointsRemainAccessibleWhenAdminTokenEnabled(t *testing.T) {
+	backend := store.NewInMemoryStore()
+	server := NewServer("test", backend, "")
+	server.SetAdminToken("secret-token")
+
+	registerOut := registerNodeThroughAgent(t, server, "edge-open-agent")
+
+	heartbeatBody, err := json.Marshal(types.NodeHeartbeatRequest{
+		NodeID:        registerOut.NodeID,
+		ObservedAt:    time.Now().UTC(),
+		ActiveTunnels: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/agent/heartbeat", bytes.NewReader(heartbeatBody))
+	heartbeatRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(heartbeatRes, heartbeatReq)
+	if heartbeatRes.Code != http.StatusOK {
+		t.Fatalf("expected heartbeat status 200, got %d", heartbeatRes.Code)
+	}
+
+	if _, err := backend.CreateTunnel(context.Background(), types.TunnelSpec{
+		ID:         "tunnel-agent",
+		NodeID:     registerOut.NodeID,
+		Name:       "agent-visible",
+		Type:       "tcp",
+		Status:     "active",
+		PublicPort: 10086,
+		TargetHost: "127.0.0.1",
+		TargetPort: 16354,
+		Metadata:   map[string]string{"nodeId": registerOut.NodeID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	agentTunnelsReq := httptest.NewRequest(http.MethodGet, "/agent/tunnels?nodeId="+registerOut.NodeID, nil)
+	agentTunnelsRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(agentTunnelsRes, agentTunnelsReq)
+	if agentTunnelsRes.Code != http.StatusOK {
+		t.Fatalf("expected agent tunnels status 200, got %d", agentTunnelsRes.Code)
+	}
+
+	internalRoutesReq := httptest.NewRequest(http.MethodGet, "/internal/routes/tcp", nil)
+	internalRoutesRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(internalRoutesRes, internalRoutesReq)
+	if internalRoutesRes.Code != http.StatusOK {
+		t.Fatalf("expected internal routes status 200, got %d", internalRoutesRes.Code)
+	}
+}
+
+func registerNodeThroughAgent(t *testing.T, server *Server, nodeName string) types.NodeRegisterResponse {
+	t.Helper()
+	registerBody, err := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     nodeName,
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{TCPRelay: true, HTTPRelay: true, HTTPSRelay: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register status 200, got %d", registerRes.Code)
+	}
+	var out types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func withBearer(req *http.Request, token string) {
+	req.Header.Set("Authorization", "Bearer "+token)
 }

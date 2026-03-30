@@ -323,6 +323,57 @@ func TestStandbyPoolPrefersExpiredEviction(t *testing.T) {
 	}
 }
 
+func TestRuntimeSummaryReportsLivePoolCounts(t *testing.T) {
+	atomic.StoreInt64(&totalStandby, 0)
+	service := NewService("http://127.0.0.1:1")
+	keyA := routePoolKey("node-1", 10086)
+	keyB := routePoolKey("node-2", 10087)
+	poolA := newStandbyPool(keyA, standbyPoolTargetSize, standbyPoolMaxSize)
+	poolB := newStandbyPool(keyB, standbyPoolTargetSize, standbyPoolMaxSize)
+	service.pools[keyA] = poolA
+	service.pools[keyB] = poolB
+
+	for _, tc := range []struct {
+		pool  *standbyPool
+		key   string
+		hello types.AgentRelayHello
+	}{
+		{pool: poolA, key: keyA, hello: types.AgentRelayHello{NodeID: "node-1", TunnelID: "t-1", PublicPort: 10086, TargetHost: "127.0.0.1", TargetPort: 80}},
+		{pool: poolA, key: keyA, hello: types.AgentRelayHello{NodeID: "node-1", TunnelID: "t-2", PublicPort: 10086, TargetHost: "127.0.0.1", TargetPort: 80}},
+		{pool: poolB, key: keyB, hello: types.AgentRelayHello{NodeID: "node-2", TunnelID: "t-3", PublicPort: 10087, TargetHost: "127.0.0.1", TargetPort: 81}},
+	} {
+		serverConn, clientConn := net.Pipe()
+		defer clientConn.Close()
+		if _, _, err := service.enqueueStandbyConn(tc.pool, tc.key, standbyConn{conn: serverConn, hello: tc.hello, registeredAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	summary := service.RuntimeSummary()
+	if summary.TotalStandby != 3 {
+		t.Fatalf("expected totalStandby 3, got %d", summary.TotalStandby)
+	}
+	if len(summary.Pools) != 2 {
+		t.Fatalf("expected 2 pools, got %d", len(summary.Pools))
+	}
+	counts := map[string]int{}
+	for _, pool := range summary.Pools {
+		counts[pool.PoolKey] = pool.StandbyCount
+	}
+	if counts[keyA] != 2 {
+		t.Fatalf("expected %s standby count 2, got %d", keyA, counts[keyA])
+	}
+	if counts[keyB] != 1 {
+		t.Fatalf("expected %s standby count 1, got %d", keyB, counts[keyB])
+	}
+
+	service.drainPool(keyA)
+	service.drainPool(keyB)
+	if got := atomic.LoadInt64(&totalStandby); got != 0 {
+		t.Fatalf("expected totalStandby 0 after drains, got %d", got)
+	}
+}
+
 func dialTestUpgrade(relayURL string, hello types.AgentRelayHello) (net.Conn, error) {
 	parsedURL, err := neturlParse(relayURL)
 	if err != nil {

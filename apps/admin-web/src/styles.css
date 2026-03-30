@@ -175,6 +175,17 @@ th {
   background: #8d2b15;
 }
 
+.secondary {
+  background: #eef1f6;
+  color: #152234;
+}
+
+.inline-note {
+  margin: 14px 0 0;
+  color: #6b7587;
+  font-size: 13px;
+}
+
 button:disabled {
   opacity: 0.6;
   cursor: not-allowed;

@@ -191,3 +191,79 @@ GET http://82.156.236.104:18081/             -> 200
 - Pool behavior after redeploy was measurable, bounded to the intended standby window during the latest retest, and diagnosable via logs including `totalStandby`.
 - The current remaining risk is not protocol compatibility but policy quality: with the current fixed Windows agent process, the relay now bounds and evicts correctly, but smarter adaptive pool control is still future work.
 - Management no longer depends on manual SQL for the basic tunnel lifecycle.
+
+
+## 2026-03-31 Management Security Follow-Up
+
+### What Changed In This Round
+
+- Added minimal Bearer token protection to the management-side `server-api` endpoints without touching agent protocol compatibility.
+- Protected these management endpoints:
+  - `GET /api/nodes`
+  - `GET/POST /api/tunnels`
+  - `GET/PUT/DELETE /api/tunnels/{id}`
+  - `GET /api/server/metrics`
+  - `GET /api/relay/tcp/runtime`
+- Kept these endpoints compatible and unauthenticated for the current online Windows agent:
+  - `/agent/register`
+  - `/agent/heartbeat`
+  - `/agent/tunnels`
+  - `/internal/routes/tcp`
+- Kept `relay-tcp` protocol unchanged and verified that runtime summary now surfaces real live data already present in-process:
+  - `totalStandby`
+  - each pool `standbyCount`
+- Updated `admin-web` to:
+  - use Chinese management login text
+  - store and send Bearer token on every management request
+  - stop auto-refresh from overwriting tunnel form draft state and selected `nodeId`
+  - show the live standby pool summary returned by the protected runtime API
+
+### Verification In This Round
+
+```bash
+env -u GOOS -u GOARCH GOCACHE=/root/cloud-relay-platform/.gocache go test ./apps/server-api/internal/api ./apps/relay-tcp/internal/runtime
+npm --prefix apps/admin-web run build
+
+curl -s -o /tmp/api_nodes_unauth.json -w '%{http_code}' http://127.0.0.1:7710/api/nodes
+# -> 401
+
+curl -s -H 'Authorization: Bearer cloud-relay-admin-20260331' http://127.0.0.1:7710/api/relay/tcp/runtime
+# -> totalStandby=8, standbyCount=8 for node-1774805183388699102:10086
+
+curl -s -H 'Authorization: Bearer cloud-relay-admin-20260331' http://127.0.0.1:7710/api/nodes
+curl -s -H 'Authorization: Bearer cloud-relay-admin-20260331' http://127.0.0.1:7710/api/tunnels
+curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
+' http://82.156.236.104:10086
+curl -s -o /dev/null -w '%{http_code}
+' http://127.0.0.1:18081/
+```
+
+### Observed Results In This Round
+
+- Unauthenticated management API access now returns `401`.
+- Authenticated management API access succeeds with Bearer token.
+- Live relay runtime summary now returns real standby values instead of skeleton placeholders:
+
+```json
+{
+  "totalStandby": 8,
+  "pools": [
+    {
+      "poolKey": "node-1774805183388699102:10086",
+      "standbyCount": 8
+    }
+  ]
+}
+```
+
+- `admin-web` static site remains reachable on `http://82.156.236.104:18081/` and can now be used by entering the current Bearer token in-page.
+- Existing reverse TCP tunnel remained healthy after redeploy:
+
+```text
+code=200 total=0.039750
+```
+
+### Remaining Risk
+
+- The current Bearer token is a minimal management guard, not a full user system or HTTPS same-origin hardening solution.
+- Admin token is currently static env configuration and should later move behind dedicated domain + TLS + stronger credential lifecycle.

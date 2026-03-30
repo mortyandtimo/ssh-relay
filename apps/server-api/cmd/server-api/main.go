@@ -14,6 +14,7 @@ func main() {
 	addr := config.GetEnv("SERVER_API_ADDR", ":8080")
 	databaseURL := config.GetEnv("DATABASE_URL", "")
 	relayTCPRuntimeURL := config.GetEnv("RELAY_TCP_RUNTIME_URL", "http://127.0.0.1:9090/runtime")
+	adminToken := config.GetEnv("SERVER_API_ADMIN_TOKEN", "")
 
 	var apiStore store.Store
 	var err error
@@ -28,6 +29,10 @@ func main() {
 	defer apiStore.Close()
 
 	server := api.NewServer("dev", apiStore, relayTCPRuntimeURL)
+	server.SetAdminToken(adminToken)
+	if adminToken != "" {
+		log.Printf("server-api admin bearer auth enabled")
+	}
 	log.Printf("server-api listening on %s", addr)
 	if err := server.ListenAndServe(addr); err != nil {
 		log.Fatal(err)

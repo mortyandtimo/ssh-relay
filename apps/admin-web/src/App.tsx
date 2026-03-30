@@ -63,7 +63,15 @@ type TunnelForm = {
   publicPort: string;
 };
 
+type DashboardPayload = {
+  nodes: NodeSummary[];
+  tunnels: TunnelSpec[];
+  metrics: ServerMetrics;
+  relayRuntime: RelayRuntimeSummary;
+};
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
+const adminTokenStorageKey = "cloud-relay-admin-token";
 
 const initialTunnelForm: TunnelForm = {
   nodeId: "",
@@ -73,93 +81,196 @@ const initialTunnelForm: TunnelForm = {
   publicPort: "",
 };
 
+function readStoredAdminToken() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return window.localStorage.getItem(adminTokenStorageKey) || "";
+}
+
 export default function App() {
   const [nodes, setNodes] = useState<NodeSummary[]>([]);
   const [tunnels, setTunnels] = useState<TunnelSpec[]>([]);
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null);
   const [relayRuntime, setRelayRuntime] = useState<RelayRuntimeSummary | null>(null);
   const [tunnelForm, setTunnelForm] = useState<TunnelForm>(initialTunnelForm);
+  const [tokenInput, setTokenInput] = useState<string>(readStoredAdminToken);
+  const [adminToken, setAdminToken] = useState<string>(readStoredAdminToken);
+  const [hasInitializedNodeId, setHasInitializedNodeId] = useState(false);
   const [error, setError] = useState<string>("");
   const [message, setMessage] = useState<string>("");
   const [busyAction, setBusyAction] = useState<string>("");
 
   useEffect(() => {
+    if (!adminToken) {
+      setNodes([]);
+      setTunnels([]);
+      setMetrics(null);
+      setRelayRuntime(null);
+      setError("");
+      return;
+    }
+
     let cancelled = false;
 
-    async function load() {
+    async function loadSilently() {
       try {
-        const [nodesResponse, tunnelsResponse, metricsResponse, relayResponse] = await Promise.all([
-          fetch(`${apiBaseUrl}/api/nodes`),
-          fetch(`${apiBaseUrl}/api/tunnels`),
-          fetch(`${apiBaseUrl}/api/server/metrics`),
-          fetch(`${apiBaseUrl}/api/relay/tcp/runtime`),
-        ]);
-
-        if (!nodesResponse.ok || !tunnelsResponse.ok || !metricsResponse.ok || !relayResponse.ok) {
-          throw new Error("加载管理数据失败");
+        const payload = await loadDashboard(adminToken);
+        if (cancelled) {
+          return;
         }
-
-        const nodesPayload = await nodesResponse.json();
-        const tunnelsPayload = await tunnelsResponse.json();
-        const metricsPayload = await metricsResponse.json();
-        const relayPayload = await relayResponse.json();
-
-        if (!cancelled) {
-          const nodeItems = nodesPayload.items || [];
-          setNodes(nodeItems);
-          setTunnels(tunnelsPayload.items || []);
-          setMetrics(metricsPayload);
-          setRelayRuntime(relayPayload);
-          setTunnelForm((current) => ({
-            ...current,
-            nodeId: current.nodeId || nodeItems[0]?.nodeId || "",
-          }));
-          setError("");
-        }
+        applyDashboardPayload(payload);
+        setError("");
       } catch (loadError) {
         if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : "未知错误");
+          setError(loadError instanceof Error ? loadError.message : "加载管理数据失败");
         }
       }
     }
 
-    void load();
-    const timer = window.setInterval(load, 10000);
+    void loadSilently();
+    const timer = window.setInterval(() => {
+      void loadSilently();
+    }, 10000);
+
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [adminToken, hasInitializedNodeId]);
 
-  async function refresh() {
-    const [nodesResponse, tunnelsResponse, metricsResponse, relayResponse] = await Promise.all([
-      fetch(`${apiBaseUrl}/api/nodes`),
-      fetch(`${apiBaseUrl}/api/tunnels`),
-      fetch(`${apiBaseUrl}/api/server/metrics`),
-      fetch(`${apiBaseUrl}/api/relay/tcp/runtime`),
-    ]);
-    if (!nodesResponse.ok || !tunnelsResponse.ok || !metricsResponse.ok || !relayResponse.ok) {
-      throw new Error("刷新管理数据失败");
+  function applyDashboardPayload(payload: DashboardPayload) {
+    setNodes(payload.nodes);
+    setTunnels(payload.tunnels);
+    setMetrics(payload.metrics);
+    setRelayRuntime(payload.relayRuntime);
+
+    if (!hasInitializedNodeId) {
+      const defaultNodeId = payload.nodes[0]?.nodeId || "";
+      if (defaultNodeId !== "") {
+        setTunnelForm((current) => {
+          if (current.nodeId !== "") {
+            return current;
+          }
+          return { ...current, nodeId: defaultNodeId };
+        });
+        setHasInitializedNodeId(true);
+      }
     }
-    const nodesPayload = await nodesResponse.json();
-    const tunnelsPayload = await tunnelsResponse.json();
-    const metricsPayload = await metricsResponse.json();
-    const relayPayload = await relayResponse.json();
-    setNodes(nodesPayload.items || []);
-    setTunnels(tunnelsPayload.items || []);
-    setMetrics(metricsPayload);
-    setRelayRuntime(relayPayload);
+  }
+
+  async function requestJSON<T>(path: string, init?: { method?: string; body?: string; token?: string }): Promise<T> {
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+    };
+    if (init?.body) {
+      headers["Content-Type"] = "application/json";
+    }
+    if (init?.token) {
+      headers.Authorization = "Bearer " + init.token;
+    }
+
+    const response = await fetch(apiBaseUrl + path, {
+      method: init?.method || "GET",
+      headers,
+      body: init?.body,
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (response.status === 401) {
+      throw new Error("管理令牌无效或缺失");
+    }
+    if (!response.ok) {
+      const responseError = payload && typeof payload.error === "string" ? payload.error : "请求失败";
+      throw new Error(responseError);
+    }
+    return payload as T;
+  }
+
+  async function loadDashboard(token: string): Promise<DashboardPayload> {
+    const [nodesPayload, tunnelsPayload, metricsPayload, relayPayload] = await Promise.all([
+      requestJSON<{ items: NodeSummary[] }>("/api/nodes", { token }),
+      requestJSON<{ items: TunnelSpec[] }>("/api/tunnels", { token }),
+      requestJSON<ServerMetrics>("/api/server/metrics", { token }),
+      requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime", { token }),
+    ]);
+
+    return {
+      nodes: nodesPayload.items || [],
+      tunnels: tunnelsPayload.items || [],
+      metrics: metricsPayload,
+      relayRuntime: relayPayload,
+    };
+  }
+
+  async function refreshDashboard(showNotice: boolean) {
+    if (!adminToken) {
+      setError("请先输入管理令牌");
+      return;
+    }
+    setBusyAction("refresh");
+    setError("");
+    try {
+      const payload = await loadDashboard(adminToken);
+      applyDashboardPayload(payload);
+      if (showNotice) {
+        setMessage("管理数据已刷新。");
+      }
+    } catch (refreshError) {
+      setError(refreshError instanceof Error ? refreshError.message : "刷新管理数据失败");
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  async function reloadAfterMutation() {
+    if (!adminToken) {
+      return;
+    }
+    const payload = await loadDashboard(adminToken);
+    applyDashboardPayload(payload);
+  }
+
+  function submitAdminToken(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const nextToken = tokenInput.trim();
+    if (nextToken === "") {
+      setError("请输入管理令牌");
+      return;
+    }
+    window.localStorage.setItem(adminTokenStorageKey, nextToken);
+    setAdminToken(nextToken);
+    setError("");
+    setMessage("管理令牌已保存。");
+  }
+
+  function clearAdminToken() {
+    window.localStorage.removeItem(adminTokenStorageKey);
+    setAdminToken("");
+    setTokenInput("");
+    setNodes([]);
+    setTunnels([]);
+    setMetrics(null);
+    setRelayRuntime(null);
+    setTunnelForm(initialTunnelForm);
+    setHasInitializedNodeId(false);
+    setError("");
+    setMessage("已清除管理令牌。");
   }
 
   async function submitTunnel(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!adminToken) {
+      setError("请先输入管理令牌");
+      return;
+    }
     setBusyAction("create-tunnel");
     setError("");
     setMessage("");
     try {
-      const response = await fetch(`${apiBaseUrl}/api/tunnels`, {
+      await requestJSON<TunnelSpec>("/api/tunnels", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        token: adminToken,
         body: JSON.stringify({
           nodeId: tunnelForm.nodeId,
           name: tunnelForm.name,
@@ -171,13 +282,9 @@ export default function App() {
           status: "active",
         }),
       });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({ error: "创建隧道失败" }));
-        throw new Error(payload.error || "创建隧道失败");
-      }
       setTunnelForm((current) => ({ ...initialTunnelForm, nodeId: current.nodeId }));
-	      setMessage("隧道已创建。");
-      await refresh();
+      setMessage("隧道已创建。");
+      await reloadAfterMutation();
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "创建隧道失败");
     } finally {
@@ -186,14 +293,18 @@ export default function App() {
   }
 
   async function updateTunnelStatus(tunnel: TunnelSpec, status: "active" | "paused") {
-    const actionKey = `${tunnel.id}:${status}`;
+    if (!adminToken) {
+      setError("请先输入管理令牌");
+      return;
+    }
+    const actionKey = tunnel.id + ":" + status;
     setBusyAction(actionKey);
     setError("");
     setMessage("");
     try {
-      const response = await fetch(`${apiBaseUrl}/api/tunnels/${tunnel.id}`, {
+      await requestJSON<TunnelSpec>("/api/tunnels/" + tunnel.id, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        token: adminToken,
         body: JSON.stringify({
           nodeId: tunnel.nodeId,
           name: tunnel.name,
@@ -205,12 +316,8 @@ export default function App() {
           status,
         }),
       });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({ error: "更新隧道失败" }));
-        throw new Error(payload.error || "更新隧道失败");
-      }
       setMessage(status === "active" ? "隧道已启用。" : "隧道已暂停。");
-      await refresh();
+      await reloadAfterMutation();
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "更新隧道失败");
     } finally {
@@ -219,18 +326,21 @@ export default function App() {
   }
 
   async function deleteTunnel(tunnel: TunnelSpec) {
-    const actionKey = `${tunnel.id}:delete`;
+    if (!adminToken) {
+      setError("请先输入管理令牌");
+      return;
+    }
+    const actionKey = tunnel.id + ":delete";
     setBusyAction(actionKey);
     setError("");
     setMessage("");
     try {
-      const response = await fetch(`${apiBaseUrl}/api/tunnels/${tunnel.id}`, { method: "DELETE" });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({ error: "删除隧道失败" }));
-        throw new Error(payload.error || "删除隧道失败");
-      }
+      await requestJSON<{ status: string; id: string }>("/api/tunnels/" + tunnel.id, {
+        method: "DELETE",
+        token: adminToken,
+      });
       setMessage("隧道已删除。");
-      await refresh();
+      await reloadAfterMutation();
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "删除隧道失败");
     } finally {
@@ -242,11 +352,9 @@ export default function App() {
     <div className="shell">
       <header className="hero">
         <div>
-          <p className="eyebrow">Cloud Relay Platform</p>
-          <h1>最小可用管理闭环</h1>
-          <p className="summary">
-            直接管理节点和 TCP 隧道，不再依赖手写 SQL，并在一个页面里查看中继运行状态。
-          </p>
+          <p className="eyebrow">云中继平台</p>
+          <h1>管理面最小可用闭环</h1>
+          <p className="summary">统一查看节点、隧道、服务指标和反向 TCP 待命池状态，并通过管理令牌保护云端接口。</p>
         </div>
         {metrics ? (
           <div className="metrics-grid">
@@ -265,6 +373,37 @@ export default function App() {
       <section className="panel">
         <div className="panel-header">
           <div>
+            <p className="eyebrow">管理认证</p>
+            <h2>管理员令牌</h2>
+          </div>
+        </div>
+        <form className="tunnel-form" onSubmit={submitAdminToken}>
+          <label>
+            <span>Bearer Token</span>
+            <input
+              type="password"
+              value={tokenInput}
+              onChange={(event) => setTokenInput(event.target.value)}
+              placeholder="输入 SERVER_API_ADMIN_TOKEN"
+              required
+            />
+          </label>
+          <button type="submit" disabled={tokenInput.trim() === ""}>
+            保存令牌
+          </button>
+          <button type="button" className="secondary" disabled={adminToken === "" || busyAction === "refresh"} onClick={() => void refreshDashboard(true)}>
+            {busyAction === "refresh" ? "刷新中..." : "立即刷新"}
+          </button>
+          <button type="button" className="secondary" disabled={adminToken === ""} onClick={clearAdminToken}>
+            清除令牌
+          </button>
+        </form>
+        <p className="inline-note">当前状态：{adminToken === "" ? "未认证" : "已认证"}</p>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
             <p className="eyebrow">创建隧道</p>
             <h2>暴露节点本地服务</h2>
           </div>
@@ -274,7 +413,10 @@ export default function App() {
             <span>节点</span>
             <select
               value={tunnelForm.nodeId}
-              onChange={(event) => setTunnelForm((current) => ({ ...current, nodeId: event.target.value }))}
+              onChange={(event) => {
+                setTunnelForm((current) => ({ ...current, nodeId: event.target.value }));
+                setHasInitializedNodeId(true);
+              }}
               required
             >
               <option value="">选择节点</option>
@@ -320,7 +462,7 @@ export default function App() {
               required
             />
           </label>
-          <button type="submit" disabled={busyAction === "create-tunnel"}>
+          <button type="submit" disabled={busyAction === "create-tunnel" || adminToken === ""}>
             {busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}
           </button>
         </form>
@@ -359,7 +501,7 @@ export default function App() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={6}>暂无中继池状态。</td>
+                  <td colSpan={6}>{adminToken === "" ? "认证后显示实时待命池摘要。" : "暂无中继池状态。"}</td>
                 </tr>
               )}
             </tbody>
@@ -389,7 +531,7 @@ export default function App() {
             <tbody>
               {tunnels.length === 0 ? (
                 <tr>
-                  <td colSpan={6}>暂无隧道。</td>
+                  <td colSpan={6}>{adminToken === "" ? "认证后显示隧道列表。" : "暂无隧道。"}</td>
                 </tr>
               ) : (
                 tunnels.map((tunnel) => (
@@ -408,23 +550,23 @@ export default function App() {
                       <div className="actions-row">
                         <button
                           type="button"
-                          disabled={busyAction === `${tunnel.id}:active` || tunnel.status === "active"}
-                          onClick={() => updateTunnelStatus(tunnel, "active")}
+                          disabled={busyAction === tunnel.id + ":active" || tunnel.status === "active" || adminToken === ""}
+                          onClick={() => void updateTunnelStatus(tunnel, "active")}
                         >
                           启用
                         </button>
                         <button
                           type="button"
-                          disabled={busyAction === `${tunnel.id}:paused` || tunnel.status === "paused"}
-                          onClick={() => updateTunnelStatus(tunnel, "paused")}
+                          disabled={busyAction === tunnel.id + ":paused" || tunnel.status === "paused" || adminToken === ""}
+                          onClick={() => void updateTunnelStatus(tunnel, "paused")}
                         >
                           暂停
                         </button>
                         <button
                           type="button"
                           className="danger"
-                          disabled={busyAction === `${tunnel.id}:delete`}
-                          onClick={() => deleteTunnel(tunnel)}
+                          disabled={busyAction === tunnel.id + ":delete" || adminToken === ""}
+                          onClick={() => void deleteTunnel(tunnel)}
                         >
                           删除
                         </button>
@@ -445,7 +587,6 @@ export default function App() {
             <h2>节点在线状态</h2>
           </div>
         </div>
-
         <div className="table-wrap">
           <table>
             <thead>
@@ -461,7 +602,7 @@ export default function App() {
             <tbody>
               {nodes.length === 0 ? (
                 <tr>
-                  <td colSpan={6}>暂无节点。</td>
+                  <td colSpan={6}>{adminToken === "" ? "认证后显示节点状态。" : "暂无节点。"}</td>
                 </tr>
               ) : (
                 nodes.map((node) => (
@@ -502,5 +643,5 @@ function capabilitySummary(capabilities: NodeCapabilities) {
   if (capabilities.httpsRelay) active.push("HTTPS");
   if (capabilities.udpRelay) active.push("UDP");
   if (capabilities.p2pAssist) active.push("P2P");
-  return active.length > 0 ? active.join(", ") : "none";
+  return active.length > 0 ? active.join(", ") : "无";
 }

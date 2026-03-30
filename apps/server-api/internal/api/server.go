@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ type Server struct {
 	startedAt          time.Time
 	store              store.Store
 	relayTCPRuntimeURL string
+	adminToken         string
 	httpClient         *http.Client
 	mux                *http.ServeMux
 }
@@ -38,6 +40,10 @@ func (s *Server) Handler() http.Handler {
 	return withCORS(s.mux)
 }
 
+func (s *Server) SetAdminToken(token string) {
+	s.adminToken = strings.TrimSpace(token)
+}
+
 func (s *Server) ListenAndServe(addr string) error {
 	return http.ListenAndServe(addr, s.Handler())
 }
@@ -47,12 +53,38 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/agent/register", s.handleRegister)
 	s.mux.HandleFunc("/agent/heartbeat", s.handleHeartbeat)
 	s.mux.HandleFunc("/agent/tunnels", s.handleAgentTunnels)
-	s.mux.HandleFunc("/api/nodes", s.handleNodes)
-	s.mux.HandleFunc("/api/tunnels", s.handleTunnels)
-	s.mux.HandleFunc("/api/tunnels/", s.handleTunnelByID)
-	s.mux.HandleFunc("/api/server/metrics", s.handleServerMetrics)
-	s.mux.HandleFunc("/api/relay/tcp/runtime", s.handleRelayTCPRuntime)
+	s.mux.Handle("/api/nodes", s.requireAdmin(http.HandlerFunc(s.handleNodes)))
+	s.mux.Handle("/api/tunnels", s.requireAdmin(http.HandlerFunc(s.handleTunnels)))
+	s.mux.Handle("/api/tunnels/", s.requireAdmin(http.HandlerFunc(s.handleTunnelByID)))
+	s.mux.Handle("/api/server/metrics", s.requireAdmin(http.HandlerFunc(s.handleServerMetrics)))
+	s.mux.Handle("/api/relay/tcp/runtime", s.requireAdmin(http.HandlerFunc(s.handleRelayTCPRuntime)))
 	s.mux.HandleFunc("/internal/routes/tcp", s.handleTCPRoutes)
+}
+
+func (s *Server) requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := s.authorizeRequest(r); err != nil {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="cloud-relay-admin"`)
+			writeError(w, http.StatusUnauthorized, err.Error())
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) authorizeRequest(r *http.Request) error {
+	if s.adminToken == "" {
+		return nil
+	}
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	parts := strings.Fields(authHeader)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return errors.New("missing or invalid bearer token")
+	}
+	if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(s.adminToken)) != 1 {
+		return errors.New("missing or invalid bearer token")
+	}
+	return nil
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -367,7 +399,7 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
