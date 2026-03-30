@@ -93,12 +93,21 @@ Content    : <!DOCTYPE html>...
 ```
 
 - Final elastic-pool retest with the currently running Windows agent and the redeployed cloud relay confirmed the first elastic version works without requiring a Windows-side restart or protocol change.
+- Follow-up retest after tightening the first elastic pool implementation proved the cloud relay still works with the currently running Windows agent while enforcing a hard refill window back to `8` immediately after restart.
 
 ```text
 2026/03/30 15:44:40 standby reverse connection ready: ... poolSize=1 totalStandby=1
 2026/03/30 15:44:41 standby reverse connection ready: ... poolSize=2 totalStandby=2
 ...
 2026/03/30 15:44:42 standby reverse connection ready: ... poolSize=8 totalStandby=8
+```
+
+- After a fresh redeploy of the tightened version, the current online Windows agent again repopulated the pool only up to the intended bound:
+
+```text
+2026/03/30 16:05:27 standby reverse connection ready: ... poolSize=1 totalStandby=1
+...
+2026/03/30 16:05:27 standby reverse connection ready: ... poolSize=8 totalStandby=8
 ```
 
 - A fresh cloud-side request against the current online Windows agent still succeeded after the elastic-pool relay deploy:
@@ -113,6 +122,7 @@ code=200 total=0.068908
 - Tonight's cloud-side change improves pool admission behavior and observability, but it does not yet introduce a fully adaptive or tunnel-specific standby pool policy.
 - Because the Windows agent was treated as fixed tonight, this result should be considered a cloud-side stabilization step, not the final completed design for long-term pool management.
 - A longer soak test is still useful, but the latest retest now proves the current online Windows agent can pair successfully with the first elastic standby pool implementation.
+- A longer soak test is still useful, especially because the current Windows agent can later refill the pool above the initial target over time. The latest retest does, however, prove that the cloud-side implementation can restart cleanly, repopulate to the intended standby window, and serve traffic successfully with the currently running Windows agent.
 
 ## Windows-Side Restart Requirement
 

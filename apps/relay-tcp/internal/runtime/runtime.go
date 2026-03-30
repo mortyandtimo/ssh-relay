@@ -19,9 +19,8 @@ import (
 
 const (
 	routeSyncInterval     = 5 * time.Second
-	standbyPoolMinSize    = 1
-	standbyPoolTargetSize = 2
-	standbyPoolMaxSize    = 16
+	standbyPoolTargetSize = 8
+	standbyPoolBufferSize = 64
 	globalMaxStandby      = 200
 	standbyConnMaxAge     = 90 * time.Second
 	defaultAcquireTimeout = 10 * time.Second
@@ -38,6 +37,7 @@ type Service struct {
 	httpClient *http.Client
 
 	mu        sync.Mutex
+	poolOpMu  sync.Mutex
 	listeners map[int]net.Listener
 	routes    map[int]types.TunnelSpec
 	pools     map[string]chan standbyConn
@@ -335,60 +335,30 @@ func (s *Service) acquireStandbyConn(ctx context.Context, route types.TunnelSpec
 
 func (s *Service) enqueueStandbyConn(key string, item standbyConn) (int, int64, error) {
 	queue := s.poolForKey(key)
+
+	s.poolOpMu.Lock()
+	defer s.poolOpMu.Unlock()
+
 	if globalMaxStandby > 0 && atomic.LoadInt64(&totalStandby) >= globalMaxStandby {
 		return len(queue), atomic.LoadInt64(&totalStandby), errors.New("global standby pool full")
 	}
-	if len(queue) >= standbyPoolMaxSize {
-		select {
-		case evicted := <-queue:
-			remaining := len(queue)
-			totalAfterEvict := atomic.AddInt64(&totalStandby, -1)
-			if evicted.expired() {
-				log.Printf("evict expired standby reverse connection for key=%s tunnel=%s age=%s poolSize=%d totalStandby=%d to admit new standby", key, evicted.hello.TunnelID, evicted.age(), remaining, totalAfterEvict)
-			} else {
-				log.Printf("evict standby reverse connection for key=%s tunnel=%s age=%s poolSize=%d totalStandby=%d to keep max pool size=%d", key, evicted.hello.TunnelID, evicted.age(), remaining, totalAfterEvict, standbyPoolMaxSize)
-			}
-			_ = evicted.conn.Close()
-		case queue <- item:
-			poolSize := len(queue)
-			totalAfterAdd := atomic.AddInt64(&totalStandby, 1)
-			return poolSize, totalAfterAdd, nil
-		default:
+
+	for len(queue) >= standbyPoolTargetSize {
+		evicted := <-queue
+		remaining := len(queue)
+		totalAfterEvict := atomic.AddInt64(&totalStandby, -1)
+		if evicted.expired() {
+			log.Printf("evict expired standby reverse connection for key=%s tunnel=%s age=%s poolSize=%d totalStandby=%d to keep target pool size=%d", key, evicted.hello.TunnelID, evicted.age(), remaining, totalAfterEvict, standbyPoolTargetSize)
+		} else {
+			log.Printf("evict standby reverse connection for key=%s tunnel=%s age=%s poolSize=%d totalStandby=%d to keep target pool size=%d", key, evicted.hello.TunnelID, evicted.age(), remaining, totalAfterEvict, standbyPoolTargetSize)
 		}
+		_ = evicted.conn.Close()
 	}
-	select {
-	case queue <- item:
-		poolSize := len(queue)
-		totalAfterAdd := atomic.AddInt64(&totalStandby, 1)
-		return poolSize, totalAfterAdd, nil
-	default:
-		select {
-		case evicted := <-queue:
-			remaining := len(queue)
-			totalAfterEvict := atomic.AddInt64(&totalStandby, -1)
-			if evicted.expired() {
-				log.Printf("evict expired standby reverse connection for key=%s tunnel=%s age=%s poolSize=%d totalStandby=%d to admit new standby", key, evicted.hello.TunnelID, evicted.age(), remaining, totalAfterEvict)
-				_ = evicted.conn.Close()
-				select {
-				case queue <- item:
-					poolSize := len(queue)
-					totalAfterAdd := atomic.AddInt64(&totalStandby, 1)
-					return poolSize, totalAfterAdd, nil
-				default:
-					_ = item.conn.Close()
-					return len(queue), atomic.LoadInt64(&totalStandby), errors.New("standby pool full after expired eviction")
-				}
-			}
-			select {
-			case queue <- evicted:
-				_ = atomic.AddInt64(&totalStandby, 1)
-			default:
-				_ = evicted.conn.Close()
-			}
-		default:
-		}
-		return len(queue), atomic.LoadInt64(&totalStandby), errors.New("standby pool full")
-	}
+
+	queue <- item
+	poolSize := len(queue)
+	totalAfterAdd := atomic.AddInt64(&totalStandby, 1)
+	return poolSize, totalAfterAdd, nil
 }
 
 func (s *Service) poolForKey(key string) chan standbyConn {
@@ -398,7 +368,7 @@ func (s *Service) poolForKey(key string) chan standbyConn {
 	if ok {
 		return queue
 	}
-	queue = make(chan standbyConn, standbyPoolMaxSize)
+	queue = make(chan standbyConn, standbyPoolBufferSize)
 	s.pools[key] = queue
 	return queue
 }

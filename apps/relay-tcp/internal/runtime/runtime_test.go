@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,6 +166,56 @@ func TestPublicConnectionFailsWithoutStandbyAgentConnection(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected read failure when no standby agent connection exists")
 	}
+}
+
+func TestEnqueueStandbyConnMaintainsStrictPerKeyCap(t *testing.T) {
+	service := NewService("http://127.0.0.1:1")
+	key := routePoolKey("node-1", 10086)
+	var maxObserved int64
+	var wg sync.WaitGroup
+
+	for i := 0; i < standbyPoolTargetSize*3; i++ {
+		serverConn, clientConn := net.Pipe()
+		defer clientConn.Close()
+		wg.Add(1)
+		go func(idx int, conn net.Conn) {
+			defer wg.Done()
+			_, _, err := service.enqueueStandbyConn(key, standbyConn{
+				conn: conn,
+				hello: types.AgentRelayHello{
+					NodeID:     "node-1",
+					TunnelID:   fmt.Sprintf("t-%d", idx),
+					PublicPort: 10086,
+					TargetHost: "127.0.0.1",
+					TargetPort: 80,
+				},
+				registeredAt: time.Now().UTC(),
+			})
+			if err != nil {
+				t.Errorf("enqueue standby %d: %v", idx, err)
+				return
+			}
+			queueLen := len(service.poolForKey(key))
+			for {
+				current := atomic.LoadInt64(&maxObserved)
+				if int64(queueLen) <= current {
+					break
+				}
+				if atomic.CompareAndSwapInt64(&maxObserved, current, int64(queueLen)) {
+					break
+				}
+			}
+		}(i, serverConn)
+	}
+
+	wg.Wait()
+	if got := len(service.poolForKey(key)); got > standbyPoolTargetSize {
+		t.Fatalf("expected queue length <= %d, got %d", standbyPoolTargetSize, got)
+	}
+	if maxObserved > int64(standbyPoolTargetSize) {
+		t.Fatalf("expected max observed queue <= %d, got %d", standbyPoolTargetSize, maxObserved)
+	}
+	drainStandbyQueue(service.poolForKey(key))
 }
 
 func dialTestUpgrade(relayURL string, hello types.AgentRelayHello) (net.Conn, error) {
