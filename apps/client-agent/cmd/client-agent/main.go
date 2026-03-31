@@ -204,7 +204,7 @@ func (m *reverseManager) syncTunnels(ctx context.Context, nodeID string) error {
 	}
 	desired := make(map[string]types.TunnelSpec, len(items))
 	for _, item := range items {
-		if item.Type != "tcp" || item.Status != "active" || item.PublicPort == 0 {
+	if (item.Type != "tcp" && item.Type != "socks5") || item.Status != "active" || item.PublicPort == 0 {
 			continue
 		}
 		desired[item.ID] = item
@@ -321,6 +321,10 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 	}
 	stopKeepalive()
 
+	if tunnel.Type == "socks5" {
+		return serveSOCKS5(ctx, conn)
+	}
+
 	targetConn, err := (&net.Dialer{Timeout: m.connectTimout}).DialContext(ctx, "tcp", net.JoinHostPort(tunnel.TargetHost, fmt.Sprintf("%d", tunnel.TargetPort)))
 	if err != nil {
 		return fmt.Errorf("dial target %s:%d: %w", tunnel.TargetHost, tunnel.TargetPort, err)
@@ -418,6 +422,98 @@ func proxyReverseConnection(relayConn net.Conn, targetConn net.Conn) {
 	}
 	if secondErr != nil && !errors.Is(secondErr, io.EOF) {
 		log.Printf("reverse relay second copy ended with error: %v", secondErr)
+	}
+}
+
+func serveSOCKS5(ctx context.Context, relayConn net.Conn) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = relayConn.SetDeadline(deadline)
+	}
+	reader := bufio.NewReader(relayConn)
+
+	version, err := reader.ReadByte()
+	if err != nil {
+		return err
+	}
+	if version != 0x05 {
+		return fmt.Errorf("unsupported socks version %d", version)
+	}
+	methodCount, err := reader.ReadByte()
+	if err != nil {
+		return err
+	}
+	methods := make([]byte, int(methodCount))
+	if _, err := io.ReadFull(reader, methods); err != nil {
+		return err
+	}
+	if _, err := relayConn.Write([]byte{0x05, 0x00}); err != nil {
+		return err
+	}
+
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return err
+	}
+	if header[0] != 0x05 {
+		return fmt.Errorf("invalid request version %d", header[0])
+	}
+	if header[1] != 0x01 {
+		_, _ = relayConn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return fmt.Errorf("unsupported socks command %d", header[1])
+	}
+
+	targetHost, err := readSOCKSAddress(reader, header[3])
+	if err != nil {
+		_, _ = relayConn.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return err
+	}
+	portBytes := make([]byte, 2)
+	if _, err := io.ReadFull(reader, portBytes); err != nil {
+		return err
+	}
+	targetPort := int(portBytes[0])<<8 | int(portBytes[1])
+
+	dialer := &net.Dialer{Timeout: defaultRelayTimeout}
+	targetConn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort)))
+	if err != nil {
+		_, _ = relayConn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return fmt.Errorf("dial socks target %s:%d: %w", targetHost, targetPort, err)
+	}
+	defer targetConn.Close()
+
+	if _, err := relayConn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+		return err
+	}
+	proxyReverseConnection(&bufferedConn{Conn: relayConn, reader: reader}, targetConn)
+	return nil
+}
+
+func readSOCKSAddress(reader *bufio.Reader, atyp byte) (string, error) {
+	switch atyp {
+	case 0x01:
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(reader, buf); err != nil {
+			return "", err
+		}
+		return net.IP(buf).String(), nil
+	case 0x03:
+		length, err := reader.ReadByte()
+		if err != nil {
+			return "", err
+		}
+		buf := make([]byte, int(length))
+		if _, err := io.ReadFull(reader, buf); err != nil {
+			return "", err
+		}
+		return string(buf), nil
+	case 0x04:
+		buf := make([]byte, 16)
+		if _, err := io.ReadFull(reader, buf); err != nil {
+			return "", err
+		}
+		return net.IP(buf).String(), nil
+	default:
+		return "", fmt.Errorf("unsupported socks address type %d", atyp)
 	}
 }
 

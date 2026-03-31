@@ -168,3 +168,18 @@ curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
   - unselected state shows the create-tunnel form
   - selected state shows tunnel editing context instead of keeping create/edit stacked as equal-weight forms
   - clicking the same selected tunnel again clears the selection and returns to create mode
+
+### SOCKS5 Minimal Design (2026-03-31)
+
+- SOCKS5 is implemented as a new tunnel type: `socks5`
+- It is not modeled as a special `tcp` mode, because the control plane, audit path, node binding, public port allocation and admin UI can directly reuse the existing tunnel model with less ambiguity
+- Current minimal runtime shape:
+  - management plane creates a `socks5` tunnel bound to a node and a public port
+  - TCP relay still provides the public TCP entrypoint
+  - after reverse session start, the client-agent handles SOCKS5 on that stream instead of dialing a fixed target first
+  - current SOCKS5 implementation supports CONNECT only
+- Current non-goals for this version:
+  - no UDP associate
+  - no advanced authentication
+  - no ACL / policy engine
+  - no proxy chaining / transparent mode

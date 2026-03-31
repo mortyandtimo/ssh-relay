@@ -468,14 +468,14 @@ func (s *InMemoryStore) countActiveTunnelsForNode(nodeID string) int {
 }
 
 func (s *InMemoryStore) findPublicPortConflictLocked(excludeID, tunnelType, status string, publicPort int) bool {
-	if tunnelType != "tcp" || status != "active" || publicPort == 0 {
+	if (tunnelType != "tcp" && tunnelType != "socks5") || status != "active" || publicPort == 0 {
 		return false
 	}
 	for id, tunnel := range s.tunnels {
 		if id == excludeID {
 			continue
 		}
-		if tunnel.Type == "tcp" && tunnel.Status == "active" && tunnel.PublicPort == publicPort {
+		if (tunnel.Type == "tcp" || tunnel.Type == "socks5") && tunnel.Status == "active" && tunnel.PublicPort == publicPort {
 			return true
 		}
 	}

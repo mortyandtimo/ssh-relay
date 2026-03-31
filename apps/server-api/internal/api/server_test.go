@@ -428,6 +428,62 @@ func TestNodeListPagination(t *testing.T) {
 	}
 }
 
+func TestSOCKS5TunnelLifecycleVisibleToAgentAndRoutes(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+	registerOut := registerNodeThroughAgent(t, server, "socks-node")
+
+	createBody, err := json.Marshal(map[string]any{
+		"id":         "tunnel-socks5-a",
+		"nodeId":     registerOut.NodeID,
+		"name":       "socks-entry",
+		"type":       "socks5",
+		"targetHost": "socks5",
+		"targetPort": 1080,
+		"publicPort": 11080,
+		"status":     "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create status 201, got %d", createRes.Code)
+	}
+
+	agentReq := httptest.NewRequest(http.MethodGet, "/agent/tunnels?nodeId="+registerOut.NodeID, nil)
+	agentRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(agentRes, agentReq)
+	if agentRes.Code != http.StatusOK {
+		t.Fatalf("expected agent tunnels status 200, got %d", agentRes.Code)
+	}
+	var agentOut struct{ Items []types.TunnelSpec `json:"items"` }
+	if err := json.NewDecoder(agentRes.Body).Decode(&agentOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(agentOut.Items) != 1 || agentOut.Items[0].Type != "socks5" {
+		t.Fatalf("expected socks5 tunnel from agent view, got %+v", agentOut.Items)
+	}
+
+	routesReq := httptest.NewRequest(http.MethodGet, "/internal/routes/tcp", nil)
+	routesRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(routesRes, routesReq)
+	if routesRes.Code != http.StatusOK {
+		t.Fatalf("expected routes status 200, got %d", routesRes.Code)
+	}
+	var routesOut struct{ Items []types.TunnelSpec `json:"items"` }
+	if err := json.NewDecoder(routesRes.Body).Decode(&routesOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(routesOut.Items) != 1 || routesOut.Items[0].Type != "socks5" {
+		t.Fatalf("expected socks5 tunnel in tcp routes, got %+v", routesOut.Items)
+	}
+}
+
 func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 	runtimeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(types.RelayRuntimeSummary{

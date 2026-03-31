@@ -183,7 +183,7 @@ func (s *Server) handleAgentTunnels(w http.ResponseWriter, r *http.Request) {
 	}
 	filter := store.TunnelFilter{NodeID: nodeID, Type: r.URL.Query().Get("type"), Status: r.URL.Query().Get("status")}
 	if filter.Type == "" {
-		filter.Type = "tcp"
+		filter.Type = ""
 	}
 	if filter.Status == "" {
 		filter.Status = "active"
@@ -660,7 +660,7 @@ func (s *Server) handleTCPRoutes(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	items, err := s.store.ListTunnels(r.Context(), store.TunnelFilter{Type: "tcp", Status: "active"})
+	items, err := s.store.ListTunnels(r.Context(), store.TunnelFilter{Status: "active"})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

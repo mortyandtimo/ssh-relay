@@ -105,6 +105,7 @@ type RelayRuntimeSummary = {
 type TunnelForm = {
   nodeId: string;
   name: string;
+  type: "tcp" | "socks5";
   targetHost: string;
   targetPort: string;
   publicPort: string;
@@ -170,6 +171,7 @@ const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
 const initialTunnelForm: TunnelForm = {
   nodeId: "",
   name: "",
+  type: "tcp",
   targetHost: "127.0.0.1",
   targetPort: "",
   publicPort: "",
@@ -630,10 +632,10 @@ export default function App() {
         body: JSON.stringify({
           nodeId: tunnelForm.nodeId,
           name: tunnelForm.name,
-          type: "tcp",
+          type: tunnelForm.type,
           transportPolicy: "relay_only",
-          targetHost: tunnelForm.targetHost,
-          targetPort: Number(tunnelForm.targetPort),
+          targetHost: tunnelForm.type === "socks5" ? "socks5" : tunnelForm.targetHost,
+          targetPort: tunnelForm.type === "socks5" ? 1080 : Number(tunnelForm.targetPort),
           publicPort: Number(tunnelForm.publicPort),
           status: "active",
         }),
@@ -1096,6 +1098,13 @@ export default function App() {
                       <h3>创建隧道</h3>
                       <form className="form-grid" onSubmit={createTunnel}>
                         <label>
+                          <span>类型</span>
+                          <select value={tunnelForm.type} onChange={(event) => setTunnelForm((current) => ({ ...current, type: event.target.value as "tcp" | "socks5" }))}>
+                            <option value="tcp">TCP</option>
+                            <option value="socks5">SOCKS5</option>
+                          </select>
+                        </label>
+                        <label>
                           <span>节点</span>
                           <select value={tunnelForm.nodeId} onChange={(event) => { setTunnelForm((current) => ({ ...current, nodeId: event.target.value })); setHasInitializedNodeId(true); }} required>
                             <option value="">选择节点</option>
@@ -1103,8 +1112,8 @@ export default function App() {
                           </select>
                         </label>
                         <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
-                        <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required /></label>
-                        <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required /></label>
+                        {tunnelForm.type === "tcp" ? <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required /></label> : <label><span>代理说明</span><input value="节点侧内置 SOCKS5" disabled /></label>}
+                        {tunnelForm.type === "tcp" ? <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required /></label> : <label><span>协议能力</span><input value="仅 CONNECT，不含 UDP" disabled /></label>}
                         <label><span>公网端口</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
                         <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
                       </form>
@@ -1162,6 +1171,7 @@ export default function App() {
                             <span className={statusPillClass(tunnel.status)}>{tunnel.status}</span>
                           </div>
                           <div className="tunnel-route">公网 {tunnel.publicPort}</div>
+                          <div className="muted-line">类型 {tunnel.type}</div>
                           <div className="muted-line">目标 {tunnel.targetHost}:{tunnel.targetPort}</div>
                           <div className="muted-line">节点 {tunnel.nodeId}</div>
                         </article>
@@ -1172,11 +1182,12 @@ export default function App() {
 
                 <div className="table-wrap compact-table">
                   <table>
-                    <thead><tr><th>名称</th><th>节点</th><th>状态</th><th>公网</th><th>目标</th><th>操作</th></tr></thead>
+                    <thead><tr><th>名称</th><th>类型</th><th>节点</th><th>状态</th><th>公网</th><th>目标</th><th>操作</th></tr></thead>
                     <tbody>
-                      {tunnels.length === 0 ? <tr><td colSpan={6}>暂无隧道。</td></tr> : tunnels.map((tunnel) => (
+                      {tunnels.length === 0 ? <tr><td colSpan={7}>暂无隧道。</td></tr> : tunnels.map((tunnel) => (
                         <tr key={tunnel.id} className={editingTunnelID === tunnel.id ? "selected-row" : undefined}>
                           <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
+                          <td>{tunnel.type}</td>
                           <td>{tunnel.nodeId}</td>
                           <td><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span></td>
                           <td>{tunnel.publicPort}</td>
