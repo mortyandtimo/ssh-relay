@@ -10,11 +10,11 @@ const (
 )
 
 type NodeCapabilities struct {
-	TCPRelay   bool `json:"tcpRelay"`
-	HTTPRelay  bool `json:"httpRelay"`
-	HTTPSRelay bool `json:"httpsRelay"`
-	UDPRelay   bool `json:"udpRelay"`
-	P2PAssist  bool `json:"p2pAssist"`
+	TCPRelay      bool `json:"tcpRelay"`
+	HTTPRelay     bool `json:"httpRelay"`
+	HTTPSRelay    bool `json:"httpsRelay"`
+	UDPRelay      bool `json:"udpRelay"`
+	P2PAssist     bool `json:"p2pAssist"`
 	SOCKS5Connect bool `json:"socks5Connect"`
 }
 
@@ -37,21 +37,21 @@ const (
 type NodeTrustLevel string
 
 const (
-	NodeTrustTrusted NodeTrustLevel = "trusted"
-	NodeTrustLimited NodeTrustLevel = "limited"
+	NodeTrustTrusted  NodeTrustLevel = "trusted"
+	NodeTrustLimited  NodeTrustLevel = "limited"
 	NodeTrustExternal NodeTrustLevel = "external"
 )
 
 type NodeMetadata struct {
-	Hostname    string   `json:"hostname,omitempty"`
-	OS          string   `json:"os,omitempty"`
-	Arch        string   `json:"arch,omitempty"`
-	NodeRole    NodeRole `json:"nodeRole,omitempty"`
-	Environment NodeEnvironment `json:"environment,omitempty"`
-	TrustLevel  NodeTrustLevel `json:"trustLevel,omitempty"`
-	Owner       string   `json:"owner,omitempty"`
-	Location    string   `json:"location,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
+	Hostname    string            `json:"hostname,omitempty"`
+	OS          string            `json:"os,omitempty"`
+	Arch        string            `json:"arch,omitempty"`
+	NodeRole    NodeRole          `json:"nodeRole,omitempty"`
+	Environment NodeEnvironment   `json:"environment,omitempty"`
+	TrustLevel  NodeTrustLevel    `json:"trustLevel,omitempty"`
+	Owner       string            `json:"owner,omitempty"`
+	Location    string            `json:"location,omitempty"`
+	Tags        []string          `json:"tags,omitempty"`
 	Extra       map[string]string `json:"-"`
 }
 
@@ -76,19 +76,29 @@ type NodeHeartbeatRequest struct {
 	ActiveTunnels int               `json:"activeTunnels"`
 }
 
+type TunnelHealthStatus string
+
+const (
+	TunnelHealthHealthy           TunnelHealthStatus = "healthy"
+	TunnelHealthNodeOffline       TunnelHealthStatus = "node_offline"
+	TunnelHealthCapabilityMissing TunnelHealthStatus = "capability_missing"
+	TunnelHealthMisconfigured     TunnelHealthStatus = "misconfigured"
+)
+
 type TunnelSpec struct {
-	ID              string            `json:"id"`
-	Name            string            `json:"name"`
-	Type            string            `json:"type"`
-	TransportPolicy string            `json:"transportPolicy"`
-	NodeID          string            `json:"nodeId,omitempty"`
-	TargetHost      string            `json:"targetHost"`
-	TargetPort      int               `json:"targetPort"`
-	PublicPort      int               `json:"publicPort,omitempty"`
-	Domain          string            `json:"domain,omitempty"`
-	TLSMode         string            `json:"tlsMode,omitempty"`
-	Status          string            `json:"status"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
+	ID              string             `json:"id"`
+	Name            string             `json:"name"`
+	Type            string             `json:"type"`
+	TransportPolicy string             `json:"transportPolicy"`
+	NodeID          string             `json:"nodeId,omitempty"`
+	TargetHost      string             `json:"targetHost"`
+	TargetPort      int                `json:"targetPort"`
+	PublicPort      int                `json:"publicPort,omitempty"`
+	Domain          string             `json:"domain,omitempty"`
+	TLSMode         string             `json:"tlsMode,omitempty"`
+	Status          string             `json:"status"`
+	HealthStatus    TunnelHealthStatus `json:"healthStatus,omitempty"`
+	Metadata        map[string]string  `json:"metadata,omitempty"`
 }
 
 type AgentRelayHello struct {
@@ -133,10 +143,10 @@ type NodeListResponse struct {
 }
 
 type NodeOption struct {
-	NodeID   string `json:"nodeId"`
-	NodeName string `json:"nodeName"`
-	Status   string `json:"status"`
-	SupportsSOCKS5 bool `json:"supportsSOCKS5"`
+	NodeID         string `json:"nodeId"`
+	NodeName       string `json:"nodeName"`
+	Status         string `json:"status"`
+	SupportsSOCKS5 bool   `json:"supportsSOCKS5"`
 }
 
 type NodeOptionsResponse struct {

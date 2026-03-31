@@ -279,6 +279,175 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 	}
 }
 
+func TestTunnelHealthStatusDerivedFromNodeAndConfig(t *testing.T) {
+	backend := store.NewInMemoryStore()
+	server := NewServer("test", backend, "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerHealthyBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeID:       "node-healthy",
+		NodeName:     "node-healthy",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{TCPRelay: true, SOCKS5Connect: true},
+	})
+	registerHealthyReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerHealthyBody))
+	registerHealthyRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerHealthyRes, registerHealthyReq)
+	if registerHealthyRes.Code != http.StatusOK {
+		t.Fatalf("expected healthy node register 200, got %d", registerHealthyRes.Code)
+	}
+
+	registerOfflineBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeID:       "node-offline",
+		NodeName:     "node-offline",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{TCPRelay: true},
+	})
+	registerOfflineReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerOfflineBody))
+	registerOfflineRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerOfflineRes, registerOfflineReq)
+	if registerOfflineRes.Code != http.StatusOK {
+		t.Fatalf("expected offline node register 200, got %d", registerOfflineRes.Code)
+	}
+
+	createHealthyBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-healthy",
+		"nodeId":     "node-healthy",
+		"name":       "healthy",
+		"type":       "tcp",
+		"targetHost": "127.0.0.1",
+		"targetPort": 8080,
+		"publicPort": 10101,
+		"status":     "active",
+	})
+	createHealthyReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createHealthyBody))
+	applyCookies(createHealthyReq, adminCookies)
+	createHealthyRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createHealthyRes, createHealthyReq)
+	if createHealthyRes.Code != http.StatusCreated {
+		t.Fatalf("expected healthy tunnel create 201, got %d", createHealthyRes.Code)
+	}
+
+	createOfflineBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-offline",
+		"nodeId":     "node-offline",
+		"name":       "offline",
+		"type":       "tcp",
+		"targetHost": "127.0.0.1",
+		"targetPort": 8081,
+		"publicPort": 10102,
+		"status":     "active",
+	})
+	createOfflineReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createOfflineBody))
+	applyCookies(createOfflineReq, adminCookies)
+	createOfflineRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createOfflineRes, createOfflineReq)
+	if createOfflineRes.Code != http.StatusCreated {
+		t.Fatalf("expected offline tunnel create 201, got %d", createOfflineRes.Code)
+	}
+
+	createCapBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-capability-missing",
+		"nodeId":     "node-healthy",
+		"name":       "capability-missing",
+		"type":       "socks5",
+		"publicPort": 10103,
+		"status":     "active",
+	})
+	createCapReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createCapBody))
+	applyCookies(createCapReq, adminCookies)
+	createCapRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createCapRes, createCapReq)
+	if createCapRes.Code != http.StatusCreated {
+		t.Fatalf("expected socks5 tunnel create 201, got %d", createCapRes.Code)
+	}
+
+	misconfigured, err := backend.CreateTunnel(context.Background(), types.TunnelSpec{
+		ID:         "tunnel-misconfigured",
+		NodeID:     "node-healthy",
+		Name:       "misconfigured",
+		Type:       "tcp",
+		Status:     "active",
+		PublicPort: 10104,
+		TargetHost: "",
+		TargetPort: 0,
+		Metadata:   map[string]string{"nodeId": "node-healthy"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := server.withTunnelHealthOne(context.Background(), misconfigured).HealthStatus; got != types.TunnelHealthMisconfigured {
+		t.Fatalf("expected direct misconfigured health, got %q", got)
+	}
+
+	offlineNode, err := backend.GetNode(context.Background(), "node-offline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	offlineNode.LastSeenAt = time.Now().UTC().Add(-2 * time.Minute)
+
+	healthyNode, err := backend.GetNode(context.Background(), "node-healthy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthyNode.Capabilities.SOCKS5Connect = false
+
+	server.store = nodeOverrideStore{
+		Store: backend,
+		overrides: map[string]types.NodeSummary{
+			"node-offline": offlineNode,
+			"node-healthy": healthyNode,
+		},
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/tunnels", nil)
+	applyCookies(listReq, adminCookies)
+	listRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(listRes, listReq)
+	if listRes.Code != http.StatusOK {
+		t.Fatalf("expected list tunnels 200, got %d", listRes.Code)
+	}
+	var listOut struct {
+		Items []types.TunnelSpec `json:"items"`
+	}
+	if err := json.NewDecoder(listRes.Body).Decode(&listOut); err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]types.TunnelHealthStatus{}
+	for _, item := range listOut.Items {
+		got[item.ID] = item.HealthStatus
+	}
+	if got["tunnel-healthy"] != types.TunnelHealthHealthy {
+		t.Fatalf("expected healthy health status, got %q", got["tunnel-healthy"])
+	}
+	if got["tunnel-offline"] != types.TunnelHealthNodeOffline {
+		t.Fatalf("expected node_offline health status, got %q", got["tunnel-offline"])
+	}
+	if got["tunnel-capability-missing"] != types.TunnelHealthCapabilityMissing {
+		t.Fatalf("expected capability_missing health status, got %q", got["tunnel-capability-missing"])
+	}
+	if got["tunnel-misconfigured"] != types.TunnelHealthMisconfigured {
+		t.Fatalf("expected misconfigured health status, got %q", got["tunnel-misconfigured"])
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/tunnel-offline", nil)
+	applyCookies(getReq, adminCookies)
+	getRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(getRes, getReq)
+	if getRes.Code != http.StatusOK {
+		t.Fatalf("expected get tunnel 200, got %d", getRes.Code)
+	}
+	var tunnelOut types.TunnelSpec
+	if err := json.NewDecoder(getRes.Body).Decode(&tunnelOut); err != nil {
+		t.Fatal(err)
+	}
+	if tunnelOut.HealthStatus != types.TunnelHealthNodeOffline {
+		t.Fatalf("expected detail node_offline, got %q", tunnelOut.HealthStatus)
+	}
+}
+
 func TestNodeMetadataFilterAndUpdate(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
@@ -468,7 +637,9 @@ func TestSOCKS5TunnelLifecycleVisibleToAgentAndRoutes(t *testing.T) {
 	if agentRes.Code != http.StatusOK {
 		t.Fatalf("expected agent tunnels status 200, got %d", agentRes.Code)
 	}
-	var agentOut struct{ Items []types.TunnelSpec `json:"items"` }
+	var agentOut struct {
+		Items []types.TunnelSpec `json:"items"`
+	}
 	if err := json.NewDecoder(agentRes.Body).Decode(&agentOut); err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +653,9 @@ func TestSOCKS5TunnelLifecycleVisibleToAgentAndRoutes(t *testing.T) {
 	if routesRes.Code != http.StatusOK {
 		t.Fatalf("expected routes status 200, got %d", routesRes.Code)
 	}
-	var routesOut struct{ Items []types.TunnelSpec `json:"items"` }
+	var routesOut struct {
+		Items []types.TunnelSpec `json:"items"`
+	}
 	if err := json.NewDecoder(routesRes.Body).Decode(&routesOut); err != nil {
 		t.Fatal(err)
 	}
@@ -851,6 +1024,18 @@ func TestAgentEndpointsRemainAccessibleWithSessionAuthEnabled(t *testing.T) {
 	if internalRoutesRes.Code != http.StatusOK {
 		t.Fatalf("expected internal routes status 200, got %d", internalRoutesRes.Code)
 	}
+}
+
+type nodeOverrideStore struct {
+	store.Store
+	overrides map[string]types.NodeSummary
+}
+
+func (s nodeOverrideStore) GetNode(ctx context.Context, nodeID string) (types.NodeSummary, error) {
+	if item, ok := s.overrides[nodeID]; ok {
+		return item, nil
+	}
+	return s.Store.GetNode(ctx, nodeID)
 }
 
 func loginAndCollectCookies(t *testing.T, server *Server, email, password string) []*http.Cookie {

@@ -66,6 +66,9 @@ type NodeEditForm = {
   tags: string;
 };
 
+type TunnelHealthStatus = "healthy" | "node_offline" | "capability_missing" | "misconfigured";
+type TunnelHealthFilter = "all" | "healthy" | "unhealthy";
+
 type TunnelSpec = {
   id: string;
   name: string;
@@ -76,6 +79,7 @@ type TunnelSpec = {
   targetPort: number;
   publicPort: number;
   status: string;
+  healthStatus?: TunnelHealthStatus;
 };
 
 type ServerMetrics = {
@@ -218,6 +222,7 @@ export default function App() {
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null);
   const [relayRuntime, setRelayRuntime] = useState<RelayRuntimeSummary | null>(null);
   const [tunnelForm, setTunnelForm] = useState<TunnelForm>(initialTunnelForm);
+  const [tunnelHealthFilter, setTunnelHealthFilter] = useState<TunnelHealthFilter>("all");
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [bootstrapForm, setBootstrapForm] = useState({ email: "", displayName: "管理员", password: "", bootstrapSecret: "" });
   const [userForm, setUserForm] = useState({ email: "", displayName: "", password: "", role: "manager" as UserRole });
@@ -806,6 +811,8 @@ export default function App() {
   const selectedNode = selectedNodeID ? nodes.find((node) => node.nodeId === selectedNodeID) ?? null : null;
   const onlineNodes = nodes.filter((node) => node.status === "online").length;
   const activeTunnels = tunnels.filter((tunnel) => tunnel.status === "active").length;
+  const filteredTunnels = tunnels.filter((tunnel) => matchesTunnelHealthFilter(tunnel, tunnelHealthFilter));
+  const unhealthyTunnelCount = tunnels.filter((tunnel) => (tunnel.healthStatus || "healthy") !== "healthy").length;
   const canOperate = activeUser.role !== "user";
   const canManageUsers = activeUser.role === "admin";
   const nodeStart = nodes.length === 0 ? 0 : nodeFilter.offset + 1;
@@ -891,6 +898,7 @@ export default function App() {
             <MiniStat label="在线节点" value={String(onlineNodes)} />
             <MiniStat label="活跃隧道" value={String(activeTunnels)} />
             <MiniStat label="待命池" value={String(relayRuntime?.pools.length ?? 0)} />
+            <MiniStat label="隧道异常" value={String(unhealthyTunnelCount)} />
             <MiniStat label="审计总数" value={String(auditTotal)} />
           </div>
         ) : null}
@@ -926,7 +934,8 @@ export default function App() {
                 <div className="signal-strip">
                   <SignalCard label="服务" value={metrics?.service ?? "server-api"} />
                   <SignalCard label="启动时间" value={metrics ? formatDate(metrics.startedAt) : "-"} />
-                  <SignalCard label="审计窗口" value={auditTotal === 0 ? "暂无" : `${auditStart}-${auditEnd} / ${auditTotal}`} />
+                  <SignalCard label="隧道异常" value={unhealthyTunnelCount === 0 ? "无" : String(unhealthyTunnelCount)} />
+                  <SignalCard label="审计窗口" value={auditTotal === 0 ? "暂无" : auditStart + "-" + auditEnd + " / " + auditTotal} />
                   <SignalCard label="最新动作" value={auditLogs[0]?.action ?? "-"} />
                 </div>
                 {relayRuntime?.pools?.length ? (
@@ -1092,6 +1101,17 @@ export default function App() {
               </div>
             ) : (
               <>
+                <div className="section-head compact-head tunnel-filter-bar">
+                  <div>
+                    <h3>隧道健康筛选</h3>
+                    <span className="muted-line">区分配置停用与当前异常，不再只看 active / paused。</span>
+                  </div>
+                  <div className="inline-switches">
+                    <button type="button" className={tunnelHealthFilter === "all" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("all")}>全部</button>
+                    <button type="button" className={tunnelHealthFilter === "healthy" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("healthy")}>正常</button>
+                    <button type="button" className={tunnelHealthFilter === "unhealthy" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("unhealthy")}>异常</button>
+                  </div>
+                </div>
                 <div className="split-layout tunnel-workspace">
                   <div className="workspace-column panel-stack">
                     {editingTunnelID === null ? (
@@ -1156,8 +1176,8 @@ export default function App() {
                   <section className="subpanel">
                     <h3>重点隧道</h3>
                     <div className="spotlight-grid compact-cards">
-                      {tunnels.length === 0 ? <EmptyState title="暂无隧道" body="创建后会在这里优先展示公网入口和目标映射。" /> : tunnels.map((tunnel) => (
-                        <article key={tunnel.id} className={editingTunnelID === tunnel.id ? "spotlight-card tunnel-card interactive-card selected-card" : "spotlight-card tunnel-card interactive-card"} onClick={() => {
+                      {filteredTunnels.length === 0 ? <EmptyState title="暂无匹配隧道" body="当前筛选条件下没有匹配结果，可以切换到全部查看。" /> : filteredTunnels.map((tunnel) => (
+                        <article key={tunnel.id} className={editingTunnelID === tunnel.id ? tunnelCardClass(tunnel, true) : tunnelCardClass(tunnel, false)} onClick={() => {
                           if (editingTunnelID === tunnel.id) {
                             clearTunnelEdit();
                             return;
@@ -1172,8 +1192,12 @@ export default function App() {
                             <span className={statusPillClass(tunnel.status)}>{tunnel.status}</span>
                           </div>
                           <div className="tunnel-route">公网 {tunnel.publicPort}</div>
-                          <div className="muted-line">类型 {tunnel.type}</div>
-                          <div className="muted-line">目标 {tunnel.targetHost}:{tunnel.targetPort}</div>
+                          <div className="health-pill-row">
+                            <span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span>
+                            <span className="muted-line">{tunnelAvailabilityText(tunnel)}</span>
+                          </div>
+                          <div className="muted-line">类型 {tunnelTypeLabel(tunnel.type)}</div>
+                          <div className="muted-line">目标 {tunnelTargetLabel(tunnel)}</div>
                           <div className="muted-line">节点 {tunnel.nodeId}</div>
                         </article>
                       ))}
@@ -1200,16 +1224,16 @@ export default function App() {
 
                 <div className="table-wrap compact-table">
                   <table>
-                    <thead><tr><th>名称</th><th>类型</th><th>节点</th><th>状态</th><th>公网</th><th>目标</th><th>操作</th></tr></thead>
+                    <thead><tr><th>名称</th><th>类型</th><th>节点</th><th>状态/健康</th><th>公网</th><th>目标</th><th>操作</th></tr></thead>
                     <tbody>
-                      {tunnels.length === 0 ? <tr><td colSpan={7}>暂无隧道。</td></tr> : tunnels.map((tunnel) => (
-                        <tr key={tunnel.id} className={editingTunnelID === tunnel.id ? "selected-row" : undefined}>
+                      {filteredTunnels.length === 0 ? <tr><td colSpan={7}>当前筛选条件下暂无隧道。</td></tr> : filteredTunnels.map((tunnel) => (
+                        <tr key={tunnel.id} className={editingTunnelID === tunnel.id ? tunnelRowClass(tunnel, true) : tunnelRowClass(tunnel, false)}>
                           <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
-                          <td>{tunnel.type}</td>
+                          <td>{tunnelTypeLabel(tunnel.type)}</td>
                           <td>{tunnel.nodeId}</td>
-                          <td><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span></td>
+                          <td><div className="table-status-stack"><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span><span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span></div></td>
                           <td>{tunnel.publicPort}</td>
-                          <td>{tunnel.targetHost}:{tunnel.targetPort}</td>
+                          <td>{tunnelTargetLabel(tunnel)}</td>
                           <td>
                             <div className="actions-row">
                               <button type="button" className="secondary" onClick={() => beginTunnelEdit(tunnel)}>编辑</button>
@@ -1375,6 +1399,90 @@ function EmptyState({ title, body }: { title: string; body: string }) {
       <p>{body}</p>
     </div>
   );
+}
+
+function matchesTunnelHealthFilter(tunnel: TunnelSpec, filter: TunnelHealthFilter) {
+  const health = tunnel.healthStatus || "healthy";
+  if (filter === "healthy") {
+    return health === "healthy";
+  }
+  if (filter === "unhealthy") {
+    return health !== "healthy";
+  }
+  return true;
+}
+
+function tunnelTypeLabel(type: string) {
+  return type === "socks5" ? "SOCKS5" : "TCP";
+}
+
+function tunnelTargetLabel(tunnel: TunnelSpec) {
+  if (tunnel.type === "socks5") {
+    return "节点侧 SOCKS5 CONNECT";
+  }
+  return tunnel.targetHost + ":" + tunnel.targetPort;
+}
+
+function tunnelHealthLabel(status?: TunnelHealthStatus) {
+  switch (status) {
+    case "node_offline":
+      return "节点离线";
+    case "capability_missing":
+      return "能力缺失";
+    case "misconfigured":
+      return "配置异常";
+    default:
+      return "正常";
+  }
+}
+
+function tunnelAvailabilityText(tunnel: TunnelSpec) {
+  if (tunnel.status !== "active") {
+    return "当前为停用配置";
+  }
+  switch (tunnel.healthStatus) {
+    case "node_offline":
+      return "节点当前不可达";
+    case "capability_missing":
+      return "节点不满足能力要求";
+    case "misconfigured":
+      return "配置不完整或不合法";
+    default:
+      return "当前满足运行条件";
+  }
+}
+
+function tunnelHealthPillClass(status?: TunnelHealthStatus) {
+  switch (status) {
+    case "node_offline":
+    case "capability_missing":
+    case "misconfigured":
+      return "status-pill tone-danger";
+    default:
+      return "status-pill tone-good";
+  }
+}
+
+function tunnelCardClass(tunnel: TunnelSpec, selected: boolean) {
+  const base = ["spotlight-card", "tunnel-card", "interactive-card"];
+  if ((tunnel.healthStatus || "healthy") !== "healthy") {
+    base.push("problem-card");
+  }
+  if (selected) {
+    base.push("selected-card");
+  }
+  return base.join(" ");
+}
+
+function tunnelRowClass(tunnel: TunnelSpec, selected: boolean) {
+  const base = [] as string[];
+  if ((tunnel.healthStatus || "healthy") !== "healthy") {
+    base.push("problem-row");
+  }
+  if (selected) {
+    base.push("selected-row");
+  }
+  return base.join(" ") || undefined;
 }
 
 function capabilitySummary(capabilities: NodeCapabilities) {

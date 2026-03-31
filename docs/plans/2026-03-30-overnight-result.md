@@ -233,3 +233,32 @@ curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
   - Browser:
     - configure a SOCKS5 proxy pointing to `82.156.236.104:<publicPort>`
     - current expectation is TCP web access only; UDP-based browser features are outside scope
+
+### Tunnel Health Status And Mismatch Visibility (2026-03-31)
+
+- Management tunnel APIs now return a derived `healthStatus` field from the server side instead of leaving health judgment to the admin-web only.
+- Current derived statuses are:
+  - `healthy`
+  - `node_offline`
+  - `capability_missing`
+  - `misconfigured`
+- Current judgment order is:
+  - invalid or incomplete tunnel config -> `misconfigured`
+  - bound node missing / stale / non-online -> `node_offline`
+  - `socks5` tunnel bound to node without `socks5Connect` -> `capability_missing`
+  - otherwise -> `healthy`
+- `status` and `healthStatus` are intentionally separate:
+  - `status=paused` still means operator-disabled configuration
+  - `healthStatus` describes whether an active config currently meets runtime conditions
+- Admin web tunnel workspace now includes:
+  - card and table level health labels
+  - clear abnormal highlighting for unhealthy tunnels
+  - minimal tunnel filter: `全部 / 正常 / 异常`
+- Current cloud verification after deployment:
+  - authenticated `GET /api/tunnels` returns the live tunnel with `healthStatus:"healthy"`
+  - authenticated `GET /api/tunnels/tunnel-1774809656590623537` returns `healthStatus:"healthy"`
+  - current live tunnel remains:
+    - `tunnel-1774809656590623537`
+    - `windows-16354`
+    - `publicPort=10086`
+    - `node=node-1774805183388699102`

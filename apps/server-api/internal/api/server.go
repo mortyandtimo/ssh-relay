@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	accessCookieName  = "crp_access"
-	refreshCookieName = "crp_refresh"
-	sessionCookieName = "crp_session"
+	accessCookieName     = "crp_access"
+	refreshCookieName    = "crp_refresh"
+	sessionCookieName    = "crp_session"
+	nodeOfflineThreshold = 90 * time.Second
 )
 
 type contextKey string
@@ -529,7 +530,7 @@ func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		writeJSON(w, http.StatusOK, map[string]any{"items": s.withTunnelHealth(r.Context(), items)})
 	case http.MethodPost:
 		var req struct {
 			NodeID string `json:"nodeId"`
@@ -572,6 +573,7 @@ func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
+		tunnel = s.withTunnelHealthOne(r.Context(), tunnel)
 		s.writeAudit(r, "create_tunnel", "tunnel", tunnel.ID, map[string]string{"nodeId": tunnel.NodeID, "publicPort": fmt.Sprintf("%d", tunnel.PublicPort)})
 		writeJSON(w, http.StatusCreated, tunnel)
 	default:
@@ -596,7 +598,7 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, tunnel)
+		writeJSON(w, http.StatusOK, s.withTunnelHealthOne(r.Context(), tunnel))
 	case http.MethodPut:
 		var req struct {
 			NodeID string `json:"nodeId"`
@@ -643,6 +645,7 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
+		tunnel = s.withTunnelHealthOne(r.Context(), tunnel)
 		s.writeAudit(r, "update_tunnel", "tunnel", tunnel.ID, map[string]string{"nodeId": tunnel.NodeID, "publicPort": fmt.Sprintf("%d", tunnel.PublicPort), "status": tunnel.Status})
 		writeJSON(w, http.StatusOK, tunnel)
 	case http.MethodDelete:
@@ -768,6 +771,83 @@ func (s *Server) handleRelayTCPRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+type cachedTunnelNode struct {
+	summary types.NodeSummary
+	found   bool
+}
+
+func (s *Server) withTunnelHealth(ctx context.Context, items []types.TunnelSpec) []types.TunnelSpec {
+	if len(items) == 0 {
+		return items
+	}
+	cache := map[string]cachedTunnelNode{}
+	out := make([]types.TunnelSpec, 0, len(items))
+	for _, item := range items {
+		out = append(out, s.withTunnelHealthCached(ctx, item, cache))
+	}
+	return out
+}
+
+func (s *Server) withTunnelHealthOne(ctx context.Context, item types.TunnelSpec) types.TunnelSpec {
+	return s.withTunnelHealthCached(ctx, item, map[string]cachedTunnelNode{})
+}
+
+func (s *Server) withTunnelHealthCached(ctx context.Context, item types.TunnelSpec, cache map[string]cachedTunnelNode) types.TunnelSpec {
+	item.HealthStatus = s.deriveTunnelHealth(ctx, item, cache)
+	return item
+}
+
+func (s *Server) deriveTunnelHealth(ctx context.Context, tunnel types.TunnelSpec, cache map[string]cachedTunnelNode) types.TunnelHealthStatus {
+	if isTunnelMisconfigured(tunnel) {
+		return types.TunnelHealthMisconfigured
+	}
+	nodeID := strings.TrimSpace(tunnel.NodeID)
+	if nodeID == "" {
+		return types.TunnelHealthMisconfigured
+	}
+	node, ok := cache[nodeID]
+	if !ok {
+		summary, err := s.store.GetNode(ctx, nodeID)
+		if err != nil {
+			cache[nodeID] = cachedTunnelNode{found: false}
+			return types.TunnelHealthNodeOffline
+		}
+		node = cachedTunnelNode{summary: summary, found: true}
+		cache[nodeID] = node
+	}
+	if !node.found || isNodeOffline(node.summary) {
+		return types.TunnelHealthNodeOffline
+	}
+	if tunnel.Type == "socks5" && !node.summary.Capabilities.SOCKS5Connect {
+		return types.TunnelHealthCapabilityMissing
+	}
+	return types.TunnelHealthHealthy
+}
+
+func isTunnelMisconfigured(tunnel types.TunnelSpec) bool {
+	if strings.TrimSpace(tunnel.NodeID) == "" || tunnel.PublicPort <= 0 {
+		return true
+	}
+	switch tunnel.Type {
+	case "", "tcp":
+		return strings.TrimSpace(tunnel.TargetHost) == "" || tunnel.TargetPort <= 0
+	case "socks5":
+		return strings.TrimSpace(tunnel.TargetHost) != "socks5" || tunnel.TargetPort != 1080
+	default:
+		return true
+	}
+}
+
+func isNodeOffline(node types.NodeSummary) bool {
+	if strings.TrimSpace(node.Status) != "online" {
+		return true
+	}
+	if node.LastSeenAt.IsZero() {
+		return true
+	}
+	return time.Since(node.LastSeenAt.UTC()) > nodeOfflineThreshold
 }
 
 func (s *Server) currentActor(r *http.Request) (string, string) {
