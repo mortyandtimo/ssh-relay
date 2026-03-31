@@ -1201,7 +1201,7 @@ export default function App() {
                             </div>
                             <span className={statusPillClass(tunnel.status)}>{tunnel.status}</span>
                           </div>
-                          <div className="tunnel-route">公网 {tunnel.publicPort}</div>
+                          <div className="tunnel-route">{tunnelPublicEntry(tunnel)}</div>
                           <div className="health-pill-row">
                             <span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span>
                             <span className="muted-line">{tunnelAvailabilityText(tunnel)}</span>
@@ -1259,7 +1259,7 @@ export default function App() {
                           <td>{tunnelTypeLabel(tunnel.type)}</td>
                           <td>{tunnel.nodeId}</td>
                           <td><div className="table-status-stack"><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span><span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span></div></td>
-                          <td>{tunnel.publicPort}</td>
+                          <td>{tunnelPublicEntry(tunnel)}</td>
                           <td>{tunnelTargetLabel(tunnel)}</td>
                           <td>
                             <div className="actions-row">
@@ -1442,6 +1442,13 @@ function matchesTunnelHealthFilter(tunnel: TunnelSpec, filter: TunnelHealthFilte
 function tunnelTypeLabel(type: string) {
   if (type === "http") return "HTTP";
   return type === "socks5" ? "SOCKS5" : "TCP";
+}
+
+function tunnelPublicEntry(tunnel: TunnelSpec) {
+  if (tunnel.type === "http") {
+    return "http://82.156.236.104:" + tunnel.publicPort;
+  }
+  return "公网 " + tunnel.publicPort;
 }
 
 function tunnelTargetLabel(tunnel: TunnelSpec) {
