@@ -103,6 +103,9 @@ type AuditFilterState = {
   offset: number;
 };
 
+type MainView = "overview" | "connections" | "audit" | "permissions";
+type ConnectionView = "nodes" | "tunnels";
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
 
 const initialTunnelForm: TunnelForm = {
@@ -144,6 +147,8 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [busyAction, setBusyAction] = useState("");
   const [hasInitializedNodeId, setHasInitializedNodeId] = useState(false);
+  const [mainView, setMainView] = useState<MainView>("overview");
+  const [connectionView, setConnectionView] = useState<ConnectionView>("nodes");
   const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
   const auditFilterRef = useRef<AuditFilterState>(initialAuditFilter);
 
@@ -271,31 +276,32 @@ export default function App() {
     }
 
     try {
-      const auditQuery = buildAuditQuery(filter);
+      const overviewRequests =
+        user.role !== "user"
+          ? [
+              requestJSON<{ items: NodeSummary[] }>("/api/nodes"),
+              requestJSON<{ items: TunnelSpec[] }>("/api/tunnels"),
+              requestJSON<ServerMetrics>("/api/server/metrics"),
+              requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime"),
+            ]
+          : [
+              Promise.resolve({ items: [] as NodeSummary[] }),
+              Promise.resolve({ items: [] as TunnelSpec[] }),
+              Promise.resolve(null as ServerMetrics | null),
+              Promise.resolve(null as RelayRuntimeSummary | null),
+            ];
 
-      const requests = user.role !== "user"
-        ? [
-            requestJSON<{ items: NodeSummary[] }>("/api/nodes"),
-            requestJSON<{ items: TunnelSpec[] }>("/api/tunnels"),
-            requestJSON<ServerMetrics>("/api/server/metrics"),
-            requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime"),
-          ]
-        : [
-            Promise.resolve({ items: [] as NodeSummary[] }),
-            Promise.resolve({ items: [] as TunnelSpec[] }),
-            Promise.resolve(null as ServerMetrics | null),
-            Promise.resolve(null as RelayRuntimeSummary | null),
-          ];
+      const userRequests =
+        user.role === "admin"
+          ? [requestJSON<{ items: UserSummary[] }>("/api/users")]
+          : [Promise.resolve(undefined as { items: UserSummary[] } | undefined)];
 
-      const userRequests = user.role === "admin"
-        ? [requestJSON<{ items: UserSummary[] }>("/api/users")]
-        : [Promise.resolve(undefined as { items: UserSummary[] } | undefined)];
+      const auditRequests =
+        user.role !== "user"
+          ? [requestJSON<AuditLogListResponse>("/api/audit-logs?" + buildAuditQuery(filter).toString())]
+          : [Promise.resolve(undefined as AuditLogListResponse | undefined)];
 
-      const auditRequests = user.role !== "user"
-        ? [requestJSON<AuditLogListResponse>("/api/audit-logs?" + auditQuery.toString())]
-        : [Promise.resolve(undefined as AuditLogListResponse | undefined)];
-
-      const results = await Promise.all([...requests, ...userRequests, ...auditRequests]);
+      const results = await Promise.all([...overviewRequests, ...userRequests, ...auditRequests]);
       if (cancelled) {
         return;
       }
@@ -386,6 +392,7 @@ export default function App() {
       });
       setCurrentUser(payload.user);
       setMessage("登录成功。");
+      setMainView(payload.user.role === "user" ? "overview" : "connections");
       await refreshDashboard(false, payload.user, false, auditFilterRef.current);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "登录失败");
@@ -517,16 +524,17 @@ export default function App() {
     void refreshDashboard(false, currentUser, false, nextFilter);
   }
 
+  const activeUser = currentUser!;
   const onlineNodes = nodes.filter((node) => node.status === "online").length;
   const activeTunnels = tunnels.filter((tunnel) => tunnel.status === "active").length;
-  const canOperate = currentUser?.role !== "user";
-  const canManageUsers = currentUser?.role === "admin";
+  const canOperate = activeUser.role !== "user";
+  const canManageUsers = activeUser.role === "admin";
   const auditStart = auditLogs.length === 0 ? 0 : auditFilter.offset + 1;
   const auditEnd = Math.min(auditFilter.offset + auditFilter.limit, auditTotal);
 
   if (bootstrapRequired === null) {
     return (
-      <div className="console-shell auth-shell">
+      <div className="workspace-shell auth-shell">
         <div className="auth-card">正在检查管理面初始化状态...</div>
       </div>
     );
@@ -534,7 +542,7 @@ export default function App() {
 
   if (bootstrapRequired) {
     return (
-      <div className="console-shell auth-shell">
+      <div className="workspace-shell auth-shell">
         <section className="auth-card">
           <p className="eyebrow">Bootstrap</p>
           <h1>首次安装初始化</h1>
@@ -554,11 +562,11 @@ export default function App() {
 
   if (!currentUser) {
     return (
-      <div className="console-shell auth-shell">
+      <div className="workspace-shell auth-shell">
         <section className="auth-card">
           <p className="eyebrow">Login</p>
           <h1>控制台登录</h1>
-          <p className="summary">登录后进入系统总览、节点、隧道、审计和用户权限区。</p>
+          <p className="summary">登录后进入真正的工作区切换，而不是锚点长页面。</p>
           {error ? <div className="error">{error}</div> : null}
           <form className="form-grid" onSubmit={submitLogin}>
             <label><span>邮箱</span><input value={loginForm.email} onChange={(event) => setLoginForm((current) => ({ ...current, email: event.target.value }))} required /></label>
@@ -571,207 +579,219 @@ export default function App() {
   }
 
   return (
-    <div className="console-shell">
-      <aside className="console-sidebar">
+    <div className="workspace-shell">
+      <aside className="workspace-sidebar">
         <div className="sidebar-card brand-card">
           <p className="eyebrow">Cloud Relay Console</p>
           <h1>控制台</h1>
-          <p className="sidebar-copy">把系统总览、节点、隧道、审计和用户权限拆成独立工作区，避免长页面表格堆叠。</p>
+          <p className="sidebar-copy">切换工作区而不是在同一页里反复滚动寻找目标模块。</p>
         </div>
 
         <div className="sidebar-card operator-card">
-          <span className={roleClass(currentUser.role)}>{currentUser.role}</span>
-          <strong>{currentUser.displayName}</strong>
-          <span className="muted-line">{currentUser.email}</span>
+          <span className={roleClass(currentUser.role)}>{activeUser.role}</span>
+          <strong>{activeUser.displayName}</strong>
+          <span className="muted-line">{activeUser.email}</span>
           <div className="sidebar-actions">
-            <button className="secondary" type="button" onClick={() => void refreshDashboard(true, currentUser, false, auditFilterRef.current)} disabled={busyAction === "refresh"}>刷新控制台</button>
+            <button className="secondary" type="button" onClick={() => void refreshDashboard(true, currentUser, false, auditFilterRef.current)} disabled={busyAction === "refresh"}>刷新当前工作区</button>
             <button type="button" onClick={() => void logout()} disabled={busyAction === "logout"}>{busyAction === "logout" ? "退出中..." : "退出登录"}</button>
           </div>
         </div>
 
-        <nav className="sidebar-card nav-card">
-          <a href="#overview">系统总览</a>
-          {canOperate ? <a href="#nodes">节点</a> : null}
-          {canOperate ? <a href="#tunnels">隧道</a> : null}
-          {canOperate ? <a href="#audit">审计</a> : null}
-          {canManageUsers ? <a href="#users">用户/权限</a> : null}
+        <nav className="sidebar-card workspace-nav">
+          <button type="button" className={mainView === "overview" ? "nav-tab active" : "nav-tab"} onClick={() => setMainView("overview")}>总览</button>
+          {canOperate ? <button type="button" className={mainView === "connections" ? "nav-tab active" : "nav-tab"} onClick={() => setMainView("connections")}>连接管理</button> : null}
+          {canOperate ? <button type="button" className={mainView === "audit" ? "nav-tab active" : "nav-tab"} onClick={() => setMainView("audit")}>审计</button> : null}
+          {canManageUsers ? <button type="button" className={mainView === "permissions" ? "nav-tab active" : "nav-tab"} onClick={() => setMainView("permissions")}>权限</button> : null}
         </nav>
 
-        <div className="sidebar-card sidebar-stats">
-          <MiniStat label="在线节点" value={String(onlineNodes)} />
-          <MiniStat label="活跃隧道" value={String(activeTunnels)} />
-          <MiniStat label="待命池" value={String(relayRuntime?.pools.length ?? 0)} />
-          <MiniStat label="审计总数" value={String(auditTotal)} />
-        </div>
+        {currentUser.role !== "user" ? (
+          <div className="sidebar-card mini-dashboard">
+            <MiniStat label="在线节点" value={String(onlineNodes)} />
+            <MiniStat label="活跃隧道" value={String(activeTunnels)} />
+            <MiniStat label="待命池" value={String(relayRuntime?.pools.length ?? 0)} />
+            <MiniStat label="审计总数" value={String(auditTotal)} />
+          </div>
+        ) : null}
       </aside>
 
-      <main className="console-main">
+      <main className="workspace-main">
         {error ? <div className="error">{error}</div> : null}
         {message ? <div className="notice">{message}</div> : null}
 
-        <section id="overview" className="console-panel overview-panel">
-          <div className="section-head">
-            <div>
-              <p className="eyebrow">Overview</p>
-              <h2>系统总览</h2>
-            </div>
-            <span className="muted-line">控制台会保持当前筛选上下文刷新</span>
-          </div>
-          <div className="overview-grid">
-            <MetricCard label="注册节点" value={String(metrics?.registeredNodes ?? nodes.length)} hint="控制平面已注册" />
-            <MetricCard label="在线节点" value={String(metrics?.onlineNodes ?? onlineNodes)} hint="当前可通信节点" />
-            <MetricCard label="隧道数量" value={String(metrics?.configuredTunnels ?? tunnels.length)} hint="配置与运维入口" />
-            <MetricCard label="待命连接" value={String(relayRuntime?.totalStandby ?? 0)} hint="反向 TCP 待命池" />
-          </div>
-          <div className="signal-strip">
-            <SignalCard label="服务" value={metrics?.service ?? "server-api"} />
-            <SignalCard label="启动时间" value={metrics ? formatDate(metrics.startedAt) : "-"} />
-            <SignalCard label="审计窗口" value={auditTotal === 0 ? "暂无" : `${auditStart}-${auditEnd} / ${auditTotal}`} />
-            <SignalCard label="最新动作" value={auditLogs[0]?.action ?? "-"} />
-          </div>
-          {relayRuntime?.pools?.length ? (
-            <div className="pool-band">
-              {relayRuntime.pools.map((pool) => (
-                <div key={pool.poolKey} className="pool-chip">
-                  <strong>{pool.poolKey}</strong>
-                  <span>{pool.standbyCount} / {pool.maxSize}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </section>
-
-        {canOperate ? (
-          <section id="nodes" className="console-panel">
+        {mainView === "overview" ? (
+          <section className="workspace-panel">
             <div className="section-head">
               <div>
-                <p className="eyebrow">Nodes</p>
-                <h2>节点</h2>
+                <p className="eyebrow">Overview</p>
+                <h2>系统总览</h2>
               </div>
-              <span className="muted-line">状态、Agent 版本、能力和最后心跳优先展示</span>
+              <span className="muted-line">{activeUser.role === "user" ? "当前角色仅显示允许查看的摘要信息" : "统一观察节点、隧道、待命池和审计窗口"}</span>
             </div>
-            <div className="spotlight-grid">
-              {nodes.length === 0 ? <EmptyState title="暂无节点" body="当前没有可展示的节点状态。" /> : nodes.map((node) => (
-                <article key={node.nodeId} className="spotlight-card">
-                  <div className="spotlight-head">
-                    <div>
-                      <strong>{node.nodeName}</strong>
-                      <span className="muted-line">{node.nodeId}</span>
-                    </div>
-                    <span className={statusPillClass(node.status)}>{node.status}</span>
+
+            {currentUser.role === "user" ? (
+              <div className="restricted-state">
+                <strong>当前角色为只读受限视角</strong>
+                <p>你可以看到控制台的基础状态与身份信息，但节点、隧道、审计和权限工作区不会展示可误导的 0 值面板。</p>
+              </div>
+            ) : (
+              <>
+                <div className="overview-grid">
+                  <MetricCard label="注册节点" value={String(metrics?.registeredNodes ?? nodes.length)} hint="控制平面已注册" />
+                  <MetricCard label="在线节点" value={String(metrics?.onlineNodes ?? onlineNodes)} hint="当前可通信节点" />
+                  <MetricCard label="隧道数量" value={String(metrics?.configuredTunnels ?? tunnels.length)} hint="公网入口配置数" />
+                  <MetricCard label="待命连接" value={String(relayRuntime?.totalStandby ?? 0)} hint="反向 TCP 待命池" />
+                </div>
+                <div className="signal-strip">
+                  <SignalCard label="服务" value={metrics?.service ?? "server-api"} />
+                  <SignalCard label="启动时间" value={metrics ? formatDate(metrics.startedAt) : "-"} />
+                  <SignalCard label="审计窗口" value={auditTotal === 0 ? "暂无" : `${auditStart}-${auditEnd} / ${auditTotal}`} />
+                  <SignalCard label="最新动作" value={auditLogs[0]?.action ?? "-"} />
+                </div>
+                {relayRuntime?.pools?.length ? (
+                  <div className="pool-band">
+                    {relayRuntime.pools.map((pool) => (
+                      <div key={pool.poolKey} className="pool-chip">
+                        <strong>{pool.poolKey}</strong>
+                        <span>{pool.standbyCount} / {pool.maxSize}</span>
+                      </div>
+                    ))}
                   </div>
-                  <div className="spotlight-meta">
-                    <span>Agent {node.agentVersion}</span>
-                    <span>{node.activeTunnels} 条隧道</span>
-                  </div>
-                  <div className="capability-row">{capabilitySummary(node.capabilities)}</div>
-                  <div className="muted-line">最后心跳：{formatDate(node.lastSeenAt)}</div>
-                </article>
-              ))}
-            </div>
-            <div className="table-wrap compact-table">
-              <table>
-                <thead><tr><th>节点</th><th>状态</th><th>Agent</th><th>隧道数</th><th>能力</th><th>最后心跳</th></tr></thead>
-                <tbody>
-                  {nodes.length === 0 ? <tr><td colSpan={6}>暂无节点。</td></tr> : nodes.map((node) => (
-                    <tr key={node.nodeId}>
-                      <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div></td>
-                      <td><span className={statusPillClass(node.status)}>{node.status}</span></td>
-                      <td>{node.agentVersion}</td>
-                      <td>{node.activeTunnels}</td>
-                      <td>{capabilitySummary(node.capabilities)}</td>
-                      <td>{formatDate(node.lastSeenAt)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                ) : null}
+              </>
+            )}
           </section>
         ) : null}
 
-        {canOperate ? (
-          <section id="tunnels" className="console-panel">
+        {mainView === "connections" && canOperate ? (
+          <section className="workspace-panel">
             <div className="section-head">
               <div>
-                <p className="eyebrow">Tunnels</p>
-                <h2>隧道</h2>
+                <p className="eyebrow">Connections</p>
+                <h2>连接管理</h2>
               </div>
-              <span className="muted-line">创建动作与现有入口分离，突出状态和映射关系</span>
+              <div className="inline-switches">
+                <button type="button" className={connectionView === "nodes" ? "nav-tab active" : "nav-tab"} onClick={() => setConnectionView("nodes")}>节点</button>
+                <button type="button" className={connectionView === "tunnels" ? "nav-tab active" : "nav-tab"} onClick={() => setConnectionView("tunnels")}>隧道</button>
+              </div>
             </div>
-            <div className="split-layout">
-              <section className="subpanel form-panel">
-                <h3>创建隧道</h3>
-                <form className="form-grid" onSubmit={createTunnel}>
-                  <label>
-                    <span>节点</span>
-                    <select value={tunnelForm.nodeId} onChange={(event) => { setTunnelForm((current) => ({ ...current, nodeId: event.target.value })); setHasInitializedNodeId(true); }} required>
-                      <option value="">选择节点</option>
-                      {nodes.map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
-                    </select>
-                  </label>
-                  <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
-                  <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required /></label>
-                  <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required /></label>
-                  <label><span>公网端口</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
-                  <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
-                </form>
-              </section>
 
-              <section className="subpanel">
-                <h3>重点隧道</h3>
-                <div className="spotlight-grid compact-cards">
-                  {tunnels.length === 0 ? <EmptyState title="暂无隧道" body="创建后会在这里优先展示公网入口和目标映射。" /> : tunnels.map((tunnel) => (
-                    <article key={tunnel.id} className="spotlight-card tunnel-card">
+            {connectionView === "nodes" ? (
+              <>
+                <div className="spotlight-grid">
+                  {nodes.length === 0 ? <EmptyState title="暂无节点" body="当前没有可展示的节点状态。" /> : nodes.map((node) => (
+                    <article key={node.nodeId} className="spotlight-card">
                       <div className="spotlight-head">
                         <div>
-                          <strong>{tunnel.name}</strong>
-                          <span className="muted-line">{tunnel.id}</span>
+                          <strong>{node.nodeName}</strong>
+                          <span className="muted-line">{node.nodeId}</span>
                         </div>
-                        <span className={statusPillClass(tunnel.status)}>{tunnel.status}</span>
+                        <span className={statusPillClass(node.status)}>{node.status}</span>
                       </div>
-                      <div className="tunnel-route">公网 {tunnel.publicPort}</div>
-                      <div className="muted-line">目标 {tunnel.targetHost}:{tunnel.targetPort}</div>
-                      <div className="muted-line">节点 {tunnel.nodeId}</div>
+                      <div className="spotlight-meta">
+                        <span>Agent {node.agentVersion}</span>
+                        <span>{node.activeTunnels} 条隧道</span>
+                      </div>
+                      <div className="capability-row">{capabilitySummary(node.capabilities)}</div>
+                      <div className="muted-line">最后心跳：{formatDate(node.lastSeenAt)}</div>
                     </article>
                   ))}
                 </div>
-              </section>
-            </div>
+                <div className="table-wrap compact-table">
+                  <table>
+                    <thead><tr><th>节点</th><th>状态</th><th>Agent</th><th>隧道数</th><th>能力</th><th>最后心跳</th></tr></thead>
+                    <tbody>
+                      {nodes.length === 0 ? <tr><td colSpan={6}>暂无节点。</td></tr> : nodes.map((node) => (
+                        <tr key={node.nodeId}>
+                          <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div></td>
+                          <td><span className={statusPillClass(node.status)}>{node.status}</span></td>
+                          <td>{node.agentVersion}</td>
+                          <td>{node.activeTunnels}</td>
+                          <td>{capabilitySummary(node.capabilities)}</td>
+                          <td>{formatDate(node.lastSeenAt)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="split-layout">
+                  <section className="subpanel form-panel">
+                    <h3>创建隧道</h3>
+                    <form className="form-grid" onSubmit={createTunnel}>
+                      <label>
+                        <span>节点</span>
+                        <select value={tunnelForm.nodeId} onChange={(event) => { setTunnelForm((current) => ({ ...current, nodeId: event.target.value })); setHasInitializedNodeId(true); }} required>
+                          <option value="">选择节点</option>
+                          {nodes.map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
+                        </select>
+                      </label>
+                      <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
+                      <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required /></label>
+                      <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required /></label>
+                      <label><span>公网端口</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
+                      <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
+                    </form>
+                  </section>
 
-            <div className="table-wrap compact-table">
-              <table>
-                <thead><tr><th>名称</th><th>节点</th><th>状态</th><th>公网</th><th>目标</th><th>操作</th></tr></thead>
-                <tbody>
-                  {tunnels.length === 0 ? <tr><td colSpan={6}>暂无隧道。</td></tr> : tunnels.map((tunnel) => (
-                    <tr key={tunnel.id}>
-                      <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
-                      <td>{tunnel.nodeId}</td>
-                      <td><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span></td>
-                      <td>{tunnel.publicPort}</td>
-                      <td>{tunnel.targetHost}:{tunnel.targetPort}</td>
-                      <td>
-                        <div className="actions-row">
-                          <button type="button" disabled={busyAction === tunnel.id + ":active" || tunnel.status === "active"} onClick={() => void updateTunnelStatus(tunnel, "active")}>启用</button>
-                          <button type="button" disabled={busyAction === tunnel.id + ":paused" || tunnel.status === "paused"} onClick={() => void updateTunnelStatus(tunnel, "paused")}>暂停</button>
-                          <button type="button" className="danger" disabled={busyAction === tunnel.id + ":delete"} onClick={() => void deleteTunnel(tunnel)}>删除</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  <section className="subpanel">
+                    <h3>重点隧道</h3>
+                    <div className="spotlight-grid compact-cards">
+                      {tunnels.length === 0 ? <EmptyState title="暂无隧道" body="创建后会在这里优先展示公网入口和目标映射。" /> : tunnels.map((tunnel) => (
+                        <article key={tunnel.id} className="spotlight-card tunnel-card">
+                          <div className="spotlight-head">
+                            <div>
+                              <strong>{tunnel.name}</strong>
+                              <span className="muted-line">{tunnel.id}</span>
+                            </div>
+                            <span className={statusPillClass(tunnel.status)}>{tunnel.status}</span>
+                          </div>
+                          <div className="tunnel-route">公网 {tunnel.publicPort}</div>
+                          <div className="muted-line">目标 {tunnel.targetHost}:{tunnel.targetPort}</div>
+                          <div className="muted-line">节点 {tunnel.nodeId}</div>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+                </div>
+
+                <div className="table-wrap compact-table">
+                  <table>
+                    <thead><tr><th>名称</th><th>节点</th><th>状态</th><th>公网</th><th>目标</th><th>操作</th></tr></thead>
+                    <tbody>
+                      {tunnels.length === 0 ? <tr><td colSpan={6}>暂无隧道。</td></tr> : tunnels.map((tunnel) => (
+                        <tr key={tunnel.id}>
+                          <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
+                          <td>{tunnel.nodeId}</td>
+                          <td><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span></td>
+                          <td>{tunnel.publicPort}</td>
+                          <td>{tunnel.targetHost}:{tunnel.targetPort}</td>
+                          <td>
+                            <div className="actions-row">
+                              <button type="button" disabled={busyAction === tunnel.id + ":active" || tunnel.status === "active"} onClick={() => void updateTunnelStatus(tunnel, "active")}>启用</button>
+                              <button type="button" disabled={busyAction === tunnel.id + ":paused" || tunnel.status === "paused"} onClick={() => void updateTunnelStatus(tunnel, "paused")}>暂停</button>
+                              <button type="button" className="danger" disabled={busyAction === tunnel.id + ":delete"} onClick={() => void deleteTunnel(tunnel)}>删除</button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
           </section>
         ) : null}
 
-        {canOperate ? (
-          <section id="audit" className="console-panel">
+        {mainView === "audit" && canOperate ? (
+          <section className="workspace-panel">
             <div className="section-head">
               <div>
                 <p className="eyebrow">Audit</p>
                 <h2>审计</h2>
               </div>
-              <span className="muted-line">筛选栏、操作历史和 payload 展开分层显示</span>
+              <span className="muted-line">审计工作区独立保留筛选、分页与 payload 展开</span>
             </div>
 
             <section className="subpanel audit-filter-panel">
@@ -822,14 +842,14 @@ export default function App() {
           </section>
         ) : null}
 
-        {canManageUsers ? (
-          <section id="users" className="console-panel">
+        {mainView === "permissions" && canManageUsers ? (
+          <section className="workspace-panel">
             <div className="section-head">
               <div>
                 <p className="eyebrow">Permissions</p>
                 <h2>用户/权限</h2>
               </div>
-              <span className="muted-line">管理员专属，操作创建和当前用户列表分离</span>
+              <span className="muted-line">管理员专属工作区</span>
             </div>
             <div className="split-layout">
               <section className="subpanel form-panel">
