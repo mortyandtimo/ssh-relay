@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -426,18 +427,22 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		items, err := s.store.ListNodes(r.Context(), store.NodeFilter{
+		limit := parsePositiveInt(r.URL.Query().Get("limit"), 20)
+		offset := parseNonNegativeInt(r.URL.Query().Get("offset"), 0)
+		items, total, err := s.store.ListNodes(r.Context(), store.NodeFilter{
 			NodeRole:    strings.TrimSpace(r.URL.Query().Get("nodeRole")),
 			Environment: strings.TrimSpace(r.URL.Query().Get("environment")),
 			TrustLevel:  strings.TrimSpace(r.URL.Query().Get("trustLevel")),
 			Owner:       strings.TrimSpace(r.URL.Query().Get("owner")),
 			Tag:         strings.TrimSpace(r.URL.Query().Get("tag")),
+			Limit:       limit,
+			Offset:      offset,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		writeJSON(w, http.StatusOK, types.NodeListResponse{Items: items, Total: total, Limit: limit, Offset: offset})
 	default:
 		writeMethodNotAllowed(w, http.MethodGet)
 	}
@@ -949,6 +954,30 @@ func parseBoolEnv(raw string) bool {
 	default:
 		return false
 	}
+}
+
+func parsePositiveInt(raw string, fallback int) int {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func parseNonNegativeInt(raw string, fallback int) int {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
 }
 
 func envOrDefault(key, fallback string) string {

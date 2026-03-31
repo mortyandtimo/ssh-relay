@@ -124,6 +124,13 @@ type UpdateNodeRequest struct {
 	Tags        []string        `json:"tags,omitempty"`
 }
 
+type NodeListResponse struct {
+	Items  []NodeSummary `json:"items"`
+	Total  int           `json:"total"`
+	Limit  int           `json:"limit"`
+	Offset int           `json:"offset"`
+}
+
 type ServerMetrics struct {
 	Service            string    `json:"service"`
 	StartedAt          time.Time `json:"startedAt"`

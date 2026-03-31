@@ -29,12 +29,21 @@ type NodeSummary = {
   tags?: string[];
 };
 
+type NodeListResponse = {
+  items: NodeSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
 type NodeFilterState = {
   nodeRole: NodeRole;
   environment: NodeEnvironment;
   trustLevel: NodeTrustLevel;
   owner: string;
   tag: string;
+  limit: number;
+  offset: number;
 };
 
 type NodeEditForm = {
@@ -173,12 +182,15 @@ const initialNodeFilter: NodeFilterState = {
   trustLevel: "",
   owner: "",
   tag: "",
+  limit: 10,
+  offset: 0,
 };
 
 export default function App() {
   const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
   const [currentUser, setCurrentUser] = useState<UserSummary | null>(null);
   const [nodes, setNodes] = useState<NodeSummary[]>([]);
+  const [nodeTotal, setNodeTotal] = useState(0);
   const [selectedNodeID, setSelectedNodeID] = useState<string | null>(null);
   const [nodeFilter, setNodeFilter] = useState<NodeFilterState>(initialNodeFilter);
   const [nodeEditForm, setNodeEditForm] = useState<NodeEditForm | null>(null);
@@ -242,16 +254,32 @@ export default function App() {
   }, [nodeFilter]);
 
   useEffect(() => {
+    if (!currentUser || currentUser.role === "user") {
+      return;
+    }
+    if (connectionView !== "nodes") {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilter);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [connectionView, currentUser, nodeFilter]);
+
+  useEffect(() => {
     if (nodes.length === 0) {
       setSelectedNodeID(null);
       setNodeEditForm(null);
       return;
     }
     setSelectedNodeID((current) => {
-      if (current && nodes.some((node) => node.nodeId === current)) {
+      if (current === null) {
+        return null;
+      }
+      if (nodes.some((node) => node.nodeId === current)) {
         return current;
       }
-      return nodes[0].nodeId;
+      return null;
     });
   }, [nodes]);
 
@@ -361,6 +389,8 @@ export default function App() {
 
   function buildNodeQuery(filter: NodeFilterState) {
     const query = new URLSearchParams();
+    query.set("limit", String(filter.limit));
+    query.set("offset", String(filter.offset));
     if (filter.nodeRole) query.set("nodeRole", filter.nodeRole);
     if (filter.environment) query.set("environment", filter.environment);
     if (filter.trustLevel) query.set("trustLevel", filter.trustLevel);
@@ -388,13 +418,13 @@ export default function App() {
       const overviewRequests =
         user.role !== "user"
           ? [
-              requestJSON<{ items: NodeSummary[] }>(nodePath),
+              requestJSON<NodeListResponse>(nodePath),
               requestJSON<{ items: TunnelSpec[] }>("/api/tunnels"),
               requestJSON<ServerMetrics>("/api/server/metrics"),
               requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime"),
             ]
           : [
-              Promise.resolve({ items: [] as NodeSummary[] }),
+              Promise.resolve({ items: [] as NodeSummary[], total: 0, limit: nodeFilterValue.limit, offset: nodeFilterValue.offset }),
               Promise.resolve({ items: [] as TunnelSpec[] }),
               Promise.resolve(null as ServerMetrics | null),
               Promise.resolve(null as RelayRuntimeSummary | null),
@@ -416,7 +446,7 @@ export default function App() {
       }
 
       const [nodesPayload, tunnelsPayload, metricsPayload, relayPayload, usersPayload, auditPayload] = results as [
-        { items: NodeSummary[] },
+        NodeListResponse,
         { items: TunnelSpec[] },
         ServerMetrics | null,
         RelayRuntimeSummary | null,
@@ -425,6 +455,7 @@ export default function App() {
       ];
 
       setNodes(nodesPayload.items || []);
+      setNodeTotal(nodesPayload.total || 0);
       setTunnels(tunnelsPayload.items || []);
       setMetrics(metricsPayload);
       setRelayRuntime(relayPayload);
@@ -452,6 +483,7 @@ export default function App() {
   function resetConsoleState() {
     setCurrentUser(null);
     setNodes([]);
+    setNodeTotal(0);
     setSelectedNodeID(null);
     setNodeFilter(initialNodeFilter);
     setNodeEditForm(null);
@@ -700,14 +732,23 @@ export default function App() {
 
   function submitNodeFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    nodeFilterRef.current = nodeFilter;
-    void refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilter);
+    const nextFilter = { ...nodeFilter, offset: 0 };
+    setNodeFilter(nextFilter);
+    nodeFilterRef.current = nextFilter;
+    void refreshDashboard(false, currentUser, false, auditFilterRef.current, nextFilter);
   }
 
   function clearNodeFilters() {
     setNodeFilter(initialNodeFilter);
     nodeFilterRef.current = initialNodeFilter;
     void refreshDashboard(false, currentUser, false, auditFilterRef.current, initialNodeFilter);
+  }
+
+  function goToNodePage(nextOffset: number) {
+    const nextFilter = { ...nodeFilter, offset: Math.max(0, nextOffset) };
+    setNodeFilter(nextFilter);
+    nodeFilterRef.current = nextFilter;
+    void refreshDashboard(false, currentUser, false, auditFilterRef.current, nextFilter);
   }
 
   function submitAuditFilters(event: FormEvent<HTMLFormElement>) {
@@ -747,6 +788,8 @@ export default function App() {
   const activeTunnels = tunnels.filter((tunnel) => tunnel.status === "active").length;
   const canOperate = activeUser.role !== "user";
   const canManageUsers = activeUser.role === "admin";
+  const nodeStart = nodes.length === 0 ? 0 : nodeFilter.offset + 1;
+  const nodeEnd = Math.min(nodeFilter.offset + nodeFilter.limit, nodeTotal);
   const auditStart = auditLogs.length === 0 ? 0 : auditFilter.offset + 1;
   const auditEnd = Math.min(auditFilter.offset + auditFilter.limit, auditTotal);
   const groupedNodes = groupNodesByRole(nodes);
@@ -763,7 +806,7 @@ export default function App() {
     return (
       <div className="workspace-shell auth-shell">
         <section className="auth-card">
-          <p className="eyebrow">Bootstrap</p>
+          <p className="eyebrow">初始化</p>
           <h1>首次安装初始化</h1>
           <p className="summary">输入管理员信息和 bootstrap secret，初始化后直接进入控制台。</p>
           {error ? <div className="error">{error}</div> : null}
@@ -771,7 +814,7 @@ export default function App() {
             <label><span>邮箱</span><input value={bootstrapForm.email} onChange={(event) => setBootstrapForm((current) => ({ ...current, email: event.target.value }))} required /></label>
             <label><span>显示名称</span><input value={bootstrapForm.displayName} onChange={(event) => setBootstrapForm((current) => ({ ...current, displayName: event.target.value }))} required /></label>
             <label><span>密码</span><input type="password" value={bootstrapForm.password} onChange={(event) => setBootstrapForm((current) => ({ ...current, password: event.target.value }))} required /></label>
-            <label><span>Bootstrap Secret</span><input type="password" value={bootstrapForm.bootstrapSecret} onChange={(event) => setBootstrapForm((current) => ({ ...current, bootstrapSecret: event.target.value }))} required /></label>
+            <label><span>初始化密钥</span><input type="password" value={bootstrapForm.bootstrapSecret} onChange={(event) => setBootstrapForm((current) => ({ ...current, bootstrapSecret: event.target.value }))} required /></label>
             <button type="submit" disabled={busyAction === "bootstrap"}>{busyAction === "bootstrap" ? "初始化中..." : "创建管理员"}</button>
           </form>
         </section>
@@ -783,7 +826,7 @@ export default function App() {
     return (
       <div className="workspace-shell auth-shell">
         <section className="auth-card">
-          <p className="eyebrow">Login</p>
+          <p className="eyebrow">登录</p>
           <h1>控制台登录</h1>
           <p className="summary">登录后进入真正的工作区切换，而不是锚点长页面。</p>
           {error ? <div className="error">{error}</div> : null}
@@ -801,7 +844,7 @@ export default function App() {
     <div className="workspace-shell">
       <aside className="workspace-sidebar">
         <div className="sidebar-card brand-card">
-          <p className="eyebrow">Cloud Relay Console</p>
+          <p className="eyebrow">云中继控制台</p>
           <h1>控制台</h1>
           <p className="sidebar-copy">切换工作区而不是在同一页里反复滚动寻找目标模块。</p>
         </div>
@@ -841,7 +884,7 @@ export default function App() {
           <section className="workspace-panel">
             <div className="section-head">
               <div>
-                <p className="eyebrow">Overview</p>
+                <p className="eyebrow">总览</p>
                 <h2>系统总览</h2>
               </div>
               <span className="muted-line">{activeUser.role === "user" ? "当前角色仅显示允许查看的摘要信息" : "统一观察节点、隧道、待命池和审计窗口"}</span>
@@ -885,7 +928,7 @@ export default function App() {
           <section className="workspace-panel">
             <div className="section-head">
               <div>
-                <p className="eyebrow">Connections</p>
+                <p className="eyebrow">连接</p>
                 <h2>连接管理</h2>
               </div>
               <div className="inline-switches">
@@ -901,7 +944,7 @@ export default function App() {
                   <form className="form-grid" onSubmit={submitNodeFilters}>
                     <label>
                       <span>节点角色</span>
-                      <select value={nodeFilter.nodeRole} onChange={(event) => setNodeFilter((current) => ({ ...current, nodeRole: event.target.value as NodeRole }))}>
+                      <select value={nodeFilter.nodeRole} onChange={(event) => setNodeFilter((current) => ({ ...current, nodeRole: event.target.value as NodeRole, offset: 0 }))}>
                         <option value="">全部</option>
                         <option value="cloud">cloud</option>
                         <option value="local">local</option>
@@ -910,7 +953,7 @@ export default function App() {
                     </label>
                     <label>
                       <span>环境</span>
-                      <select value={nodeFilter.environment} onChange={(event) => setNodeFilter((current) => ({ ...current, environment: event.target.value as NodeEnvironment }))}>
+                      <select value={nodeFilter.environment} onChange={(event) => setNodeFilter((current) => ({ ...current, environment: event.target.value as NodeEnvironment, offset: 0 }))}>
                         <option value="">全部</option>
                         <option value="prod">prod</option>
                         <option value="test">test</option>
@@ -919,7 +962,7 @@ export default function App() {
                     </label>
                     <label>
                       <span>信任级别</span>
-                      <select value={nodeFilter.trustLevel} onChange={(event) => setNodeFilter((current) => ({ ...current, trustLevel: event.target.value as NodeTrustLevel }))}>
+                      <select value={nodeFilter.trustLevel} onChange={(event) => setNodeFilter((current) => ({ ...current, trustLevel: event.target.value as NodeTrustLevel, offset: 0 }))}>
                         <option value="">全部</option>
                         <option value="trusted">trusted</option>
                         <option value="limited">limited</option>
@@ -927,12 +970,12 @@ export default function App() {
                       </select>
                     </label>
                     <label>
-                      <span>Owner</span>
-                      <input value={nodeFilter.owner} onChange={(event) => setNodeFilter((current) => ({ ...current, owner: event.target.value }))} />
+                      <span>负责人</span>
+                      <input value={nodeFilter.owner} onChange={(event) => setNodeFilter((current) => ({ ...current, owner: event.target.value, offset: 0 }))} />
                     </label>
                     <label>
                       <span>标签</span>
-                      <input value={nodeFilter.tag} onChange={(event) => setNodeFilter((current) => ({ ...current, tag: event.target.value }))} placeholder="例如 win 或 office" />
+                      <input value={nodeFilter.tag} onChange={(event) => setNodeFilter((current) => ({ ...current, tag: event.target.value, offset: 0 }))} placeholder="例如 win 或 office" />
                     </label>
                     <div className="form-actions">
                       <button type="submit">应用筛选</button>
@@ -940,45 +983,18 @@ export default function App() {
                     </div>
                   </form>
 
-                  <h3>节点列表</h3>
-                  {groupedNodes.length === 0 ? <EmptyState title="暂无节点" body="当前没有可展示的节点状态。" /> : groupedNodes.map((group) => (
-                    <section key={group.key} className="node-group-section">
-                      <div className="group-heading">
-                        <strong>{group.label}</strong>
-                        <span className="muted-line">{group.items.length} 台</span>
-                      </div>
-                      <div className="spotlight-grid compact-cards">
-                        {group.items.map((node) => (
-                          <article key={node.nodeId} className={selectedNodeID === node.nodeId ? "spotlight-card interactive-card selected-card" : "spotlight-card interactive-card"} onClick={() => setSelectedNodeID(node.nodeId)}>
-                            <div className="spotlight-head">
-                              <div>
-                                <strong>{node.nodeName}</strong>
-                                <span className="muted-line">{node.nodeId}</span>
-                              </div>
-                              <span className={statusPillClass(node.status)}>{node.status}</span>
-                            </div>
-                            <div className="tag-strip">
-                              <span className="status-pill tone-neutral">{node.nodeRole || "unassigned"}</span>
-                              <span className="status-pill tone-info">{node.environment || "-"}</span>
-                              <span className="status-pill tone-warn">{node.trustLevel || "-"}</span>
-                            </div>
-                            <div className="muted-line">Owner: {node.owner || "-"}</div>
-                            <div className="muted-line">Location: {node.location || "-"}</div>
-                            <div className="muted-line">Tags: {formatTags(node.tags)}</div>
-                          </article>
-                        ))}
-                      </div>
-                    </section>
-                  ))}
-
+                  <div className="section-head compact-head">
+                    <h3>节点列表</h3>
+                    <span className="muted-line">显示 {nodeStart === 0 ? 0 : nodeStart}-{nodeEnd} / {nodeTotal}</span>
+                  </div>
                   <div className="table-wrap compact-table">
                     <table>
-                      <thead><tr><th>节点</th><th>角色</th><th>环境</th><th>信任级别</th><th>Owner</th><th>标签</th></tr></thead>
+                      <thead><tr><th>节点</th><th>角色</th><th>环境</th><th>信任级别</th><th>负责人</th><th>标签</th></tr></thead>
                       <tbody>
                         {nodes.length === 0 ? <tr><td colSpan={6}>暂无节点。</td></tr> : nodes.map((node) => (
-                          <tr key={node.nodeId} className={selectedNodeID === node.nodeId ? "clickable-row selected-row" : "clickable-row"} onClick={() => setSelectedNodeID(node.nodeId)}>
+                          <tr key={node.nodeId} className={selectedNodeID === node.nodeId ? "clickable-row selected-row" : "clickable-row"} onClick={() => setSelectedNodeID((current) => current === node.nodeId ? null : node.nodeId)}>
                             <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div></td>
-                            <td>{node.nodeRole || "-"}</td>
+                            <td>{node.nodeRole ? roleLabel(node.nodeRole) : "-"}</td>
                             <td>{node.environment || "-"}</td>
                             <td>{node.trustLevel || "-"}</td>
                             <td>{node.owner || "-"}</td>
@@ -987,6 +1003,12 @@ export default function App() {
                         ))}
                       </tbody>
                     </table>
+                  </div>
+
+                  <div className="actions-row audit-pager">
+                    <button type="button" className="secondary" disabled={nodeFilter.offset === 0} onClick={() => goToNodePage(nodeFilter.offset - nodeFilter.limit)}>上一页</button>
+                    <button type="button" className="secondary" disabled={nodeFilter.offset + nodeFilter.limit >= nodeTotal} onClick={() => goToNodePage(nodeFilter.offset + nodeFilter.limit)}>下一页</button>
+                    <span className="inline-note">limit {nodeFilter.limit} / offset {nodeFilter.offset}</span>
                   </div>
                 </section>
 
@@ -1011,7 +1033,7 @@ export default function App() {
                       </div>
                       <form className="form-grid" onSubmit={submitNodeMetadata}>
                         <label>
-                          <span>nodeRole</span>
+                          <span>节点角色</span>
                           <select value={nodeEditForm.nodeRole} onChange={(event) => setNodeEditForm((current) => current ? { ...current, nodeRole: event.target.value as NodeRole } : current)}>
                             <option value="">未设置</option>
                             <option value="cloud">cloud</option>
@@ -1020,7 +1042,7 @@ export default function App() {
                           </select>
                         </label>
                         <label>
-                          <span>environment</span>
+                          <span>环境</span>
                           <select value={nodeEditForm.environment} onChange={(event) => setNodeEditForm((current) => current ? { ...current, environment: event.target.value as NodeEnvironment } : current)}>
                             <option value="">未设置</option>
                             <option value="prod">prod</option>
@@ -1029,7 +1051,7 @@ export default function App() {
                           </select>
                         </label>
                         <label>
-                          <span>trustLevel</span>
+                          <span>信任级别</span>
                           <select value={nodeEditForm.trustLevel} onChange={(event) => setNodeEditForm((current) => current ? { ...current, trustLevel: event.target.value as NodeTrustLevel } : current)}>
                             <option value="">未设置</option>
                             <option value="trusted">trusted</option>
@@ -1037,21 +1059,22 @@ export default function App() {
                             <option value="external">external</option>
                           </select>
                         </label>
-                        <label><span>owner</span><input value={nodeEditForm.owner} onChange={(event) => setNodeEditForm((current) => current ? { ...current, owner: event.target.value } : current)} /></label>
-                        <label><span>location</span><input value={nodeEditForm.location} onChange={(event) => setNodeEditForm((current) => current ? { ...current, location: event.target.value } : current)} /></label>
-                        <label><span>tags</span><input value={nodeEditForm.tags} onChange={(event) => setNodeEditForm((current) => current ? { ...current, tags: event.target.value } : current)} placeholder="逗号分隔" /></label>
+                        <label><span>负责人</span><input value={nodeEditForm.owner} onChange={(event) => setNodeEditForm((current) => current ? { ...current, owner: event.target.value } : current)} /></label>
+                        <label><span>位置</span><input value={nodeEditForm.location} onChange={(event) => setNodeEditForm((current) => current ? { ...current, location: event.target.value } : current)} /></label>
+                        <label><span>标签</span><input value={nodeEditForm.tags} onChange={(event) => setNodeEditForm((current) => current ? { ...current, tags: event.target.value } : current)} placeholder="逗号分隔" /></label>
                         <div className="form-actions">
                           <button type="submit" disabled={busyAction === "update-node:" + selectedNode.nodeId}>{busyAction === "update-node:" + selectedNode.nodeId ? "保存中..." : "保存节点元数据"}</button>
                         </div>
                       </form>
                     </>
-                  ) : <EmptyState title="未选择节点" body="点击节点卡片或表格行后，在这里查看并编辑节点元数据。" />}
+                  ) : <EmptyState title="未选择节点" body="请先在左侧列表中选中节点。当前界面仅显示当前分页的数据，避免节点过多时页面不断拉长。" />}
                 </section>
               </div>
             ) : (
               <>
                 <div className="split-layout tunnel-workspace">
                   <div className="workspace-column panel-stack">
+                    {editingTunnelID === null ? (
                     <section className="subpanel form-panel">
                       <h3>创建隧道</h3>
                       <form className="form-grid" onSubmit={createTunnel}>
@@ -1069,16 +1092,22 @@ export default function App() {
                         <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
                       </form>
                     </section>
+                    ) : (
+                    <section className="subpanel form-panel">
+                      <h3>新建隧道</h3>
+                      <p className="summary">当前已选中隧道，右侧正在显示其编辑表单。再次点击已选隧道可取消选中，取消后这里会恢复新建表单。</p>
+                    </section>
+                    )}
 
                     <section className="subpanel form-panel">
                       <div className="section-head compact-head">
                         <div>
-                          <p className="eyebrow">Edit</p>
+                          <p className="eyebrow">编辑</p>
                           <h3>编辑隧道</h3>
                         </div>
                         {tunnelEditForm ? <span className="muted-line">当前编辑 {tunnelEditForm.id}</span> : null}
                       </div>
-                      {tunnelEditForm ? (
+                      {editingTunnelID !== null && tunnelEditForm ? (
                         <form className="form-grid" onSubmit={submitTunnelEdit}>
                           <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
                           <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required /></label>
@@ -1101,7 +1130,13 @@ export default function App() {
                     <h3>重点隧道</h3>
                     <div className="spotlight-grid compact-cards">
                       {tunnels.length === 0 ? <EmptyState title="暂无隧道" body="创建后会在这里优先展示公网入口和目标映射。" /> : tunnels.map((tunnel) => (
-                        <article key={tunnel.id} className={editingTunnelID === tunnel.id ? "spotlight-card tunnel-card interactive-card selected-card" : "spotlight-card tunnel-card interactive-card"} onClick={() => beginTunnelEdit(tunnel)}>
+                        <article key={tunnel.id} className={editingTunnelID === tunnel.id ? "spotlight-card tunnel-card interactive-card selected-card" : "spotlight-card tunnel-card interactive-card"} onClick={() => {
+                          if (editingTunnelID === tunnel.id) {
+                            clearTunnelEdit();
+                            return;
+                          }
+                          beginTunnelEdit(tunnel);
+                        }}>
                           <div className="spotlight-head">
                             <div>
                               <strong>{tunnel.name}</strong>
@@ -1151,7 +1186,7 @@ export default function App() {
           <section className="workspace-panel">
             <div className="section-head">
               <div>
-                <p className="eyebrow">Audit</p>
+                <p className="eyebrow">审计</p>
                 <h2>审计</h2>
               </div>
               <span className="muted-line">审计工作区独立保留筛选、分页与 payload 展开</span>
@@ -1160,10 +1195,10 @@ export default function App() {
             <section className="subpanel audit-filter-panel">
               <h3>筛选栏</h3>
               <form className="form-grid" onSubmit={submitAuditFilters}>
-                <label><span>Action</span><input value={auditFilter.action} onChange={(event) => setAuditFilter((current) => ({ ...current, action: event.target.value }))} /></label>
-                <label><span>Actor Type</span><input value={auditFilter.actorType} onChange={(event) => setAuditFilter((current) => ({ ...current, actorType: event.target.value }))} /></label>
-                <label><span>Resource Type</span><input value={auditFilter.resourceType} onChange={(event) => setAuditFilter((current) => ({ ...current, resourceType: event.target.value }))} /></label>
-                <label><span>Actor ID</span><input value={auditFilter.actorID} onChange={(event) => setAuditFilter((current) => ({ ...current, actorID: event.target.value }))} /></label>
+                <label><span>动作</span><input value={auditFilter.action} onChange={(event) => setAuditFilter((current) => ({ ...current, action: event.target.value }))} /></label>
+                <label><span>执行者类型</span><input value={auditFilter.actorType} onChange={(event) => setAuditFilter((current) => ({ ...current, actorType: event.target.value }))} /></label>
+                <label><span>资源类型</span><input value={auditFilter.resourceType} onChange={(event) => setAuditFilter((current) => ({ ...current, resourceType: event.target.value }))} /></label>
+                <label><span>执行者 ID</span><input value={auditFilter.actorID} onChange={(event) => setAuditFilter((current) => ({ ...current, actorID: event.target.value }))} /></label>
                 <label><span>开始时间</span><input type="datetime-local" value={auditFilter.startAt} onChange={(event) => setAuditFilter((current) => ({ ...current, startAt: event.target.value }))} /></label>
                 <label><span>结束时间</span><input type="datetime-local" value={auditFilter.endAt} onChange={(event) => setAuditFilter((current) => ({ ...current, endAt: event.target.value }))} /></label>
                 <div className="form-actions">
@@ -1181,7 +1216,7 @@ export default function App() {
               </div>
               <div className="table-wrap compact-table dense-table">
                 <table>
-                  <thead><tr><th>时间</th><th>Actor</th><th>Action</th><th>资源类型</th><th>资源 ID</th></tr></thead>
+                  <thead><tr><th>时间</th><th>执行者</th><th>动作</th><th>资源类型</th><th>资源 ID</th></tr></thead>
                   <tbody>
                     {auditLogs.length === 0 ? <tr><td colSpan={5}>暂无审计日志。</td></tr> : auditLogs.map((entry) => (
                       <Fragment key={entry.id}>
@@ -1213,7 +1248,7 @@ export default function App() {
           <section className="workspace-panel">
             <div className="section-head">
               <div>
-                <p className="eyebrow">Permissions</p>
+                <p className="eyebrow">权限</p>
                 <h2>用户/权限</h2>
               </div>
               <span className="muted-line">管理员专属工作区</span>
@@ -1356,10 +1391,10 @@ function formatTags(tags?: string[]) {
 
 function groupNodesByRole(nodes: NodeSummary[]) {
   const order: Array<{ key: string; label: string }> = [
-    { key: "cloud", label: "Cloud" },
-    { key: "local", label: "Local" },
-    { key: "third_party", label: "Third Party" },
-    { key: "unassigned", label: "Unassigned" },
+    { key: "cloud", label: "云机节点" },
+    { key: "local", label: "本地节点" },
+    { key: "third_party", label: "第三方节点" },
+    { key: "unassigned", label: "未分类节点" },
   ];
   return order
     .map((entry) => ({
@@ -1368,6 +1403,19 @@ function groupNodesByRole(nodes: NodeSummary[]) {
       items: nodes.filter((node) => (node.nodeRole || "unassigned") === entry.key),
     }))
     .filter((entry) => entry.items.length > 0);
+}
+
+function roleLabel(role: string) {
+  switch (role) {
+    case "cloud":
+      return "云机"
+    case "local":
+      return "本地"
+    case "third_party":
+      return "第三方"
+    default:
+      return role || "未分类"
+  }
 }
 
 function nodeMeta(node: NodeSummary, key: string, fallback = "-") {

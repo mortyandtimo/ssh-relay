@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -374,6 +375,56 @@ func TestNodeMetadataFilterAndUpdate(t *testing.T) {
 	server.Handler().ServeHTTP(getRes, getReq)
 	if getRes.Code != http.StatusOK {
 		t.Fatalf("expected get status 200, got %d", getRes.Code)
+	}
+}
+
+func TestNodeListPagination(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	for i := 0; i < 25; i++ {
+		registerBody, err := json.Marshal(types.NodeRegisterRequest{
+			NodeID:       fmt.Sprintf("node-page-%02d", i),
+			NodeName:     fmt.Sprintf("node-%02d", i),
+			AgentVersion: "0.1.0",
+			Capabilities: types.NodeCapabilities{TCPRelay: true},
+			Metadata: map[string]string{
+				"nodeRole":    "local",
+				"environment": "test",
+				"trustLevel":  "trusted",
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register status 200, got %d", res.Code)
+		}
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/nodes?nodeRole=local&limit=10&offset=10", nil)
+	applyCookies(listReq, adminCookies)
+	listRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(listRes, listReq)
+	if listRes.Code != http.StatusOK {
+		t.Fatalf("expected list status 200, got %d", listRes.Code)
+	}
+	var listOut types.NodeListResponse
+	if err := json.NewDecoder(listRes.Body).Decode(&listOut); err != nil {
+		t.Fatal(err)
+	}
+	if listOut.Total != 25 {
+		t.Fatalf("expected total 25, got %d", listOut.Total)
+	}
+	if listOut.Limit != 10 || listOut.Offset != 10 {
+		t.Fatalf("expected limit/offset 10/10, got %d/%d", listOut.Limit, listOut.Offset)
+	}
+	if len(listOut.Items) != 10 {
+		t.Fatalf("expected 10 items, got %d", len(listOut.Items))
 	}
 }
 

@@ -26,6 +26,8 @@ type NodeFilter struct {
 	TrustLevel  string
 	Owner       string
 	Tag         string
+	Limit       int
+	Offset      int
 }
 
 type UpdateNodeParams struct {
@@ -115,7 +117,7 @@ type Store interface {
 	Kind() string
 	RegisterNode(ctx context.Context, req types.NodeRegisterRequest) (types.NodeSummary, error)
 	HeartbeatNode(ctx context.Context, req types.NodeHeartbeatRequest) (types.NodeSummary, error)
-	ListNodes(ctx context.Context, filter NodeFilter) ([]types.NodeSummary, error)
+	ListNodes(ctx context.Context, filter NodeFilter) ([]types.NodeSummary, int, error)
 	GetNode(ctx context.Context, nodeID string) (types.NodeSummary, error)
 	UpdateNode(ctx context.Context, params UpdateNodeParams) (types.NodeSummary, error)
 	CreateTunnel(ctx context.Context, spec types.TunnelSpec) (types.TunnelSpec, error)

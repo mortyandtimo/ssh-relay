@@ -129,7 +129,28 @@ func (s *PostgresStore) HeartbeatNode(ctx context.Context, req types.NodeHeartbe
 	}, nil
 }
 
-func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]types.NodeSummary, error) {
+func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]types.NodeSummary, int, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	var total int
+	err := s.pool.QueryRow(ctx, `
+		select count(*)
+		from nodes n
+		where ($1 = '' or coalesce(n.metadata->>'nodeRole', '') = $1)
+		  and ($2 = '' or coalesce(n.metadata->>'environment', '') = $2)
+		  and ($3 = '' or coalesce(n.metadata->>'trustLevel', '') = $3)
+		  and ($4 = '' or lower(coalesce(n.metadata->>'owner', '')) like '%' || lower($4) || '%')
+		  and ($5 = '' or lower(coalesce(n.metadata->>'tags', '')) like '%' || lower($5) || '%')
+	`, filter.NodeRole, filter.Environment, filter.TrustLevel, filter.Owner, filter.Tag).Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
 	rows, err := s.pool.Query(ctx, `
 		select
 			n.id,
@@ -147,9 +168,10 @@ func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]typ
 		  and ($4 = '' or lower(coalesce(n.metadata->>'owner', '')) like '%' || lower($4) || '%')
 		  and ($5 = '' or lower(coalesce(n.metadata->>'tags', '')) like '%' || lower($5) || '%')
 		order by n.id
-	`, filter.NodeRole, filter.Environment, filter.TrustLevel, filter.Owner, filter.Tag)
+		limit $6 offset $7
+	`, filter.NodeRole, filter.Environment, filter.TrustLevel, filter.Owner, filter.Tag, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -167,19 +189,19 @@ func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]typ
 			&item.LastSeenAt,
 			&item.ActiveTunnels,
 		); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		item.Capabilities, err = unmarshalCapabilities(capabilitiesJSON)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		item.Metadata, err = unmarshalMap(metadataJSON)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, hydrateNodeSummary(item))
 	}
-	return items, rows.Err()
+	return items, total, rows.Err()
 }
 
 func (s *PostgresStore) GetNode(ctx context.Context, nodeID string) (types.NodeSummary, error) {

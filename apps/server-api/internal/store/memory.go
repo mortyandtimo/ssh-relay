@@ -85,7 +85,7 @@ func (s *InMemoryStore) HeartbeatNode(_ context.Context, req types.NodeHeartbeat
 	return record.Summary, nil
 }
 
-func (s *InMemoryStore) ListNodes(_ context.Context, filter NodeFilter) ([]types.NodeSummary, error) {
+func (s *InMemoryStore) ListNodes(_ context.Context, filter NodeFilter) ([]types.NodeSummary, int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	items := make([]types.NodeSummary, 0, len(s.nodes))
@@ -97,7 +97,23 @@ func (s *InMemoryStore) ListNodes(_ context.Context, filter NodeFilter) ([]types
 		items = append(items, summary)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].NodeID < items[j].NodeID })
-	return items, nil
+	total := len(items)
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= total {
+		return []types.NodeSummary{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return items[offset:end], total, nil
 }
 
 func (s *InMemoryStore) GetNode(_ context.Context, nodeID string) (types.NodeSummary, error) {

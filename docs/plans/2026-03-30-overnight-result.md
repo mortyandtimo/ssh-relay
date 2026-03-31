@@ -150,3 +150,21 @@ curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
   - nodeRole / environment / trustLevel / owner / tags filtering
   - visible grouped display by role without introducing a hard group tree
   - node detail editing for the fixed fields and tags
+
+### Node Pagination And Tunnel Selection Refinement (2026-03-31)
+
+- `/api/nodes` now supports server-side pagination through:
+  - `limit`
+  - `offset`
+  - response fields: `items / total / limit / offset`
+- Admin web node page now uses that pagination instead of rendering all nodes into one long page.
+- Current admin-web node behavior:
+  - default page size is `10`
+  - node list shows current page range and total
+  - node list uses previous / next page controls
+  - node detail panel only shows when a node is selected
+  - clicking the same selected node again clears the selection
+- Current admin-web tunnel behavior:
+  - unselected state shows the create-tunnel form
+  - selected state shows tunnel editing context instead of keeping create/edit stacked as equal-weight forms
+  - clicking the same selected tunnel again clears the selection and returns to create mode
