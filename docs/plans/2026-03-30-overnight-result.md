@@ -183,3 +183,20 @@ curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
   - no advanced authentication
   - no ACL / policy engine
   - no proxy chaining / transparent mode
+
+### SOCKS5 Minimal Implementation Status (2026-03-31)
+
+- Current tunnel semantics are now locked for `type=socks5`:
+  - server-side create/update normalizes `targetHost=socks5`
+  - server-side create/update normalizes `targetPort=1080`
+  - admin-web no longer exposes normal TCP target editing fields for `socks5`
+- Current client-agent SOCKS5 behavior:
+  - supports version 5 CONNECT
+  - rejects non-CONNECT commands
+  - still does not implement UDP associate
+- Current verification coverage:
+  - server-api tests cover socks5 create/update normalization
+  - server-api tests cover socks5 tunnel visibility in agent path and TCP route export
+  - client-agent tests cover CONNECT success and non-CONNECT rejection
+- Real cloud validation still requires replacing the running Windows `client-agent.exe` with the newly built binary:
+  - `/root/cloud-relay-platform/deploy/bin/windows-amd64/client-agent.exe`

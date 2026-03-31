@@ -484,6 +484,62 @@ func TestSOCKS5TunnelLifecycleVisibleToAgentAndRoutes(t *testing.T) {
 	}
 }
 
+func TestSOCKS5TunnelCreateUpdateValidation(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+	registerOut := registerNodeThroughAgent(t, server, "socks-validate-node")
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-socks5-v",
+		"nodeId":     registerOut.NodeID,
+		"name":       "socks-validate",
+		"type":       "socks5",
+		"targetHost": "should-be-overridden",
+		"targetPort": 9999,
+		"publicPort": 12080,
+		"status":     "active",
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create status 201, got %d", createRes.Code)
+	}
+	var created types.TunnelSpec
+	if err := json.NewDecoder(createRes.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.TargetHost != "socks5" || created.TargetPort != 1080 {
+		t.Fatalf("expected normalized socks5 target, got %s:%d", created.TargetHost, created.TargetPort)
+	}
+
+	updateBody, _ := json.Marshal(map[string]any{
+		"nodeId":     registerOut.NodeID,
+		"name":       "socks-validate-updated",
+		"type":       "socks5",
+		"targetHost": "still-ignored",
+		"targetPort": 7,
+		"publicPort": 12080,
+		"status":     "active",
+	})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/tunnels/"+created.ID, bytes.NewReader(updateBody))
+	applyCookies(updateReq, adminCookies)
+	updateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(updateRes, updateReq)
+	if updateRes.Code != http.StatusOK {
+		t.Fatalf("expected update status 200, got %d", updateRes.Code)
+	}
+	var updated types.TunnelSpec
+	if err := json.NewDecoder(updateRes.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.TargetHost != "socks5" || updated.TargetPort != 1080 {
+		t.Fatalf("expected normalized socks5 target after update, got %s:%d", updated.TargetHost, updated.TargetPort)
+	}
+}
+
 func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 	runtimeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(types.RelayRuntimeSummary{

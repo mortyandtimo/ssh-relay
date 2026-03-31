@@ -1136,8 +1136,8 @@ export default function App() {
                       {editingTunnelID !== null && tunnelEditForm ? (
                         <form className="form-grid" onSubmit={submitTunnelEdit}>
                           <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
-                          <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required /></label>
-                          <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required /></label>
+                          {tunnelEditForm.type === "tcp" ? <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required /></label> : <label><span>代理说明</span><input value="节点侧内置 SOCKS5" disabled /></label>}
+                          {tunnelEditForm.type === "tcp" ? <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required /></label> : <label><span>协议能力</span><input value="仅 CONNECT，不含 UDP" disabled /></label>}
                           <label><span>公网端口</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
                           <div className="detail-grid readonly-grid">
                             <DetailItem label="nodeId" value={tunnelEditForm.nodeId} />

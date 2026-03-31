@@ -545,6 +545,12 @@ func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {
 		}
 		spec := req.TunnelSpec
 		spec.NodeID = req.NodeID
+		normalized, err := normalizeManagedTunnelSpec(spec)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		spec = normalized
 		if spec.Metadata == nil {
 			spec.Metadata = map[string]string{}
 		}
@@ -599,6 +605,12 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 		spec := req.TunnelSpec
 		spec.ID = id
 		spec.NodeID = req.NodeID
+		normalized, err := normalizeManagedTunnelSpec(spec)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		spec = normalized
 		if spec.Metadata == nil {
 			spec.Metadata = map[string]string{}
 		}
@@ -996,6 +1008,25 @@ func parseNonNegativeInt(raw string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error) {
+	spec.Type = strings.TrimSpace(spec.Type)
+	if spec.Type == "" {
+		spec.Type = "tcp"
+	}
+	switch spec.Type {
+	case "tcp":
+		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {
+			return types.TunnelSpec{}, errors.New("tcp tunnel requires targetHost and targetPort")
+		}
+	case "socks5":
+		spec.TargetHost = "socks5"
+		spec.TargetPort = 1080
+	default:
+		return types.TunnelSpec{}, fmt.Errorf("unsupported tunnel type %s", spec.Type)
+	}
+	return spec, nil
 }
 
 func envOrDefault(key, fallback string) string {
