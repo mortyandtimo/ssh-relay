@@ -165,12 +165,14 @@ type ServerMetrics struct {
 }
 
 type RelayPoolSummary struct {
-	PoolKey      string `json:"poolKey"`
-	NodeID       string `json:"nodeId"`
-	PublicPort   int    `json:"publicPort"`
-	StandbyCount int    `json:"standbyCount"`
-	TargetSize   int    `json:"targetSize"`
-	MaxSize      int    `json:"maxSize"`
+	PoolKey         string             `json:"poolKey"`
+	NodeID          string             `json:"nodeId"`
+	PublicPort      int                `json:"publicPort"`
+	StandbyCount    int                `json:"standbyCount"`
+	TargetSize      int                `json:"targetSize"`
+	MaxSize         int                `json:"maxSize"`
+	TargetHealth    TunnelHealthStatus `json:"targetHealth,omitempty"`
+	TargetCheckedAt time.Time          `json:"targetCheckedAt,omitempty"`
 }
 
 type RelayRuntimeSummary struct {

@@ -158,14 +158,20 @@ func (p *standbyPool) oldestIndexLocked() int {
 
 var ErrPoolEmpty = errors.New("standby pool empty")
 
+type routeTargetStatus struct {
+	health    types.TunnelHealthStatus
+	checkedAt time.Time
+}
+
 type Service struct {
 	apiBaseURL string
 	httpClient *http.Client
 
-	mu        sync.Mutex
-	listeners map[int]net.Listener
-	routes    map[int]types.TunnelSpec
-	pools     map[string]*standbyPool
+	mu             sync.Mutex
+	listeners      map[int]net.Listener
+	routes         map[int]types.TunnelSpec
+	pools          map[string]*standbyPool
+	targetStatuses map[string]routeTargetStatus
 
 	acquireTimeout time.Duration
 }
@@ -180,6 +186,7 @@ func NewService(apiBaseURL string) *Service {
 		listeners:      make(map[int]net.Listener),
 		routes:         make(map[int]types.TunnelSpec),
 		pools:          make(map[string]*standbyPool),
+		targetStatuses: make(map[string]routeTargetStatus),
 		acquireTimeout: defaultAcquireTimeout,
 	}
 }
@@ -383,17 +390,20 @@ func (s *Service) handleHTTPRequest(w http.ResponseWriter, r *http.Request, rout
 	log.Printf("http request %d accepted from %s method=%s host=%s path=%s for node=%s publicPort=%d", reqID, r.RemoteAddr, r.Method, r.Host, r.URL.RequestURI(), route.NodeID, route.PublicPort)
 	standby, poolSize, totalStandbyCount, err := s.acquireStandbyConn(r.Context(), route)
 	if err != nil {
+		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
 		log.Printf("http request %d no standby reverse connection for node=%s publicPort=%d: %v", reqID, route.NodeID, route.PublicPort, err)
 		http.Error(w, "http relay standby unavailable", http.StatusBadGateway)
 		return
 	}
 	if err := standby.prepareForStart(); err != nil {
+		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
 		log.Printf("http request %d discarded stale standby reverse connection for tunnel %s poolSize=%d totalStandby=%d: %v", reqID, route.ID, poolSize, totalStandbyCount, err)
 		_ = standby.conn.Close()
 		http.Error(w, "http relay standby stale", http.StatusBadGateway)
 		return
 	}
 	if _, err := standby.conn.Write([]byte{types.AgentRelayStartByte}); err != nil {
+		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
 		log.Printf("http request %d failed to start reverse session for tunnel %s poolSize=%d totalStandby=%d: %v", reqID, route.ID, poolSize, totalStandbyCount, err)
 		_ = standby.conn.Close()
 		http.Error(w, "http relay start failed", http.StatusBadGateway)
@@ -402,12 +412,14 @@ func (s *Service) handleHTTPRequest(w http.ResponseWriter, r *http.Request, rout
 	defer standby.conn.Close()
 	upstreamReq := cloneHTTPRequestForRelay(r, route)
 	if err := upstreamReq.Write(standby.conn); err != nil {
+		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
 		log.Printf("http request %d write upstream request failed for tunnel %s: %v", reqID, route.ID, err)
 		http.Error(w, "http relay write failed", http.StatusBadGateway)
 		return
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(standby.conn), upstreamReq)
 	if err != nil {
+		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
 		log.Printf("http request %d read upstream response failed for tunnel %s: %v", reqID, route.ID, err)
 		http.Error(w, "http relay response failed", http.StatusBadGateway)
 		return
@@ -415,9 +427,11 @@ func (s *Service) handleHTTPRequest(w http.ResponseWriter, r *http.Request, rout
 	defer resp.Body.Close()
 	copyHTTPResponse(w, resp)
 	if _, err := io.Copy(w, resp.Body); err != nil {
+		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
 		log.Printf("http request %d copy response body failed for tunnel %s: %v", reqID, route.ID, err)
 		return
 	}
+	s.recordTargetHealth(route, types.TunnelHealthHealthy)
 	log.Printf("http request %d completed with status=%d after %s", reqID, resp.StatusCode, time.Since(startedAt))
 }
 
@@ -449,6 +463,18 @@ func isHopByHopHeader(key string) bool {
 	default:
 		return false
 	}
+}
+
+func (s *Service) recordTargetHealth(route types.TunnelSpec, health types.TunnelHealthStatus) {
+	if route.Type != "http" {
+		return
+	}
+	s.mu.Lock()
+	if s.targetStatuses == nil {
+		s.targetStatuses = make(map[string]routeTargetStatus)
+	}
+	s.targetStatuses[routePoolKey(route.NodeID, route.PublicPort)] = routeTargetStatus{health: health, checkedAt: time.Now().UTC()}
+	s.mu.Unlock()
 }
 
 func (s *Service) acceptLoop(listener net.Listener, route types.TunnelSpec) {
@@ -645,14 +671,19 @@ func (s *Service) RuntimeSummary() types.RelayRuntimeSummary {
 		maxSize := pool.max
 		pool.mu.Unlock()
 		nodeID, publicPort := parseRoutePoolKey(key)
-		pools = append(pools, types.RelayPoolSummary{
+		summary := types.RelayPoolSummary{
 			PoolKey:      key,
 			NodeID:       nodeID,
 			PublicPort:   publicPort,
 			StandbyCount: standbyCount,
 			TargetSize:   targetSize,
 			MaxSize:      maxSize,
-		})
+		}
+		if status, ok := s.targetStatuses[key]; ok {
+			summary.TargetHealth = status.health
+			summary.TargetCheckedAt = status.checkedAt
+		}
+		pools = append(pools, summary)
 	}
 	s.mu.Unlock()
 	return types.RelayRuntimeSummary{

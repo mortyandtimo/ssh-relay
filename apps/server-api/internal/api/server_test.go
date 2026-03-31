@@ -647,8 +647,8 @@ func TestHTTPTunnelLifecycleVisibleToAgentAndRoutes(t *testing.T) {
 	if err := json.NewDecoder(agentRes.Body).Decode(&agentOut); err != nil {
 		t.Fatal(err)
 	}
-	if len(agentOut.Items) != 1 || agentOut.Items[0].Type != "tcp" {
-		t.Fatalf("expected http tunnel to be mapped as tcp for agent view, got %+v", agentOut.Items)
+	if len(agentOut.Items) != 1 || agentOut.Items[0].Type != "http" {
+		t.Fatalf("expected http tunnel in agent view, got %+v", agentOut.Items)
 	}
 
 	httpRoutesReq := httptest.NewRequest(http.MethodGet, "/internal/routes/http", nil)
