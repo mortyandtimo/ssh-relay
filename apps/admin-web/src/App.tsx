@@ -145,6 +145,7 @@ export default function App() {
   const [busyAction, setBusyAction] = useState("");
   const [hasInitializedNodeId, setHasInitializedNodeId] = useState(false);
   const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
+  const auditFilterRef = useRef<AuditFilterState>(initialAuditFilter);
 
   useEffect(() => {
     let cancelled = false;
@@ -178,13 +179,18 @@ export default function App() {
     };
   }, []);
 
+
+  useEffect(() => {
+    auditFilterRef.current = auditFilter;
+  }, [auditFilter]);
+
   useEffect(() => {
     if (!currentUser) {
       return;
     }
     let cancelled = false;
     const timer = window.setInterval(() => {
-      void refreshDashboard(false, currentUser, cancelled);
+      void refreshDashboard(false, currentUser, cancelled, auditFilterRef.current);
     }, 10000);
     return () => {
       cancelled = true;
