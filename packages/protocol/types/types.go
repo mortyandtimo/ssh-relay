@@ -83,6 +83,7 @@ const (
 	TunnelHealthNodeOffline       TunnelHealthStatus = "node_offline"
 	TunnelHealthCapabilityMissing TunnelHealthStatus = "capability_missing"
 	TunnelHealthMisconfigured     TunnelHealthStatus = "misconfigured"
+	TunnelHealthTargetUnreachable TunnelHealthStatus = "target_unreachable"
 )
 
 type TunnelSpec struct {

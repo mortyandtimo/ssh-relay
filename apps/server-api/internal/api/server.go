@@ -801,23 +801,24 @@ func (s *Server) withTunnelHealth(ctx context.Context, items []types.TunnelSpec)
 		return items
 	}
 	cache := map[string]cachedTunnelNode{}
+	reachability := s.httpReachabilityState(ctx)
 	out := make([]types.TunnelSpec, 0, len(items))
 	for _, item := range items {
-		out = append(out, s.withTunnelHealthCached(ctx, item, cache))
+		out = append(out, s.withTunnelHealthCached(ctx, item, cache, reachability))
 	}
 	return out
 }
 
 func (s *Server) withTunnelHealthOne(ctx context.Context, item types.TunnelSpec) types.TunnelSpec {
-	return s.withTunnelHealthCached(ctx, item, map[string]cachedTunnelNode{})
+	return s.withTunnelHealthCached(ctx, item, map[string]cachedTunnelNode{}, s.httpReachabilityState(ctx))
 }
 
-func (s *Server) withTunnelHealthCached(ctx context.Context, item types.TunnelSpec, cache map[string]cachedTunnelNode) types.TunnelSpec {
-	item.HealthStatus = s.deriveTunnelHealth(ctx, item, cache)
+func (s *Server) withTunnelHealthCached(ctx context.Context, item types.TunnelSpec, cache map[string]cachedTunnelNode, reachability map[string]types.TunnelHealthStatus) types.TunnelSpec {
+	item.HealthStatus = s.deriveTunnelHealth(ctx, item, cache, reachability)
 	return item
 }
 
-func (s *Server) deriveTunnelHealth(ctx context.Context, tunnel types.TunnelSpec, cache map[string]cachedTunnelNode) types.TunnelHealthStatus {
+func (s *Server) deriveTunnelHealth(ctx context.Context, tunnel types.TunnelSpec, cache map[string]cachedTunnelNode, reachability map[string]types.TunnelHealthStatus) types.TunnelHealthStatus {
 	if isTunnelMisconfigured(tunnel) {
 		return types.TunnelHealthMisconfigured
 	}
@@ -844,6 +845,11 @@ func (s *Server) deriveTunnelHealth(ctx context.Context, tunnel types.TunnelSpec
 	if tunnel.Type == "http" && !node.summary.Capabilities.HTTPRelay {
 		return types.TunnelHealthCapabilityMissing
 	}
+	if tunnel.Type == "http" {
+		if status, ok := reachability[httpReachabilityMetricKey(tunnel.NodeID, tunnel.PublicPort)]; ok && status == types.TunnelHealthTargetUnreachable {
+			return types.TunnelHealthTargetUnreachable
+		}
+	}
 	return types.TunnelHealthHealthy
 }
 
@@ -869,6 +875,51 @@ func isNodeOffline(node types.NodeSummary) bool {
 		return true
 	}
 	return time.Since(node.LastSeenAt.UTC()) > nodeOfflineThreshold
+}
+
+func httpReachabilityMetricKey(nodeID string, publicPort int) string {
+	return "httpReachability:" + nodeID + ":" + fmt.Sprintf("%d", publicPort)
+}
+
+func (s *Server) httpReachabilityState(ctx context.Context) map[string]types.TunnelHealthStatus {
+	out := map[string]types.TunnelHealthStatus{}
+	if s.store.Kind() != "postgres" {
+		return out
+	}
+	postgresStore, ok := s.store.(*store.PostgresStore)
+	if !ok {
+		return out
+	}
+	rows, err := postgresStore.DB().Query(ctx, `
+		select node_id, payload
+		from (
+			select node_id, payload, row_number() over (partition by node_id order by observed_at desc) as rn
+			from node_metrics
+		) latest
+		where rn = 1
+	`)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var nodeID string
+		var payloadJSON []byte
+		if err := rows.Scan(&nodeID, &payloadJSON); err != nil {
+			continue
+		}
+		metrics := map[string]string{}
+		if err := json.Unmarshal(payloadJSON, &metrics); err != nil {
+			continue
+		}
+		for key, value := range metrics {
+			if !strings.HasPrefix(key, "httpReachability:") {
+				continue
+			}
+			out[key] = types.TunnelHealthStatus(value)
+		}
+	}
+	return out
 }
 
 func agentVisibleTunnelSpec(item types.TunnelSpec) types.TunnelSpec {

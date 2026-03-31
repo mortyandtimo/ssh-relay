@@ -38,10 +38,11 @@ type reverseManager struct {
 	poolSize      int
 	connectTimout time.Duration
 
-	mu            sync.Mutex
-	workers       map[string]managedTunnel
-	active        int64
-	activeTunnels int64
+	mu               sync.Mutex
+	workers          map[string]managedTunnel
+	httpProbeMetrics map[string]string
+	active           int64
+	activeTunnels    int64
 }
 
 type managedTunnel struct {
@@ -70,7 +71,7 @@ func main() {
 	}
 	log.Printf("agent registered as %s", registeredID)
 	if *once {
-		if err := heartbeat(client, baseURL, registeredID, 0); err != nil {
+		if err := heartbeat(client, baseURL, registeredID, 0, nil); err != nil {
 			log.Fatal(err)
 		}
 		log.Printf("heartbeat accepted for %s", registeredID)
@@ -78,18 +79,19 @@ func main() {
 	}
 
 	manager := &reverseManager{
-		baseURL:       baseURL,
-		relayURL:      relayURL,
-		httpClient:    client,
-		poolSize:      reversePoolSize,
-		connectTimout: defaultRelayTimeout,
-		workers:       make(map[string]managedTunnel),
+		baseURL:          baseURL,
+		relayURL:         relayURL,
+		httpClient:       client,
+		poolSize:         reversePoolSize,
+		connectTimout:    defaultRelayTimeout,
+		workers:          make(map[string]managedTunnel),
+		httpProbeMetrics: make(map[string]string),
 	}
 
 	if err := manager.syncTunnels(context.Background(), registeredID); err != nil {
 		log.Printf("initial tunnel sync failed: %v", err)
 	}
-	if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount()); err != nil {
+	if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount(), manager.HTTPProbeMetrics()); err != nil {
 		log.Fatal(err)
 	}
 	log.Printf("heartbeat accepted for %s", registeredID)
@@ -102,7 +104,7 @@ func main() {
 	for {
 		select {
 		case <-heartbeatTicker.C:
-			if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount()); err != nil {
+			if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount(), manager.HTTPProbeMetrics()); err != nil {
 				log.Printf("heartbeat failed: %v", err)
 				continue
 			}
@@ -153,7 +155,7 @@ func register(client *http.Client, baseURL, nodeID, nodeName string) (string, er
 	return out.NodeID, nil
 }
 
-func heartbeat(client *http.Client, baseURL, nodeID string, activeTunnels int) error {
+func heartbeat(client *http.Client, baseURL, nodeID string, activeTunnels int, probeMetrics map[string]string) error {
 	payload := types.NodeHeartbeatRequest{
 		NodeID:        nodeID,
 		ObservedAt:    time.Now().UTC(),
@@ -162,6 +164,9 @@ func heartbeat(client *http.Client, baseURL, nodeID string, activeTunnels int) e
 			"goroutines": fmt.Sprintf("%d", runtime.NumGoroutine()),
 			"pid":        fmt.Sprintf("%d", os.Getpid()),
 		},
+	}
+	for key, value := range probeMetrics {
+		payload.Metrics[key] = value
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -187,6 +192,34 @@ func (m *reverseManager) ActiveTunnelCount() int {
 	return int(atomic.LoadInt64(&m.activeTunnels))
 }
 
+func (m *reverseManager) HTTPProbeMetrics() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string]string{}
+	for key, value := range m.httpProbeMetrics {
+		out[key] = value
+	}
+	return out
+}
+
+func (m *reverseManager) refreshHTTPProbeMetrics(desired map[string]types.TunnelSpec) {
+	results := map[string]string{}
+	for _, tunnel := range desired {
+		if tunnel.Type != "http" {
+			continue
+		}
+		metricKey := httpReachabilityMetricKey(tunnel.NodeID, tunnel.PublicPort)
+		if probeHTTPTarget(tunnel.TargetHost, tunnel.TargetPort, m.connectTimout) {
+			results[metricKey] = string(types.TunnelHealthHealthy)
+		} else {
+			results[metricKey] = string(types.TunnelHealthTargetUnreachable)
+		}
+	}
+	m.mu.Lock()
+	m.httpProbeMetrics = results
+	m.mu.Unlock()
+}
+
 func (m *reverseManager) StopAll() {
 	m.mu.Lock()
 	workers := m.workers
@@ -210,6 +243,8 @@ func (m *reverseManager) syncTunnels(ctx context.Context, nodeID string) error {
 		}
 		desired[item.ID] = item
 	}
+
+	m.refreshHTTPProbeMetrics(desired)
 
 	toStart := make([]struct {
 		ctx    context.Context
@@ -586,6 +621,24 @@ func enableTCPKeepalive(conn net.Conn) {
 		_ = tcpConn.SetKeepAlive(true)
 		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
+}
+
+func httpReachabilityMetricKey(nodeID string, publicPort int) string {
+	return "httpReachability:" + nodeID + ":" + fmt.Sprintf("%d", publicPort)
+}
+
+func probeHTTPTarget(host string, port int, timeout time.Duration) bool {
+	if strings.TrimSpace(host) == "" || port <= 0 {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func deriveRelayURL(baseURL string) string {

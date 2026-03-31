@@ -67,7 +67,7 @@ type NodeEditForm = {
   tags: string;
 };
 
-type TunnelHealthStatus = "healthy" | "node_offline" | "capability_missing" | "misconfigured";
+type TunnelHealthStatus = "healthy" | "node_offline" | "capability_missing" | "misconfigured" | "target_unreachable";
 type TunnelHealthFilter = "all" | "healthy" | "unhealthy";
 
 type TunnelSpec = {
@@ -1469,6 +1469,8 @@ function tunnelHealthLabel(status?: TunnelHealthStatus) {
       return "能力缺失";
     case "misconfigured":
       return "配置异常";
+    case "target_unreachable":
+      return "目标不可达";
     default:
       return "正常";
   }
@@ -1485,6 +1487,8 @@ function tunnelAvailabilityText(tunnel: TunnelSpec) {
       return "节点不满足能力要求";
     case "misconfigured":
       return "配置不完整或不合法";
+    case "target_unreachable":
+      return "节点在线，但目标 Web 服务不可达";
     default:
       return "当前满足运行条件";
   }
@@ -1495,6 +1499,7 @@ function tunnelHealthPillClass(status?: TunnelHealthStatus) {
     case "node_offline":
     case "capability_missing":
     case "misconfigured":
+    case "target_unreachable":
       return "status-pill tone-danger";
     default:
       return "status-pill tone-good";

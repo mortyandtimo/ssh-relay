@@ -806,3 +806,7 @@ func (s *PostgresStore) ListAuditLogs(ctx context.Context, filter AuditLogFilter
 	}
 	return items, total, rows.Err()
 }
+
+func (s *PostgresStore) DB() *pgxpool.Pool {
+	return s.pool
+}
