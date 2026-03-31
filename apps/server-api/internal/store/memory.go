@@ -488,16 +488,51 @@ func (s *InMemoryStore) WriteAuditLog(_ context.Context, params AuditLogParams) 
 	return entry, nil
 }
 
-func (s *InMemoryStore) ListAuditLogs(_ context.Context, limit int) ([]types.AuditLogEntry, error) {
+func (s *InMemoryStore) ListAuditLogs(_ context.Context, filter AuditLogFilter) ([]types.AuditLogEntry, int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	items := make([]types.AuditLogEntry, 0, len(s.auditLogs))
+	for _, item := range s.auditLogs {
+		if filter.Action != "" && item.Action != filter.Action {
+			continue
+		}
+		if filter.ActorType != "" && item.ActorType != filter.ActorType {
+			continue
+		}
+		if filter.ActorID != "" && item.ActorID != filter.ActorID {
+			continue
+		}
+		if filter.ResourceType != "" && item.ResourceType != filter.ResourceType {
+			continue
+		}
+		if filter.ResourceID != "" && item.ResourceID != filter.ResourceID {
+			continue
+		}
+		if filter.StartAt != nil && item.CreatedAt.Before(*filter.StartAt) {
+			continue
+		}
+		if filter.EndAt != nil && item.CreatedAt.After(*filter.EndAt) {
+			continue
+		}
+		items = append(items, item)
+	}
+	total := len(items)
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	if limit > len(s.auditLogs) {
-		limit = len(s.auditLogs)
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
 	}
-	items := make([]types.AuditLogEntry, limit)
-	copy(items, s.auditLogs[:limit])
-	return items, nil
+	if offset >= total {
+		return []types.AuditLogEntry{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	out := make([]types.AuditLogEntry, end-offset)
+	copy(out, items[offset:end])
+	return out, total, nil
 }

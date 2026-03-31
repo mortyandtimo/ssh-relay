@@ -74,7 +74,6 @@ type UserSummary = {
   updatedAt: string;
 };
 
-
 type AuditLogEntry = {
   id: number;
   actorType: string;
@@ -82,16 +81,15 @@ type AuditLogEntry = {
   action: string;
   resourceType: string;
   resourceId: string;
+  payload?: Record<string, string>;
   createdAt: string;
 };
 
-type DashboardPayload = {
-  nodes: NodeSummary[];
-  tunnels: TunnelSpec[];
-  metrics: ServerMetrics;
-  relayRuntime: RelayRuntimeSummary;
-  users: UserSummary[];
-  auditLogs: AuditLogEntry[];
+type AuditLogListResponse = {
+  items: AuditLogEntry[];
+  total: number;
+  limit: number;
+  offset: number;
 };
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
@@ -111,12 +109,15 @@ export default function App() {
   const [tunnels, setTunnels] = useState<TunnelSpec[]>([]);
   const [users, setUsers] = useState<UserSummary[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [expandedAuditID, setExpandedAuditID] = useState<number | null>(null);
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null);
   const [relayRuntime, setRelayRuntime] = useState<RelayRuntimeSummary | null>(null);
   const [tunnelForm, setTunnelForm] = useState<TunnelForm>(initialTunnelForm);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [bootstrapForm, setBootstrapForm] = useState({ email: "", displayName: "管理员", password: "", bootstrapSecret: "" });
   const [userForm, setUserForm] = useState({ email: "", displayName: "", password: "", role: "manager" as UserRole });
+  const [auditFilter, setAuditFilter] = useState({ action: "", actorType: "", resourceType: "", actorID: "", startAt: "", endAt: "", limit: 20, offset: 0 });
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busyAction, setBusyAction] = useState("");
@@ -167,7 +168,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [currentUser, hasInitializedNodeId]);
+  }, [currentUser, hasInitializedNodeId, auditFilter]);
 
   async function requestJSON<T>(path: string, init?: RequestInit, allowRefresh = true): Promise<T> {
     const response = await fetch(apiBaseUrl + path, {
@@ -190,6 +191,7 @@ export default function App() {
       setTunnels([]);
       setUsers([]);
       setAuditLogs([]);
+      setAuditTotal(0);
       setMetrics(null);
       setRelayRuntime(null);
       setError("登录已失效，请重新登录。");
@@ -233,6 +235,16 @@ export default function App() {
       return;
     }
     try {
+      const auditQuery = new URLSearchParams();
+      auditQuery.set("limit", String(auditFilter.limit));
+      auditQuery.set("offset", String(auditFilter.offset));
+      if (auditFilter.action) auditQuery.set("action", auditFilter.action);
+      if (auditFilter.actorType) auditQuery.set("actorType", auditFilter.actorType);
+      if (auditFilter.resourceType) auditQuery.set("resourceType", auditFilter.resourceType);
+      if (auditFilter.actorID) auditQuery.set("actorID", auditFilter.actorID);
+      if (auditFilter.startAt) auditQuery.set("startAt", new Date(auditFilter.startAt).toISOString());
+      if (auditFilter.endAt) auditQuery.set("endAt", new Date(auditFilter.endAt).toISOString());
+
       const requests = [
         requestJSON<{ items: NodeSummary[] }>("/api/nodes"),
         requestJSON<{ items: TunnelSpec[] }>("/api/tunnels"),
@@ -240,7 +252,7 @@ export default function App() {
         requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime"),
       ] as const;
       const userRequests = user.role === "admin" ? [requestJSON<{ items: UserSummary[] }>("/api/users")] : [];
-      const auditRequests = user.role !== "user" ? [requestJSON<{ items: AuditLogEntry[] }>("/api/audit-logs?limit=50")] : [];
+      const auditRequests = user.role !== "user" ? [requestJSON<AuditLogListResponse>("/api/audit-logs?" + auditQuery.toString())] : [];
       const results = await Promise.all([...requests, ...userRequests, ...auditRequests]);
       if (cancelled) {
         return;
@@ -251,7 +263,7 @@ export default function App() {
         ServerMetrics,
         RelayRuntimeSummary,
         { items: UserSummary[] } | undefined,
-        { items: AuditLogEntry[] } | undefined,
+        AuditLogListResponse | undefined,
       ];
       setNodes(nodesPayload.items || []);
       setTunnels(tunnelsPayload.items || []);
@@ -259,6 +271,7 @@ export default function App() {
       setRelayRuntime(relayPayload);
       setUsers(usersPayload?.items || []);
       setAuditLogs(auditPayload?.items || []);
+      setAuditTotal(auditPayload?.total || 0);
       if (!hasInitializedNodeId) {
         const defaultNodeId = nodesPayload.items?.[0]?.nodeId || "";
         if (defaultNodeId) {
@@ -329,6 +342,7 @@ export default function App() {
       setTunnels([]);
       setUsers([]);
       setAuditLogs([]);
+      setAuditTotal(0);
       setMetrics(null);
       setRelayRuntime(null);
       setTunnelForm(initialTunnelForm);
@@ -583,26 +597,43 @@ export default function App() {
         </div>
       </section>
 
-
-
       {currentUser.role !== "user" ? (
         <section className="panel">
           <div className="panel-header"><div><p className="eyebrow">审计</p><h2>最近操作历史</h2></div></div>
+          <form className="tunnel-form" onSubmit={(event) => { event.preventDefault(); setAuditFilter((current) => ({ ...current, offset: 0 })); void refreshDashboard(false); }}>
+            <label><span>Action</span><input value={auditFilter.action} onChange={(event) => setAuditFilter((current) => ({ ...current, action: event.target.value }))} /></label>
+            <label><span>Actor Type</span><input value={auditFilter.actorType} onChange={(event) => setAuditFilter((current) => ({ ...current, actorType: event.target.value }))} /></label>
+            <label><span>Resource Type</span><input value={auditFilter.resourceType} onChange={(event) => setAuditFilter((current) => ({ ...current, resourceType: event.target.value }))} /></label>
+            <label><span>Actor ID</span><input value={auditFilter.actorID} onChange={(event) => setAuditFilter((current) => ({ ...current, actorID: event.target.value }))} /></label>
+            <label><span>开始时间</span><input type="datetime-local" value={auditFilter.startAt} onChange={(event) => setAuditFilter((current) => ({ ...current, startAt: event.target.value }))} /></label>
+            <label><span>结束时间</span><input type="datetime-local" value={auditFilter.endAt} onChange={(event) => setAuditFilter((current) => ({ ...current, endAt: event.target.value }))} /></label>
+            <button type="submit">筛选</button>
+          </form>
           <div className="table-wrap">
             <table>
               <thead><tr><th>时间</th><th>Actor</th><th>Action</th><th>资源类型</th><th>资源 ID</th></tr></thead>
               <tbody>
                 {auditLogs.length === 0 ? <tr><td colSpan={5}>暂无审计日志。</td></tr> : auditLogs.map((entry) => (
-                  <tr key={entry.id}>
-                    <td>{new Date(entry.createdAt).toLocaleString()}</td>
-                    <td>{entry.actorType}{entry.actorId ? ':' + entry.actorId : ''}</td>
-                    <td>{entry.action}</td>
-                    <td>{entry.resourceType}</td>
-                    <td>{entry.resourceId || '-'}</td>
-                  </tr>
+                  <>
+                    <tr key={entry.id} onClick={() => setExpandedAuditID((current) => current === entry.id ? null : entry.id)}>
+                      <td>{new Date(entry.createdAt).toLocaleString()}</td>
+                      <td>{entry.actorType}{entry.actorId ? ':' + entry.actorId : ''}</td>
+                      <td>{entry.action}</td>
+                      <td>{entry.resourceType}</td>
+                      <td>{entry.resourceId || '-'}</td>
+                    </tr>
+                    {expandedAuditID === entry.id ? (
+                      <tr key={entry.id + '-payload'}><td colSpan={5}><pre>{JSON.stringify(entry.payload || {}, null, 2)}</pre></td></tr>
+                    ) : null}
+                  </>
                 ))}
               </tbody>
             </table>
+          </div>
+          <div className="actions-row">
+            <button type="button" className="secondary" disabled={auditFilter.offset === 0} onClick={() => { setAuditFilter((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) })); void refreshDashboard(false); }}>上一页</button>
+            <button type="button" className="secondary" disabled={auditFilter.offset + auditFilter.limit >= auditTotal} onClick={() => { setAuditFilter((current) => ({ ...current, offset: current.offset + current.limit })); void refreshDashboard(false); }}>下一页</button>
+            <span className="inline-note">总计 {auditTotal} 条，当前 offset {auditFilter.offset}</span>
           </div>
         </section>
       ) : null}

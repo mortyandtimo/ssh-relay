@@ -157,6 +157,13 @@ type AuditLogEntry struct {
 	CreatedAt    time.Time         `json:"createdAt"`
 }
 
+type AuditLogListResponse struct {
+	Items  []AuditLogEntry `json:"items"`
+	Total  int             `json:"total"`
+	Limit  int             `json:"limit"`
+	Offset int             `json:"offset"`
+}
+
 type HealthResponse struct {
 	Status     string            `json:"status"`
 	Service    string            `json:"service"`

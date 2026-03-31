@@ -587,18 +587,41 @@ func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	limit := 50
+	filter := store.AuditLogFilter{
+		Action:       strings.TrimSpace(r.URL.Query().Get("action")),
+		ActorType:    strings.TrimSpace(r.URL.Query().Get("actorType")),
+		ActorID:      strings.TrimSpace(r.URL.Query().Get("actorID")),
+		ResourceType: strings.TrimSpace(r.URL.Query().Get("resourceType")),
+		ResourceID:   strings.TrimSpace(r.URL.Query().Get("resourceID")),
+		Limit:        50,
+		Offset:       0,
+	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		if parsed, err := parseInt64(raw); err == nil && parsed > 0 {
-			limit = int(parsed)
+			filter.Limit = int(parsed)
 		}
 	}
-	items, err := s.store.ListAuditLogs(r.Context(), limit)
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		if parsed, err := parseInt64(raw); err == nil && parsed >= 0 {
+			filter.Offset = int(parsed)
+		}
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("startAt")); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			filter.StartAt = &parsed
+		}
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("endAt")); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			filter.EndAt = &parsed
+		}
+	}
+	items, total, err := s.store.ListAuditLogs(r.Context(), filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, types.AuditLogListResponse{Items: items, Total: total, Limit: filter.Limit, Offset: filter.Offset})
 }
 
 func (s *Server) handleRelayTCPRuntime(w http.ResponseWriter, r *http.Request) {

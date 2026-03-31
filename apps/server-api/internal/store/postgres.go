@@ -656,18 +656,45 @@ func (s *PostgresStore) WriteAuditLog(ctx context.Context, params AuditLogParams
 	return entry, nil
 }
 
-func (s *PostgresStore) ListAuditLogs(ctx context.Context, limit int) ([]types.AuditLogEntry, error) {
+func (s *PostgresStore) ListAuditLogs(ctx context.Context, filter AuditLogFilter) ([]types.AuditLogEntry, int, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	var total int
+	err := s.pool.QueryRow(ctx, `
+		select count(*)
+		from audit_logs
+		where ($1 = '' or action = $1)
+		  and ($2 = '' or actor_type = $2)
+		  and ($3 = '' or coalesce(actor_id, '') = $3)
+		  and ($4 = '' or resource_type = $4)
+		  and ($5 = '' or coalesce(resource_id, '') = $5)
+		  and ($6::timestamptz is null or created_at >= $6)
+		  and ($7::timestamptz is null or created_at <= $7)
+	`, filter.Action, filter.ActorType, filter.ActorID, filter.ResourceType, filter.ResourceID, filter.StartAt, filter.EndAt).Scan(&total)
+	if err != nil {
+		return nil, 0, err
 	}
 	rows, err := s.pool.Query(ctx, `
 		select id, actor_type, coalesce(actor_id, ''), action, resource_type, coalesce(resource_id, ''), payload, created_at
 		from audit_logs
+		where ($1 = '' or action = $1)
+		  and ($2 = '' or actor_type = $2)
+		  and ($3 = '' or coalesce(actor_id, '') = $3)
+		  and ($4 = '' or resource_type = $4)
+		  and ($5 = '' or coalesce(resource_id, '') = $5)
+		  and ($6::timestamptz is null or created_at >= $6)
+		  and ($7::timestamptz is null or created_at <= $7)
 		order by created_at desc, id desc
-		limit $1
-	`, limit)
+		limit $8 offset $9
+	`, filter.Action, filter.ActorType, filter.ActorID, filter.ResourceType, filter.ResourceID, filter.StartAt, filter.EndAt, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	items := make([]types.AuditLogEntry, 0)
@@ -675,13 +702,13 @@ func (s *PostgresStore) ListAuditLogs(ctx context.Context, limit int) ([]types.A
 		var item types.AuditLogEntry
 		var payloadJSON []byte
 		if err := rows.Scan(&item.ID, &item.ActorType, &item.ActorID, &item.Action, &item.ResourceType, &item.ResourceID, &payloadJSON, &item.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		item.Payload, err = unmarshalMap(payloadJSON)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return items, total, rows.Err()
 }

@@ -63,6 +63,18 @@ type UpdateUserParams struct {
 	Role        types.UserRole
 }
 
+type AuditLogFilter struct {
+	Action       string
+	ActorType    string
+	ActorID      string
+	ResourceType string
+	ResourceID   string
+	StartAt      *time.Time
+	EndAt        *time.Time
+	Limit        int
+	Offset       int
+}
+
 type AuditLogParams struct {
 	ActorType    string
 	ActorID      string
@@ -107,7 +119,7 @@ type Store interface {
 	DeleteWebSession(ctx context.Context, sessionID string) error
 	DeleteUserSessions(ctx context.Context, userID string) error
 	WriteAuditLog(ctx context.Context, params AuditLogParams) (types.AuditLogEntry, error)
-	ListAuditLogs(ctx context.Context, limit int) ([]types.AuditLogEntry, error)
+	ListAuditLogs(ctx context.Context, filter AuditLogFilter) ([]types.AuditLogEntry, int, error)
 
 	Close() error
 }
