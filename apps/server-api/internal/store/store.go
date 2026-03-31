@@ -63,6 +63,15 @@ type UpdateUserParams struct {
 	Role        types.UserRole
 }
 
+type AuditLogParams struct {
+	ActorType    string
+	ActorID      string
+	Action       string
+	ResourceType string
+	ResourceID   string
+	Payload      map[string]string
+}
+
 type CreateSessionParams struct {
 	SessionID        string
 	UserID           string
@@ -97,6 +106,8 @@ type Store interface {
 	RotateWebSession(ctx context.Context, sessionID string, refreshTokenHash string, refreshExpiresAt time.Time, remoteAddr, userAgent string) (WebSession, error)
 	DeleteWebSession(ctx context.Context, sessionID string) error
 	DeleteUserSessions(ctx context.Context, userID string) error
+	WriteAuditLog(ctx context.Context, params AuditLogParams) (types.AuditLogEntry, error)
+	ListAuditLogs(ctx context.Context, limit int) ([]types.AuditLogEntry, error)
 
 	Close() error
 }

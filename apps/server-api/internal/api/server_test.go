@@ -612,3 +612,143 @@ func TestCORSAllowsOnlyConfiguredOrigins(t *testing.T) {
 		t.Fatalf("expected rejected origin to get no allow-origin header, got %q", rejectedRes.Header().Get("Access-Control-Allow-Origin"))
 	}
 }
+
+func TestManagementWritesAuditLogs(t *testing.T) {
+	backend := store.NewInMemoryStore()
+	server := NewServer("test", backend, "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerOut := registerNodeThroughAgent(t, server, "audit-node")
+	createTunnelBody, _ := json.Marshal(map[string]any{"id": "audit-tunnel", "nodeId": registerOut.NodeID, "name": "audit", "type": "tcp", "targetHost": "127.0.0.1", "targetPort": 80, "publicPort": 10090, "status": "active"})
+	createTunnelReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createTunnelBody))
+	applyCookies(createTunnelReq, adminCookies)
+	createTunnelRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createTunnelRes, createTunnelReq)
+	if createTunnelRes.Code != http.StatusCreated {
+		t.Fatalf("expected create tunnel 201, got %d", createTunnelRes.Code)
+	}
+
+	updateTunnelBody, _ := json.Marshal(map[string]any{"nodeId": registerOut.NodeID, "name": "audit-updated", "type": "tcp", "targetHost": "127.0.0.1", "targetPort": 80, "publicPort": 10090, "status": "paused"})
+	updateTunnelReq := httptest.NewRequest(http.MethodPut, "/api/tunnels/audit-tunnel", bytes.NewReader(updateTunnelBody))
+	applyCookies(updateTunnelReq, adminCookies)
+	updateTunnelRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(updateTunnelRes, updateTunnelReq)
+	if updateTunnelRes.Code != http.StatusOK {
+		t.Fatalf("expected update tunnel 200, got %d", updateTunnelRes.Code)
+	}
+
+	deleteTunnelReq := httptest.NewRequest(http.MethodDelete, "/api/tunnels/audit-tunnel", nil)
+	applyCookies(deleteTunnelReq, adminCookies)
+	deleteTunnelRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deleteTunnelRes, deleteTunnelReq)
+	if deleteTunnelRes.Code != http.StatusOK {
+		t.Fatalf("expected delete tunnel 200, got %d", deleteTunnelRes.Code)
+	}
+
+	createUserBody, _ := json.Marshal(types.CreateUserRequest{Email: "audit-user@example.com", DisplayName: "审计用户", Password: "UserPass#2026", Role: types.UserRoleUser})
+	createUserReq := httptest.NewRequest(http.MethodPost, "/api/users", bytes.NewReader(createUserBody))
+	applyCookies(createUserReq, adminCookies)
+	createUserRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createUserRes, createUserReq)
+	if createUserRes.Code != http.StatusCreated {
+		t.Fatalf("expected create user 201, got %d", createUserRes.Code)
+	}
+	var createdUser types.UserSummary
+	if err := json.NewDecoder(createUserRes.Body).Decode(&createdUser); err != nil {
+		t.Fatal(err)
+	}
+
+	updateUserBody, _ := json.Marshal(types.UpdateUserRequest{DisplayName: "审计用户-更新", Role: types.UserRoleManager})
+	updateUserReq := httptest.NewRequest(http.MethodPut, "/api/users/"+createdUser.ID, bytes.NewReader(updateUserBody))
+	applyCookies(updateUserReq, adminCookies)
+	updateUserRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(updateUserRes, updateUserReq)
+	if updateUserRes.Code != http.StatusOK {
+		t.Fatalf("expected update user 200, got %d", updateUserRes.Code)
+	}
+
+	deleteUserReq := httptest.NewRequest(http.MethodDelete, "/api/users/"+createdUser.ID, nil)
+	applyCookies(deleteUserReq, adminCookies)
+	deleteUserRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deleteUserRes, deleteUserReq)
+	if deleteUserRes.Code != http.StatusOK {
+		t.Fatalf("expected delete user 200, got %d", deleteUserRes.Code)
+	}
+
+	auditReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs?limit=20", nil)
+	applyCookies(auditReq, adminCookies)
+	auditRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(auditRes, auditReq)
+	if auditRes.Code != http.StatusOK {
+		t.Fatalf("expected audit logs 200, got %d", auditRes.Code)
+	}
+	var auditOut struct {
+		Items []types.AuditLogEntry `json:"items"`
+	}
+	if err := json.NewDecoder(auditRes.Body).Decode(&auditOut); err != nil {
+		t.Fatal(err)
+	}
+	actions := map[string]bool{}
+	for _, item := range auditOut.Items {
+		actions[item.Action] = true
+	}
+	for _, action := range []string{"create_tunnel", "update_tunnel", "delete_tunnel", "create_user", "update_user", "delete_user"} {
+		if !actions[action] {
+			t.Fatalf("expected audit action %s", action)
+		}
+	}
+}
+
+func TestLoginLogoutAndAuditVisibility(t *testing.T) {
+	backend := store.NewInMemoryStore()
+	server := NewServer("test", backend, "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+	if _, err := backend.CreateUser(context.Background(), store.CreateUserParams{Email: "basic@example.com", DisplayName: "普通用户", Password: "UserPass#2026", Role: types.UserRoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	userCookies := loginAndCollectCookies(t, server, "basic@example.com", "UserPass#2026")
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	applyCookies(logoutReq, userCookies)
+	logoutRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(logoutRes, logoutReq)
+	if logoutRes.Code != http.StatusOK {
+		t.Fatalf("expected logout 200, got %d", logoutRes.Code)
+	}
+
+	adminAuditReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs?limit=20", nil)
+	applyCookies(adminAuditReq, adminCookies)
+	adminAuditRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(adminAuditRes, adminAuditReq)
+	if adminAuditRes.Code != http.StatusOK {
+		t.Fatalf("expected admin audit logs 200, got %d", adminAuditRes.Code)
+	}
+	var auditOut struct {
+		Items []types.AuditLogEntry `json:"items"`
+	}
+	if err := json.NewDecoder(adminAuditRes.Body).Decode(&auditOut); err != nil {
+		t.Fatal(err)
+	}
+	seenLogin := false
+	seenLogout := false
+	for _, item := range auditOut.Items {
+		if item.Action == "login" {
+			seenLogin = true
+		}
+		if item.Action == "logout" {
+			seenLogout = true
+		}
+	}
+	if !seenLogin || !seenLogout {
+		t.Fatalf("expected login and logout audit logs, got %+v", auditOut.Items)
+	}
+
+	userAuditReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs", nil)
+	applyCookies(userAuditReq, userCookies)
+	userAuditRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(userAuditRes, userAuditReq)
+	if userAuditRes.Code != http.StatusForbidden {
+		t.Fatalf("expected basic user audit logs 403, got %d", userAuditRes.Code)
+	}
+}

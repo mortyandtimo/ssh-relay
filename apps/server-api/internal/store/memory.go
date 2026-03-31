@@ -13,12 +13,14 @@ import (
 )
 
 type InMemoryStore struct {
-	mu       sync.RWMutex
-	nodes    map[string]nodeRecord
-	tunnels  map[string]types.TunnelSpec
-	users    map[string]UserRecord
-	userByEM map[string]string
-	sessions map[string]WebSession
+	mu          sync.RWMutex
+	nodes       map[string]nodeRecord
+	tunnels     map[string]types.TunnelSpec
+	users       map[string]UserRecord
+	userByEM    map[string]string
+	sessions    map[string]WebSession
+	auditLogs   []types.AuditLogEntry
+	nextAuditID int64
 }
 
 type nodeRecord struct {
@@ -28,11 +30,13 @@ type nodeRecord struct {
 
 func NewInMemoryStore() *InMemoryStore {
 	return &InMemoryStore{
-		nodes:    make(map[string]nodeRecord),
-		tunnels:  make(map[string]types.TunnelSpec),
-		users:    make(map[string]UserRecord),
-		userByEM: make(map[string]string),
-		sessions: make(map[string]WebSession),
+		nodes:       make(map[string]nodeRecord),
+		tunnels:     make(map[string]types.TunnelSpec),
+		users:       make(map[string]UserRecord),
+		userByEM:    make(map[string]string),
+		sessions:    make(map[string]WebSession),
+		auditLogs:   make([]types.AuditLogEntry, 0),
+		nextAuditID: 1,
 	}
 }
 
@@ -464,4 +468,36 @@ func normalizeUserRole(role types.UserRole) types.UserRole {
 	default:
 		return types.UserRoleUser
 	}
+}
+
+func (s *InMemoryStore) WriteAuditLog(_ context.Context, params AuditLogParams) (types.AuditLogEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := types.AuditLogEntry{
+		ID:           s.nextAuditID,
+		ActorType:    params.ActorType,
+		ActorID:      params.ActorID,
+		Action:       params.Action,
+		ResourceType: params.ResourceType,
+		ResourceID:   params.ResourceID,
+		Payload:      params.Payload,
+		CreatedAt:    time.Now().UTC(),
+	}
+	s.nextAuditID++
+	s.auditLogs = append([]types.AuditLogEntry{entry}, s.auditLogs...)
+	return entry, nil
+}
+
+func (s *InMemoryStore) ListAuditLogs(_ context.Context, limit int) ([]types.AuditLogEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > len(s.auditLogs) {
+		limit = len(s.auditLogs)
+	}
+	items := make([]types.AuditLogEntry, limit)
+	copy(items, s.auditLogs[:limit])
+	return items, nil
 }

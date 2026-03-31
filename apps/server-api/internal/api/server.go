@@ -100,6 +100,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/tunnels/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelByID)))
 	s.mux.Handle("/api/server/metrics", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleServerMetrics)))
 	s.mux.Handle("/api/relay/tcp/runtime", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleRelayTCPRuntime)))
+	s.mux.Handle("/api/audit-logs", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleAuditLogs)))
 
 	s.mux.Handle("/admin/", s.adminSPAHandler())
 	s.mux.Handle("/admin", s.adminSPAHandler())
@@ -237,6 +238,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.writeAudit(r, "bootstrap_admin", "user", user.ID, map[string]string{"email": user.Email, "role": string(user.Role)})
 	writeJSON(w, http.StatusCreated, types.AuthUserResponse{User: user})
 }
 
@@ -273,6 +275,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.writeAudit(r, "login", "session", "", map[string]string{"userId": user.ID, "email": user.Email})
 	writeJSON(w, http.StatusOK, types.AuthUserResponse{User: user})
 }
 
@@ -320,6 +323,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.DeleteWebSession(r.Context(), sessionCookie.Value)
 	}
 	s.clearAuthCookies(w)
+	s.writeAudit(r, "logout", "session", "", nil)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "logged_out"})
 }
 
@@ -356,6 +360,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
+		s.writeAudit(r, "create_user", "user", user.ID, map[string]string{"email": user.Email, "role": string(user.Role)})
 		writeJSON(w, http.StatusCreated, user)
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
@@ -384,6 +389,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
+		s.writeAudit(r, "update_user", "user", user.ID, map[string]string{"email": user.Email, "role": string(user.Role)})
 		writeJSON(w, http.StatusOK, user)
 	case http.MethodDelete:
 		if err := s.store.DeleteUser(r.Context(), id); err != nil {
@@ -394,6 +400,8 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
+		s.writeAudit(r, "delete_user", "user", id, nil)
+		s.writeAudit(r, "delete_tunnel", "tunnel", id, nil)
 		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
 	default:
 		writeMethodNotAllowed(w, http.MethodPut+", "+http.MethodDelete)
@@ -450,6 +458,7 @@ func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
+		s.writeAudit(r, "create_tunnel", "tunnel", tunnel.ID, map[string]string{"nodeId": tunnel.NodeID, "publicPort": fmt.Sprintf("%d", tunnel.PublicPort)})
 		writeJSON(w, http.StatusCreated, tunnel)
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
@@ -506,6 +515,7 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
+		s.writeAudit(r, "update_tunnel", "tunnel", tunnel.ID, map[string]string{"nodeId": tunnel.NodeID, "publicPort": fmt.Sprintf("%d", tunnel.PublicPort), "status": tunnel.Status})
 		writeJSON(w, http.StatusOK, tunnel)
 	case http.MethodDelete:
 		if err := s.store.DeleteTunnel(r.Context(), id); err != nil {
@@ -548,6 +558,25 @@ func (s *Server) handleTCPRoutes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	limit := 50
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := parseInt64(raw); err == nil && parsed > 0 {
+			limit = int(parsed)
+		}
+	}
+	items, err := s.store.ListAuditLogs(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func (s *Server) handleRelayTCPRuntime(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeMethodNotAllowed(w, http.MethodGet)
@@ -578,6 +607,25 @@ func (s *Server) handleRelayTCPRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) currentActor(r *http.Request) (string, string) {
+	if user, ok := authUserFromContext(r.Context()); ok {
+		return "user", user.ID
+	}
+	return "system", ""
+}
+
+func (s *Server) writeAudit(r *http.Request, action, resourceType, resourceID string, payload map[string]string) {
+	actorType, actorID := s.currentActor(r)
+	_, _ = s.store.WriteAuditLog(r.Context(), store.AuditLogParams{
+		ActorType:    actorType,
+		ActorID:      actorID,
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		Payload:      payload,
+	})
 }
 
 func (s *Server) requireRole(minRole types.UserRole, next http.Handler) http.Handler {

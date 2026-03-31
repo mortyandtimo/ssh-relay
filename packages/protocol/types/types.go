@@ -146,6 +146,17 @@ type BootstrapAdminRequest struct {
 	Password    string `json:"password"`
 }
 
+type AuditLogEntry struct {
+	ID           int64             `json:"id"`
+	ActorType    string            `json:"actorType"`
+	ActorID      string            `json:"actorId,omitempty"`
+	Action       string            `json:"action"`
+	ResourceType string            `json:"resourceType"`
+	ResourceID   string            `json:"resourceId,omitempty"`
+	Payload      map[string]string `json:"payload,omitempty"`
+	CreatedAt    time.Time         `json:"createdAt"`
+}
+
 type HealthResponse struct {
 	Status     string            `json:"status"`
 	Service    string            `json:"service"`

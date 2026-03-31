@@ -74,12 +74,24 @@ type UserSummary = {
   updatedAt: string;
 };
 
+
+type AuditLogEntry = {
+  id: number;
+  actorType: string;
+  actorId: string;
+  action: string;
+  resourceType: string;
+  resourceId: string;
+  createdAt: string;
+};
+
 type DashboardPayload = {
   nodes: NodeSummary[];
   tunnels: TunnelSpec[];
   metrics: ServerMetrics;
   relayRuntime: RelayRuntimeSummary;
   users: UserSummary[];
+  auditLogs: AuditLogEntry[];
 };
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
@@ -98,6 +110,7 @@ export default function App() {
   const [nodes, setNodes] = useState<NodeSummary[]>([]);
   const [tunnels, setTunnels] = useState<TunnelSpec[]>([]);
   const [users, setUsers] = useState<UserSummary[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null);
   const [relayRuntime, setRelayRuntime] = useState<RelayRuntimeSummary | null>(null);
   const [tunnelForm, setTunnelForm] = useState<TunnelForm>(initialTunnelForm);
@@ -176,6 +189,7 @@ export default function App() {
       setNodes([]);
       setTunnels([]);
       setUsers([]);
+      setAuditLogs([]);
       setMetrics(null);
       setRelayRuntime(null);
       setError("登录已失效，请重新登录。");
@@ -226,22 +240,25 @@ export default function App() {
         requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime"),
       ] as const;
       const userRequests = user.role === "admin" ? [requestJSON<{ items: UserSummary[] }>("/api/users")] : [];
-      const results = await Promise.all([...requests, ...userRequests]);
+      const auditRequests = user.role !== "user" ? [requestJSON<{ items: AuditLogEntry[] }>("/api/audit-logs?limit=50")] : [];
+      const results = await Promise.all([...requests, ...userRequests, ...auditRequests]);
       if (cancelled) {
         return;
       }
-      const [nodesPayload, tunnelsPayload, metricsPayload, relayPayload, usersPayload] = results as unknown as [
+      const [nodesPayload, tunnelsPayload, metricsPayload, relayPayload, usersPayload, auditPayload] = results as unknown as [
         { items: NodeSummary[] },
         { items: TunnelSpec[] },
         ServerMetrics,
         RelayRuntimeSummary,
         { items: UserSummary[] } | undefined,
+        { items: AuditLogEntry[] } | undefined,
       ];
       setNodes(nodesPayload.items || []);
       setTunnels(tunnelsPayload.items || []);
       setMetrics(metricsPayload);
       setRelayRuntime(relayPayload);
       setUsers(usersPayload?.items || []);
+      setAuditLogs(auditPayload?.items || []);
       if (!hasInitializedNodeId) {
         const defaultNodeId = nodesPayload.items?.[0]?.nodeId || "";
         if (defaultNodeId) {
@@ -311,6 +328,7 @@ export default function App() {
       setNodes([]);
       setTunnels([]);
       setUsers([]);
+      setAuditLogs([]);
       setMetrics(null);
       setRelayRuntime(null);
       setTunnelForm(initialTunnelForm);
@@ -564,6 +582,30 @@ export default function App() {
           </table>
         </div>
       </section>
+
+
+
+      {currentUser.role !== "user" ? (
+        <section className="panel">
+          <div className="panel-header"><div><p className="eyebrow">审计</p><h2>最近操作历史</h2></div></div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>时间</th><th>Actor</th><th>Action</th><th>资源类型</th><th>资源 ID</th></tr></thead>
+              <tbody>
+                {auditLogs.length === 0 ? <tr><td colSpan={5}>暂无审计日志。</td></tr> : auditLogs.map((entry) => (
+                  <tr key={entry.id}>
+                    <td>{new Date(entry.createdAt).toLocaleString()}</td>
+                    <td>{entry.actorType}{entry.actorId ? ':' + entry.actorId : ''}</td>
+                    <td>{entry.action}</td>
+                    <td>{entry.resourceType}</td>
+                    <td>{entry.resourceId || '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       {currentUser.role === "admin" ? (
         <section className="panel">

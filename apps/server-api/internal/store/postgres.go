@@ -633,3 +633,55 @@ func (s *PostgresStore) DeleteUserSessions(ctx context.Context, userID string) e
 	`, userID)
 	return err
 }
+
+func (s *PostgresStore) WriteAuditLog(ctx context.Context, params AuditLogParams) (types.AuditLogEntry, error) {
+	payload, err := marshalMap(params.Payload)
+	if err != nil {
+		return types.AuditLogEntry{}, err
+	}
+	row := s.pool.QueryRow(ctx, `
+		insert into audit_logs (actor_type, actor_id, action, resource_type, resource_id, payload)
+		values ($1, $2, $3, $4, $5, $6)
+		returning id, actor_type, coalesce(actor_id, ''), action, resource_type, coalesce(resource_id, ''), payload, created_at
+	`, params.ActorType, emptyStringToNil(params.ActorID), params.Action, params.ResourceType, emptyStringToNil(params.ResourceID), payload)
+	var entry types.AuditLogEntry
+	var payloadJSON []byte
+	if err := row.Scan(&entry.ID, &entry.ActorType, &entry.ActorID, &entry.Action, &entry.ResourceType, &entry.ResourceID, &payloadJSON, &entry.CreatedAt); err != nil {
+		return types.AuditLogEntry{}, err
+	}
+	entry.Payload, err = unmarshalMap(payloadJSON)
+	if err != nil {
+		return types.AuditLogEntry{}, err
+	}
+	return entry, nil
+}
+
+func (s *PostgresStore) ListAuditLogs(ctx context.Context, limit int) ([]types.AuditLogEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		select id, actor_type, coalesce(actor_id, ''), action, resource_type, coalesce(resource_id, ''), payload, created_at
+		from audit_logs
+		order by created_at desc, id desc
+		limit $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]types.AuditLogEntry, 0)
+	for rows.Next() {
+		var item types.AuditLogEntry
+		var payloadJSON []byte
+		if err := rows.Scan(&item.ID, &item.ActorType, &item.ActorID, &item.Action, &item.ResourceType, &item.ResourceID, &payloadJSON, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.Payload, err = unmarshalMap(payloadJSON)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
