@@ -131,6 +131,16 @@ type NodeListResponse struct {
 	Offset int           `json:"offset"`
 }
 
+type NodeOption struct {
+	NodeID   string `json:"nodeId"`
+	NodeName string `json:"nodeName"`
+	Status   string `json:"status"`
+}
+
+type NodeOptionsResponse struct {
+	Items []NodeOption `json:"items"`
+}
+
 type ServerMetrics struct {
 	Service            string    `json:"service"`
 	StartedAt          time.Time `json:"startedAt"`

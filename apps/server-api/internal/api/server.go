@@ -97,6 +97,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/users", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleUsers)))
 	s.mux.Handle("/api/users/", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleUserByID)))
 	s.mux.Handle("/api/nodes", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodes)))
+	s.mux.Handle("/api/node-options", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodeOptions)))
 	s.mux.Handle("/api/nodes/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodeByID)))
 	s.mux.Handle("/api/tunnels", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnels)))
 	s.mux.Handle("/api/tunnels/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelByID)))
@@ -446,6 +447,23 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeMethodNotAllowed(w, http.MethodGet)
 	}
+}
+
+func (s *Server) handleNodeOptions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	items, _, err := s.store.ListNodes(r.Context(), store.NodeFilter{Limit: 100000, Offset: 0})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	options := make([]types.NodeOption, 0, len(items))
+	for _, item := range items {
+		options = append(options, types.NodeOption{NodeID: item.NodeID, NodeName: item.NodeName, Status: item.Status})
+	}
+	writeJSON(w, http.StatusOK, types.NodeOptionsResponse{Items: options})
 }
 
 func (s *Server) handleNodeByID(w http.ResponseWriter, r *http.Request) {

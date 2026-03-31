@@ -36,6 +36,16 @@ type NodeListResponse = {
   offset: number;
 };
 
+type NodeOption = {
+  nodeId: string;
+  nodeName: string;
+  status: string;
+};
+
+type NodeOptionsResponse = {
+  items: NodeOption[];
+};
+
 type NodeFilterState = {
   nodeRole: NodeRole;
   environment: NodeEnvironment;
@@ -191,7 +201,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<UserSummary | null>(null);
   const [nodes, setNodes] = useState<NodeSummary[]>([]);
   const [nodeTotal, setNodeTotal] = useState(0);
-  const [allNodes, setAllNodes] = useState<NodeSummary[]>([]);
+  const [allNodes, setAllNodes] = useState<NodeOption[]>([]);
   const [selectedNodeID, setSelectedNodeID] = useState<string | null>(null);
   const [nodeFilter, setNodeFilter] = useState<NodeFilterState>(initialNodeFilter);
   const [nodeEditForm, setNodeEditForm] = useState<NodeEditForm | null>(null);
@@ -416,19 +426,19 @@ export default function App() {
         const query = buildNodeQuery(nodeFilterValue).toString();
         return query ? "?" + query : "";
       })();
-      const allNodesPath = "/api/nodes";
+      const allNodesPath = "/api/node-options";
       const overviewRequests =
         user.role !== "user"
           ? [
               requestJSON<NodeListResponse>(nodePath),
-              requestJSON<NodeListResponse>(allNodesPath),
+              requestJSON<NodeOptionsResponse>(allNodesPath),
               requestJSON<{ items: TunnelSpec[] }>("/api/tunnels"),
               requestJSON<ServerMetrics>("/api/server/metrics"),
               requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime"),
             ]
           : [
               Promise.resolve({ items: [] as NodeSummary[], total: 0, limit: nodeFilterValue.limit, offset: nodeFilterValue.offset }),
-              Promise.resolve({ items: [] as NodeSummary[], total: 0, limit: 0, offset: 0 }),
+              Promise.resolve({ items: [] as NodeOption[] }),
               Promise.resolve({ items: [] as TunnelSpec[] }),
               Promise.resolve(null as ServerMetrics | null),
               Promise.resolve(null as RelayRuntimeSummary | null),
@@ -451,7 +461,7 @@ export default function App() {
 
       const [nodesPayload, allNodesPayload, tunnelsOnlyPayload, metricsOnlyPayload, relayOnlyPayload, usersPayloadFixed, auditPayloadFixed] = results as [
         NodeListResponse,
-        NodeListResponse,
+        NodeOptionsResponse,
         { items: TunnelSpec[] },
         ServerMetrics | null,
         RelayRuntimeSummary | null,
