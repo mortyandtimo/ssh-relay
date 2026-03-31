@@ -200,3 +200,17 @@ curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
   - client-agent tests cover CONNECT success and non-CONNECT rejection
 - Real cloud validation still requires replacing the running Windows `client-agent.exe` with the newly built binary:
   - `/root/cloud-relay-platform/deploy/bin/windows-amd64/client-agent.exe`
+
+### SOCKS5 Real CONNECT Validation (2026-03-31)
+
+- Windows client-agent was replaced with the newly built binary and reconnected successfully.
+- Real public SOCKS5 CONNECT validation succeeded through the live cloud path:
+  - public entry: `82.156.236.104:11080`
+  - test command: `curl.exe --proxy socks5h://82.156.236.104:11080 https://example.com -I`
+  - observed result: `HTTP/1.1 200 OK`
+- This confirms the current minimal SOCKS5 chain is working for CONNECT:
+  - admin-created `socks5` tunnel
+  - server-api control plane
+  - relay-tcp public TCP entry
+  - updated Windows client-agent SOCKS5 handler
+  - outbound target connect through SOCKS5 CONNECT
