@@ -113,3 +113,14 @@ curl -s http://127.0.0.1:7710/api/auth/bootstrap-status
 curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
 ' http://82.156.236.104:10086
 ```
+
+### Admin Web Blank Page Fix (2026-03-31)
+
+- Symptom on `http://82.156.236.104:7710/admin/`: background loaded but the console body stayed blank.
+- Root cause: the admin SPA still had a login-state null dereference in `apps/admin-web/src/App.tsx`, where role-dependent rendering could touch `currentUser.role` before the unauthenticated guard returned the login screen.
+- Fix: moved role-dependent rendering to use a safe `activeUser` fallback until `currentUser` is confirmed, so the login screen renders instead of crashing the React root.
+- Deployment verification after rebuild:
+  - `npm --prefix apps/admin-web run build` passed
+  - `/admin/` now serves `dist/index.html` referencing `index-BHqO471Q.js` and `index-DluHM-uB.css`
+  - local `curl http://127.0.0.1:7710/admin/` confirmed the updated entry HTML
+- Operator note: browsers that cached the old HTML or old bundle such as `index-D713E6AO.js` may still show the old error until a hard refresh is performed.

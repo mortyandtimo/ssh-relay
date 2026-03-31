@@ -524,7 +524,15 @@ export default function App() {
     void refreshDashboard(false, currentUser, false, nextFilter);
   }
 
-  const activeUser = currentUser!;
+  const activeUser =
+    currentUser ?? {
+      id: "",
+      email: "",
+      displayName: "",
+      role: "user" as UserRole,
+      createdAt: "",
+      updatedAt: "",
+    };
   const onlineNodes = nodes.filter((node) => node.status === "online").length;
   const activeTunnels = tunnels.filter((tunnel) => tunnel.status === "active").length;
   const canOperate = activeUser.role !== "user";
@@ -588,7 +596,7 @@ export default function App() {
         </div>
 
         <div className="sidebar-card operator-card">
-          <span className={roleClass(currentUser.role)}>{activeUser.role}</span>
+          <span className={roleClass(activeUser.role)}>{activeUser.role}</span>
           <strong>{activeUser.displayName}</strong>
           <span className="muted-line">{activeUser.email}</span>
           <div className="sidebar-actions">
@@ -604,7 +612,7 @@ export default function App() {
           {canManageUsers ? <button type="button" className={mainView === "permissions" ? "nav-tab active" : "nav-tab"} onClick={() => setMainView("permissions")}>权限</button> : null}
         </nav>
 
-        {currentUser.role !== "user" ? (
+        {activeUser.role !== "user" ? (
           <div className="sidebar-card mini-dashboard">
             <MiniStat label="在线节点" value={String(onlineNodes)} />
             <MiniStat label="活跃隧道" value={String(activeTunnels)} />
@@ -628,7 +636,7 @@ export default function App() {
               <span className="muted-line">{activeUser.role === "user" ? "当前角色仅显示允许查看的摘要信息" : "统一观察节点、隧道、待命池和审计窗口"}</span>
             </div>
 
-            {currentUser.role === "user" ? (
+            {activeUser.role === "user" ? (
               <div className="restricted-state">
                 <strong>当前角色为只读受限视角</strong>
                 <p>你可以看到控制台的基础状态与身份信息，但节点、隧道、审计和权限工作区不会展示可误导的 0 值面板。</p>
