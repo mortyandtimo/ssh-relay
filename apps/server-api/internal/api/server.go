@@ -87,6 +87,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/agent/heartbeat", s.handleHeartbeat)
 	s.mux.HandleFunc("/agent/tunnels", s.handleAgentTunnels)
 	s.mux.HandleFunc("/internal/routes/tcp", s.handleTCPRoutes)
+	s.mux.HandleFunc("/internal/routes/http", s.handleHTTPRoutes)
 
 	s.mux.HandleFunc("/api/auth/bootstrap-status", s.handleBootstrapStatus)
 	s.mux.HandleFunc("/api/auth/bootstrap", s.handleBootstrap)
@@ -194,7 +195,11 @@ func (s *Server) handleAgentTunnels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	visible := make([]types.TunnelSpec, 0, len(items))
+	for _, item := range items {
+		visible = append(visible, agentVisibleTunnelSpec(item))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": visible})
 }
 
 func (s *Server) handleBootstrapStatus(w http.ResponseWriter, r *http.Request) {
@@ -462,7 +467,7 @@ func (s *Server) handleNodeOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	options := make([]types.NodeOption, 0, len(items))
 	for _, item := range items {
-		options = append(options, types.NodeOption{NodeID: item.NodeID, NodeName: item.NodeName, Status: item.Status, SupportsSOCKS5: item.Capabilities.SOCKS5Connect})
+		options = append(options, types.NodeOption{NodeID: item.NodeID, NodeName: item.NodeName, Status: item.Status, SupportsHTTP: item.Capabilities.HTTPRelay, SupportsSOCKS5: item.Capabilities.SOCKS5Connect})
 	}
 	writeJSON(w, http.StatusOK, types.NodeOptionsResponse{Items: options})
 }
@@ -699,6 +704,19 @@ func (s *Server) handleTCPRoutes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) handleHTTPRoutes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	items, err := s.store.ListTunnels(r.Context(), store.TunnelFilter{Type: "http", Status: "active"})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": s.withTunnelHealth(r.Context(), items)})
+}
+
 func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeMethodNotAllowed(w, http.MethodGet)
@@ -823,6 +841,9 @@ func (s *Server) deriveTunnelHealth(ctx context.Context, tunnel types.TunnelSpec
 	if tunnel.Type == "socks5" && !node.summary.Capabilities.SOCKS5Connect {
 		return types.TunnelHealthCapabilityMissing
 	}
+	if tunnel.Type == "http" && !node.summary.Capabilities.HTTPRelay {
+		return types.TunnelHealthCapabilityMissing
+	}
 	return types.TunnelHealthHealthy
 }
 
@@ -831,7 +852,7 @@ func isTunnelMisconfigured(tunnel types.TunnelSpec) bool {
 		return true
 	}
 	switch tunnel.Type {
-	case "", "tcp":
+	case "", "tcp", "http":
 		return strings.TrimSpace(tunnel.TargetHost) == "" || tunnel.TargetPort <= 0
 	case "socks5":
 		return strings.TrimSpace(tunnel.TargetHost) != "socks5" || tunnel.TargetPort != 1080
@@ -848,6 +869,15 @@ func isNodeOffline(node types.NodeSummary) bool {
 		return true
 	}
 	return time.Since(node.LastSeenAt.UTC()) > nodeOfflineThreshold
+}
+
+func agentVisibleTunnelSpec(item types.TunnelSpec) types.TunnelSpec {
+	if item.Type == "http" {
+		mapped := item
+		mapped.Type = "tcp"
+		return mapped
+	}
+	return item
 }
 
 func (s *Server) currentActor(r *http.Request) (string, string) {
@@ -1116,6 +1146,10 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {
 			return types.TunnelSpec{}, errors.New("tcp tunnel requires targetHost and targetPort")
 		}
+	case "http":
+		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {
+			return types.TunnelSpec{}, errors.New("http tunnel requires targetHost and targetPort")
+		}
 	case "socks5":
 		spec.TargetHost = "socks5"
 		spec.TargetPort = 1080
@@ -1126,15 +1160,18 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 }
 
 func (s *Server) ensureTunnelNodeCapability(ctx context.Context, nodeID, tunnelType string) error {
-	if tunnelType != "socks5" {
+	if tunnelType != "socks5" && tunnelType != "http" {
 		return nil
 	}
 	node, err := s.store.GetNode(ctx, nodeID)
 	if err != nil {
 		return err
 	}
-	if !node.Capabilities.SOCKS5Connect {
+	if tunnelType == "socks5" && !node.Capabilities.SOCKS5Connect {
 		return errors.New("selected node does not support socks5 connect")
+	}
+	if tunnelType == "http" && !node.Capabilities.HTTPRelay {
+		return errors.New("selected node does not support http relay")
 	}
 	return nil
 }

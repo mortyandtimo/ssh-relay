@@ -205,7 +205,7 @@ func (m *reverseManager) syncTunnels(ctx context.Context, nodeID string) error {
 	}
 	desired := make(map[string]types.TunnelSpec, len(items))
 	for _, item := range items {
-	if (item.Type != "tcp" && item.Type != "socks5") || item.Status != "active" || item.PublicPort == 0 {
+		if (item.Type != "tcp" && item.Type != "socks5" && item.Type != "http") || item.Status != "active" || item.PublicPort == 0 {
 			continue
 		}
 		desired[item.ID] = item

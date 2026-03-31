@@ -40,6 +40,7 @@ type NodeOption = {
   nodeId: string;
   nodeName: string;
   status: string;
+  supportsHTTP?: boolean;
   supportsSOCKS5?: boolean;
 };
 
@@ -110,7 +111,7 @@ type RelayRuntimeSummary = {
 type TunnelForm = {
   nodeId: string;
   name: string;
-  type: "tcp" | "socks5";
+  type: "tcp" | "http" | "socks5";
   targetHost: string;
   targetPort: string;
   publicPort: string;
@@ -1120,8 +1121,9 @@ export default function App() {
                       <form className="form-grid" onSubmit={createTunnel}>
                         <label>
                           <span>类型</span>
-                          <select value={tunnelForm.type} onChange={(event) => setTunnelForm((current) => ({ ...current, type: event.target.value as "tcp" | "socks5" }))}>
+                          <select value={tunnelForm.type} onChange={(event) => setTunnelForm((current) => ({ ...current, type: event.target.value as "tcp" | "http" | "socks5" }))}>
                             <option value="tcp">TCP</option>
+                            <option value="http">HTTP</option>
                             <option value="socks5">SOCKS5</option>
                           </select>
                         </label>
@@ -1129,12 +1131,16 @@ export default function App() {
                           <span>节点</span>
                           <select value={tunnelForm.nodeId} onChange={(event) => { setTunnelForm((current) => ({ ...current, nodeId: event.target.value })); setHasInitializedNodeId(true); }} required>
                             <option value="">选择节点</option>
-                            {allNodes.filter((node) => tunnelForm.type !== "socks5" || node.supportsSOCKS5).map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
+                            {allNodes.filter((node) => {
+                              if (tunnelForm.type === "socks5") return node.supportsSOCKS5;
+                              if (tunnelForm.type === "http") return node.supportsHTTP;
+                              return true;
+                            }).map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
                           </select>
                         </label>
                         <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
-                        {tunnelForm.type === "tcp" ? <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required /></label> : <label><span>代理说明</span><input value="节点侧内置 SOCKS5" disabled /></label>}
-                        {tunnelForm.type === "tcp" ? <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required /></label> : <label><span>协议能力</span><input value="仅 CONNECT，不含 UDP" disabled /></label>}
+                        {tunnelForm.type === "socks5" ? <label><span>代理说明</span><input value="节点侧内置 SOCKS5" disabled /></label> : tunnelForm.type === "http" ? <label><span>服务说明</span><input value="发布节点上的 Web/API 服务" disabled /></label> : <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required /></label>}
+                        {tunnelForm.type === "socks5" ? <label><span>协议能力</span><input value="仅 CONNECT，不含 UDP" disabled /></label> : tunnelForm.type === "http" ? <label><span>访问方式</span><input value="通过公网 HTTP 入口访问本地 Web/API" disabled /></label> : <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required /></label>}
                         <label><span>公网端口</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
                         <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
                       </form>
@@ -1157,8 +1163,8 @@ export default function App() {
                       {editingTunnelID !== null && tunnelEditForm ? (
                         <form className="form-grid" onSubmit={submitTunnelEdit}>
                           <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
-                          {tunnelEditForm.type === "tcp" ? <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required /></label> : <label><span>代理说明</span><input value="节点侧内置 SOCKS5" disabled /></label>}
-                          {tunnelEditForm.type === "tcp" ? <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required /></label> : <label><span>协议能力</span><input value="仅 CONNECT，不含 UDP" disabled /></label>}
+                          {tunnelEditForm.type === "socks5" ? <label><span>代理说明</span><input value="节点侧内置 SOCKS5" disabled /></label> : tunnelEditForm.type === "http" ? <label><span>服务说明</span><input value="发布节点上的 Web/API 服务" disabled /></label> : <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required /></label>}
+                          {tunnelEditForm.type === "socks5" ? <label><span>协议能力</span><input value="仅 CONNECT，不含 UDP" disabled /></label> : tunnelEditForm.type === "http" ? <label><span>访问方式</span><input value="通过公网 HTTP 入口访问本地 Web/API" disabled /></label> : <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required /></label>}
                           <label><span>公网端口</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
                           <div className="detail-grid readonly-grid">
                             <DetailItem label="nodeId" value={tunnelEditForm.nodeId} />
@@ -1202,6 +1208,23 @@ export default function App() {
                         </article>
                       ))}
                     </div>
+
+                    {editingTunnelID !== null && tunnelEditForm?.type === "http" ? (
+                      <div className="empty-state">
+                        <strong>HTTP relay 最小能力说明</strong>
+                        <p>当前 HTTP relay 用于发布节点上的 Web/API 服务，通过公网 HTTP 入口访问本地目标地址。</p>
+                        <p>适用场景：本地开发接口、内部 Web 管理页、轻量 API 发布。</p>
+                        <p>当前不包含 HTTPS、域名绑定、TLS、复杂 header 重写或 ACL。</p>
+                      </div>
+                    ) : null}
+
+                    {editingTunnelID !== null && tunnelEditForm?.type === "http" && editingTunnelID === tunnelEditForm.id ? (
+                      <div className="empty-state">
+                        <strong>最小使用示例</strong>
+                        <p>浏览器/命令行：直接访问 <code>http://82.156.236.104:{tunnelEditForm.publicPort}</code></p>
+                        <p>curl: <code>curl.exe http://82.156.236.104:{tunnelEditForm.publicPort}</code></p>
+                      </div>
+                    ) : null}
 
                     {editingTunnelID !== null && tunnelEditForm?.type === "socks5" ? (
                       <div className="empty-state">
@@ -1413,12 +1436,16 @@ function matchesTunnelHealthFilter(tunnel: TunnelSpec, filter: TunnelHealthFilte
 }
 
 function tunnelTypeLabel(type: string) {
+  if (type === "http") return "HTTP";
   return type === "socks5" ? "SOCKS5" : "TCP";
 }
 
 function tunnelTargetLabel(tunnel: TunnelSpec) {
   if (tunnel.type === "socks5") {
     return "节点侧 SOCKS5 CONNECT";
+  }
+  if (tunnel.type === "http") {
+    return "发布 " + tunnel.targetHost + ":" + tunnel.targetPort + " 的 Web/API 服务";
   }
   return tunnel.targetHost + ":" + tunnel.targetPort;
 }

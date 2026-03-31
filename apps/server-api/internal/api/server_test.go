@@ -597,6 +597,103 @@ func TestNodeListPagination(t *testing.T) {
 	}
 }
 
+func TestHTTPTunnelLifecycleVisibleToAgentAndRoutes(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "http-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, HTTPRelay: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-http-a",
+		"nodeId":     registerOut.NodeID,
+		"name":       "http-api",
+		"type":       "http",
+		"targetHost": "127.0.0.1",
+		"targetPort": 18080,
+		"publicPort": 18081,
+		"status":     "active",
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create status 201, got %d", createRes.Code)
+	}
+	var created types.TunnelSpec
+	if err := json.NewDecoder(createRes.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Type != "http" {
+		t.Fatalf("expected http type, got %s", created.Type)
+	}
+
+	agentReq := httptest.NewRequest(http.MethodGet, "/agent/tunnels?nodeId="+registerOut.NodeID, nil)
+	agentRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(agentRes, agentReq)
+	if agentRes.Code != http.StatusOK {
+		t.Fatalf("expected agent tunnels status 200, got %d", agentRes.Code)
+	}
+	var agentOut struct {
+		Items []types.TunnelSpec `json:"items"`
+	}
+	if err := json.NewDecoder(agentRes.Body).Decode(&agentOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(agentOut.Items) != 1 || agentOut.Items[0].Type != "tcp" {
+		t.Fatalf("expected http tunnel to be mapped as tcp for agent view, got %+v", agentOut.Items)
+	}
+
+	httpRoutesReq := httptest.NewRequest(http.MethodGet, "/internal/routes/http", nil)
+	httpRoutesRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(httpRoutesRes, httpRoutesReq)
+	if httpRoutesRes.Code != http.StatusOK {
+		t.Fatalf("expected http routes status 200, got %d", httpRoutesRes.Code)
+	}
+	var httpRoutesOut struct {
+		Items []types.TunnelSpec `json:"items"`
+	}
+	if err := json.NewDecoder(httpRoutesRes.Body).Decode(&httpRoutesOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(httpRoutesOut.Items) != 1 || httpRoutesOut.Items[0].Type != "http" {
+		t.Fatalf("expected http tunnel in http routes, got %+v", httpRoutesOut.Items)
+	}
+	if httpRoutesOut.Items[0].HealthStatus != types.TunnelHealthHealthy {
+		t.Fatalf("expected healthy http route, got %q", httpRoutesOut.Items[0].HealthStatus)
+	}
+}
+
+func TestHTTPTunnelRequiresHTTPRelayCapableNode(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	unsupportedBody, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-no-http", NodeName: "node-no-http", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}})
+	unsupportedReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(unsupportedBody))
+	unsupportedRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unsupportedRes, unsupportedReq)
+	if unsupportedRes.Code != http.StatusOK {
+		t.Fatalf("expected unsupported node register 200, got %d", unsupportedRes.Code)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{"nodeId": "node-no-http", "name": "http-blocked", "type": "http", "targetHost": "127.0.0.1", "targetPort": 8080, "publicPort": 18082, "status": "active"})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusBadRequest {
+		t.Fatalf("expected http tunnel reject 400, got %d", createRes.Code)
+	}
+}
+
 func TestSOCKS5TunnelLifecycleVisibleToAgentAndRoutes(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"

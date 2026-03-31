@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -346,7 +348,7 @@ func (s *Service) syncRoutes(ctx context.Context) error {
 			s.pools[key] = newStandbyPool(key, standbyPoolTargetSize, standbyPoolTargetSize)
 		}
 		starts = append(starts, listenerStart{listener: listener, route: route})
-		log.Printf("tcp route active: node=%s publicPort=%d tunnel=%s", route.NodeID, route.PublicPort, route.ID)
+		log.Printf("%s route active: node=%s publicPort=%d tunnel=%s", route.Type, route.NodeID, route.PublicPort, route.ID)
 	}
 	s.mu.Unlock()
 
@@ -354,9 +356,99 @@ func (s *Service) syncRoutes(ctx context.Context) error {
 		s.drainPool(key)
 	}
 	for _, start := range starts {
+		if start.route.Type == "http" {
+			go s.serveHTTPRoute(start.listener, start.route)
+			continue
+		}
 		go s.acceptLoop(start.listener, start.route)
 	}
 	return nil
+}
+
+func (s *Service) serveHTTPRoute(listener net.Listener, route types.TunnelSpec) {
+	server := &http.Server{
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.handleHTTPRequest(w, r, route) }),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+	server.SetKeepAlivesEnabled(false)
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+		log.Printf("http serve failed on %s: %v", listener.Addr().String(), err)
+	}
+}
+
+func (s *Service) handleHTTPRequest(w http.ResponseWriter, r *http.Request, route types.TunnelSpec) {
+	reqID := atomic.AddUint64(&connectionCounter, 1)
+	startedAt := time.Now()
+	log.Printf("http request %d accepted from %s method=%s host=%s path=%s for node=%s publicPort=%d", reqID, r.RemoteAddr, r.Method, r.Host, r.URL.RequestURI(), route.NodeID, route.PublicPort)
+	standby, poolSize, totalStandbyCount, err := s.acquireStandbyConn(r.Context(), route)
+	if err != nil {
+		log.Printf("http request %d no standby reverse connection for node=%s publicPort=%d: %v", reqID, route.NodeID, route.PublicPort, err)
+		http.Error(w, "http relay standby unavailable", http.StatusBadGateway)
+		return
+	}
+	if err := standby.prepareForStart(); err != nil {
+		log.Printf("http request %d discarded stale standby reverse connection for tunnel %s poolSize=%d totalStandby=%d: %v", reqID, route.ID, poolSize, totalStandbyCount, err)
+		_ = standby.conn.Close()
+		http.Error(w, "http relay standby stale", http.StatusBadGateway)
+		return
+	}
+	if _, err := standby.conn.Write([]byte{types.AgentRelayStartByte}); err != nil {
+		log.Printf("http request %d failed to start reverse session for tunnel %s poolSize=%d totalStandby=%d: %v", reqID, route.ID, poolSize, totalStandbyCount, err)
+		_ = standby.conn.Close()
+		http.Error(w, "http relay start failed", http.StatusBadGateway)
+		return
+	}
+	defer standby.conn.Close()
+	upstreamReq := cloneHTTPRequestForRelay(r, route)
+	if err := upstreamReq.Write(standby.conn); err != nil {
+		log.Printf("http request %d write upstream request failed for tunnel %s: %v", reqID, route.ID, err)
+		http.Error(w, "http relay write failed", http.StatusBadGateway)
+		return
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(standby.conn), upstreamReq)
+	if err != nil {
+		log.Printf("http request %d read upstream response failed for tunnel %s: %v", reqID, route.ID, err)
+		http.Error(w, "http relay response failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	copyHTTPResponse(w, resp)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("http request %d copy response body failed for tunnel %s: %v", reqID, route.ID, err)
+		return
+	}
+	log.Printf("http request %d completed with status=%d after %s", reqID, resp.StatusCode, time.Since(startedAt))
+}
+
+func cloneHTTPRequestForRelay(r *http.Request, route types.TunnelSpec) *http.Request {
+	out := r.Clone(r.Context())
+	out.URL = &url.URL{Path: r.URL.Path, RawPath: r.URL.RawPath, RawQuery: r.URL.RawQuery, ForceQuery: r.URL.ForceQuery}
+	out.RequestURI = ""
+	out.Host = net.JoinHostPort(route.TargetHost, itoa(route.TargetPort))
+	out.Close = true
+	return out
+}
+
+func copyHTTPResponse(w http.ResponseWriter, resp *http.Response) {
+	for key, values := range resp.Header {
+		if isHopByHopHeader(key) {
+			continue
+		}
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+}
+
+func isHopByHopHeader(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "connection", "proxy-connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) acceptLoop(listener net.Listener, route types.TunnelSpec) {
@@ -581,6 +673,7 @@ func helloMatchesRoute(hello types.AgentRelayHello, route types.TunnelSpec) bool
 
 func sameRoute(left, right types.TunnelSpec) bool {
 	return left.ID == right.ID &&
+		left.Type == right.Type &&
 		left.NodeID == right.NodeID &&
 		left.PublicPort == right.PublicPort &&
 		left.TargetHost == right.TargetHost &&

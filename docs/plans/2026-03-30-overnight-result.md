@@ -262,3 +262,56 @@ curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
     - `windows-16354`
     - `publicPort=10086`
     - `node=node-1774805183388699102`
+
+### HTTP Relay Minimal Delivery (2026-04-01)
+
+- `type=http` tunnel is now supported as a first-class managed tunnel type.
+- Product meaning for this round:
+  - publish a node-local Web/API service through a cloud public port
+  - plain HTTP only
+  - no domain binding
+  - no TLS / HTTPS
+  - no complex header rewriting
+- Current implementation reuses the existing reverse TCP transport path:
+  - management plane still creates a tunnel with `type=http`
+  - server-api keeps `type=http` in management APIs and health output
+  - for current agent compatibility, `/agent/tunnels` maps `type=http` to transport-level `tcp`
+  - relay-tcp now understands `type=http` route handling and forwards full HTTP requests/responses over the existing reverse session
+- Current runtime behavior:
+  - external user accesses `http://<cloud-ip>:<publicPort>`
+  - cloud relay reads the HTTP request
+  - request is sent over the existing reverse session to the node
+  - node-side current agent still dials `targetHost:targetPort`
+  - node-local HTTP service returns response back through the relay path
+- Current server-side validation:
+  - `type=http` requires `targetHost` and `targetPort`
+  - target node must report `capabilities.httpRelay=true`
+  - active `http` tunnels participate in public port conflict protection together with `tcp` and `socks5`
+- Current health state integration:
+  - `http` tunnel health uses the same derived framework
+  - current statuses still include:
+    - `healthy`
+    - `node_offline`
+    - `capability_missing`
+    - `misconfigured`
+- Current admin-web support:
+  - create tunnel form now supports `HTTP`
+  - node dropdown filters by HTTP capability when `type=http`
+  - tunnel detail/card/table now show HTTP as a distinct type, not as TCP or SOCKS5
+  - HTTP tunnel detail includes minimal usage guidance
+- Real cloud verification completed:
+  - created tunnel:
+    - `tunnel-1774977560228127580`
+    - name `http-16354`
+    - type `http`
+    - node `node-1774805183388699102`
+    - target `127.0.0.1:16354`
+    - public port `10087`
+  - management API returned `healthStatus:"healthy"`
+  - real access succeeded:
+    - `curl -i http://127.0.0.1:10087/`
+    - response status `200 OK`
+    - response body matched the Windows node local site HTML
+  - relay log confirmed live request handling:
+    - `http route active ... publicPort=10087`
+    - `http request ... completed with status=200`

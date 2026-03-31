@@ -481,7 +481,7 @@ func emptyStringToNil(input string) any {
 }
 
 func (s *PostgresStore) hasPublicPortConflict(ctx context.Context, excludeID, tunnelType, status string, publicPort int) (bool, error) {
-	if (tunnelType != "tcp" && tunnelType != "socks5") || status != "active" || publicPort == 0 {
+	if (tunnelType != "tcp" && tunnelType != "socks5" && tunnelType != "http") || status != "active" || publicPort == 0 {
 		return false, nil
 	}
 	var count int
@@ -489,7 +489,7 @@ func (s *PostgresStore) hasPublicPortConflict(ctx context.Context, excludeID, tu
 		select count(*)
 		from tunnels
 		where id <> $1
-		  and type in ('tcp', 'socks5')
+		  and type in ('tcp', 'socks5', 'http')
 		  and status = 'active'
 		  and public_port = $2
 	`, excludeID, publicPort).Scan(&count)

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -110,6 +111,89 @@ func TestTCPRelayServiceForwardsTrafficViaReverseAgentConnection(t *testing.T) {
 	}
 	if string(buf[:n]) != "echo:hello\n" {
 		t.Fatalf("unexpected relay response: %q", string(buf[:n]))
+	}
+	if err := <-agentResult; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPRelayServiceForwardsHTTPRequestViaReverseAgentConnection(t *testing.T) {
+	atomic.StoreInt64(&totalStandby, 0)
+	tunnel := types.TunnelSpec{
+		ID:         "http-1",
+		NodeID:     "node-http-1",
+		Name:       "http-api",
+		Type:       "http",
+		Status:     "active",
+		PublicPort: freePort(t),
+		TargetHost: "127.0.0.1",
+		TargetPort: 18080,
+	}
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/internal/routes/tcp":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []types.TunnelSpec{tunnel}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer api.Close()
+
+	service := NewService(api.URL)
+	service.acquireTimeout = 2 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = service.Run(ctx) }()
+
+	relayHTTP := httptest.NewServer(http.HandlerFunc(service.HandleAgentReverse))
+	defer relayHTTP.Close()
+	requireEventuallyListening(t, service, tunnel.PublicPort)
+
+	agentResult := make(chan error, 1)
+	go func() {
+		agentConn, err := dialTestUpgrade(relayHTTP.URL+types.AgentRelayConnectPath, types.AgentRelayHello{NodeID: tunnel.NodeID, TunnelID: tunnel.ID, PublicPort: tunnel.PublicPort, TargetHost: tunnel.TargetHost, TargetPort: tunnel.TargetPort})
+		if err != nil {
+			agentResult <- err
+			return
+		}
+		defer agentConn.Close()
+		start := make([]byte, 1)
+		if _, err := io.ReadFull(agentConn, start); err != nil {
+			agentResult <- err
+			return
+		}
+		if start[0] != types.AgentRelayStartByte {
+			agentResult <- fmt.Errorf("unexpected start byte %d", start[0])
+			return
+		}
+		req, err := http.ReadRequest(bufio.NewReader(agentConn))
+		if err != nil {
+			agentResult <- err
+			return
+		}
+		if req.URL.Path != "/hello" {
+			agentResult <- fmt.Errorf("unexpected request path %s", req.URL.Path)
+			return
+		}
+		resp := &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1, Header: http.Header{"Content-Type": []string{"text/plain"}, "Content-Length": []string{"11"}}, Body: io.NopCloser(strings.NewReader("relay-http\n"))}
+		if err := resp.Write(agentConn); err != nil {
+			agentResult <- err
+			return
+		}
+		agentResult <- nil
+	}()
+
+	resp, err := http.Get("http://127.0.0.1:" + fmt.Sprintf("%d", tunnel.PublicPort) + "/hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || string(body) != "relay-http\n" {
+		t.Fatalf("unexpected http relay response: status=%d body=%q", resp.StatusCode, string(body))
 	}
 	if err := <-agentResult; err != nil {
 		t.Fatal(err)
