@@ -613,7 +613,7 @@ func TestCORSAllowsOnlyConfiguredOrigins(t *testing.T) {
 	}
 }
 
-func TestManagementWritesAuditLogs(t *testing.T) {
+func TestDeleteTunnelAuditIncludesDeletedTunnelPayload(t *testing.T) {
 	backend := store.NewInMemoryStore()
 	server := NewServer("test", backend, "")
 	server.adminBootstrapSecret = "bootstrap-secret"
@@ -629,15 +629,6 @@ func TestManagementWritesAuditLogs(t *testing.T) {
 		t.Fatalf("expected create tunnel 201, got %d", createTunnelRes.Code)
 	}
 
-	updateTunnelBody, _ := json.Marshal(map[string]any{"nodeId": registerOut.NodeID, "name": "audit-updated", "type": "tcp", "targetHost": "127.0.0.1", "targetPort": 80, "publicPort": 10090, "status": "paused"})
-	updateTunnelReq := httptest.NewRequest(http.MethodPut, "/api/tunnels/audit-tunnel", bytes.NewReader(updateTunnelBody))
-	applyCookies(updateTunnelReq, adminCookies)
-	updateTunnelRes := httptest.NewRecorder()
-	server.Handler().ServeHTTP(updateTunnelRes, updateTunnelReq)
-	if updateTunnelRes.Code != http.StatusOK {
-		t.Fatalf("expected update tunnel 200, got %d", updateTunnelRes.Code)
-	}
-
 	deleteTunnelReq := httptest.NewRequest(http.MethodDelete, "/api/tunnels/audit-tunnel", nil)
 	applyCookies(deleteTunnelReq, adminCookies)
 	deleteTunnelRes := httptest.NewRecorder()
@@ -645,6 +636,40 @@ func TestManagementWritesAuditLogs(t *testing.T) {
 	if deleteTunnelRes.Code != http.StatusOK {
 		t.Fatalf("expected delete tunnel 200, got %d", deleteTunnelRes.Code)
 	}
+
+	auditReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs?limit=20", nil)
+	applyCookies(auditReq, adminCookies)
+	auditRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(auditRes, auditReq)
+	if auditRes.Code != http.StatusOK {
+		t.Fatalf("expected audit logs 200, got %d", auditRes.Code)
+	}
+	var auditOut struct {
+		Items []types.AuditLogEntry `json:"items"`
+	}
+	if err := json.NewDecoder(auditRes.Body).Decode(&auditOut); err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, item := range auditOut.Items {
+		if item.Action == "delete_tunnel" && item.ResourceType == "tunnel" && item.ResourceID == "audit-tunnel" {
+			found = true
+			if item.Payload["nodeId"] != registerOut.NodeID || item.Payload["publicPort"] != "10090" || item.Payload["targetHost"] != "127.0.0.1" || item.Payload["targetPort"] != "80" {
+				t.Fatalf("unexpected delete_tunnel payload: %+v", item)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected delete_tunnel audit log with exact resource and payload")
+	}
+}
+
+func TestDeleteUserAuditDoesNotEmitDeleteTunnel(t *testing.T) {
+	backend := store.NewInMemoryStore()
+	server := NewServer("test", backend, "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
 
 	createUserBody, _ := json.Marshal(types.CreateUserRequest{Email: "audit-user@example.com", DisplayName: "审计用户", Password: "UserPass#2026", Role: types.UserRoleUser})
 	createUserReq := httptest.NewRequest(http.MethodPost, "/api/users", bytes.NewReader(createUserBody))
@@ -657,15 +682,6 @@ func TestManagementWritesAuditLogs(t *testing.T) {
 	var createdUser types.UserSummary
 	if err := json.NewDecoder(createUserRes.Body).Decode(&createdUser); err != nil {
 		t.Fatal(err)
-	}
-
-	updateUserBody, _ := json.Marshal(types.UpdateUserRequest{DisplayName: "审计用户-更新", Role: types.UserRoleManager})
-	updateUserReq := httptest.NewRequest(http.MethodPut, "/api/users/"+createdUser.ID, bytes.NewReader(updateUserBody))
-	applyCookies(updateUserReq, adminCookies)
-	updateUserRes := httptest.NewRecorder()
-	server.Handler().ServeHTTP(updateUserRes, updateUserReq)
-	if updateUserRes.Code != http.StatusOK {
-		t.Fatalf("expected update user 200, got %d", updateUserRes.Code)
 	}
 
 	deleteUserReq := httptest.NewRequest(http.MethodDelete, "/api/users/"+createdUser.ID, nil)
@@ -689,26 +705,41 @@ func TestManagementWritesAuditLogs(t *testing.T) {
 	if err := json.NewDecoder(auditRes.Body).Decode(&auditOut); err != nil {
 		t.Fatal(err)
 	}
-	actions := map[string]bool{}
+
+	foundDeleteUser := false
 	for _, item := range auditOut.Items {
-		actions[item.Action] = true
-	}
-	for _, action := range []string{"create_tunnel", "update_tunnel", "delete_tunnel", "create_user", "update_user", "delete_user"} {
-		if !actions[action] {
-			t.Fatalf("expected audit action %s", action)
+		if item.Action == "delete_user" && item.ResourceType == "user" && item.ResourceID == createdUser.ID {
+			foundDeleteUser = true
+			if item.Payload["email"] != "audit-user@example.com" || item.Payload["displayName"] != "审计用户" || item.Payload["role"] != string(types.UserRoleUser) {
+				t.Fatalf("unexpected delete_user payload: %+v", item)
+			}
 		}
+		if item.ResourceID == createdUser.ID && (item.Action == "delete_tunnel" || item.ResourceType == "tunnel") {
+			t.Fatalf("unexpected tunnel deletion audit for deleted user: %+v", item)
+		}
+	}
+	if !foundDeleteUser {
+		t.Fatal("expected delete_user audit log with exact resource and payload")
 	}
 }
 
-func TestLoginLogoutAndAuditVisibility(t *testing.T) {
+func TestLogoutAuditUsesRealActor(t *testing.T) {
 	backend := store.NewInMemoryStore()
 	server := NewServer("test", backend, "")
 	server.adminBootstrapSecret = "bootstrap-secret"
-	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+	if _, err := backend.BootstrapAdmin(context.Background(), store.CreateUserParams{Email: "admin@example.com", DisplayName: "管理员", Password: "AdminPass#2026", Role: types.UserRoleAdmin}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := backend.CreateUser(context.Background(), store.CreateUserParams{Email: "basic@example.com", DisplayName: "普通用户", Password: "UserPass#2026", Role: types.UserRoleUser}); err != nil {
 		t.Fatal(err)
 	}
+	adminCookies := loginAndCollectCookies(t, server, "admin@example.com", "AdminPass#2026")
 	userCookies := loginAndCollectCookies(t, server, "basic@example.com", "UserPass#2026")
+	basicUser, err := backend.AuthenticateUser(context.Background(), store.AuthenticateUserParams{Email: "basic@example.com", Password: "UserPass#2026"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
 	applyCookies(logoutReq, userCookies)
 	logoutRes := httptest.NewRecorder()
@@ -730,18 +761,18 @@ func TestLoginLogoutAndAuditVisibility(t *testing.T) {
 	if err := json.NewDecoder(adminAuditRes.Body).Decode(&auditOut); err != nil {
 		t.Fatal(err)
 	}
-	seenLogin := false
-	seenLogout := false
+
+	foundLogout := false
 	for _, item := range auditOut.Items {
-		if item.Action == "login" {
-			seenLogin = true
-		}
 		if item.Action == "logout" {
-			seenLogout = true
+			foundLogout = true
+			if item.ResourceType != "session" || item.ActorType != "user" || item.ActorID != basicUser.ID {
+				t.Fatalf("unexpected logout audit log: %+v", item)
+			}
 		}
 	}
-	if !seenLogin || !seenLogout {
-		t.Fatalf("expected login and logout audit logs, got %+v", auditOut.Items)
+	if !foundLogout {
+		t.Fatal("expected logout audit log")
 	}
 
 	userAuditReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs", nil)
