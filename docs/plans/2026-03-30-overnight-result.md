@@ -214,3 +214,22 @@ curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
   - relay-tcp public TCP entry
   - updated Windows client-agent SOCKS5 handler
   - outbound target connect through SOCKS5 CONNECT
+
+### SOCKS5 Usage Guidance (2026-03-31)
+
+- Current suitable scenarios:
+  - temporary outbound proxy access through TCP destinations
+  - browser / curl / command-line tools that can use SOCKS5 CONNECT
+  - lightweight operator-facing proxy entry managed from the existing tunnel console
+- Current unsuitable scenarios:
+  - UDP-based applications
+  - environments requiring fine-grained ACLs or identity-aware authorization
+  - advanced enterprise proxy features such as multi-hop chaining or transparent proxying
+- Minimal usage examples:
+  - curl:
+    - `curl.exe --proxy socks5h://82.156.236.104:11080 https://example.com -I`
+  - PowerShell:
+    - directly run the same `curl.exe` command in PowerShell
+  - Browser:
+    - configure a SOCKS5 proxy pointing to `82.156.236.104:<publicPort>`
+    - current expectation is TCP web access only; UDP-based browser features are outside scope

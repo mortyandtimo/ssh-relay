@@ -1177,6 +1177,23 @@ export default function App() {
                         </article>
                       ))}
                     </div>
+
+                    {editingTunnelID !== null && tunnelEditForm?.type === "socks5" ? (
+                      <div className="empty-state">
+                        <strong>SOCKS5 最小能力说明</strong>
+                        <p>当前 SOCKS5 入口仅支持 CONNECT，不支持 UDP associate，也不提供高级认证、ACL 或链式代理。</p>
+                        <p>适用场景：临时出口代理、浏览器/命令行经 SOCKS5 发起 TCP 连接。</p>
+                        <p>不适用场景：需要 UDP、需要细粒度访问控制、需要多级代理链。</p>
+                      </div>
+                    ) : null}
+
+                    {editingTunnelID !== null && tunnelEditForm?.type === "socks5" && editingTunnelID === tunnelEditForm.id ? (
+                      <div className="empty-state">
+                        <strong>最小使用示例</strong>
+                        <p>curl: <code>curl.exe --proxy socks5h://82.156.236.104:{tunnelEditForm.publicPort} https://example.com -I</code></p>
+                        <p>PowerShell: 可以直接调用上面的 <code>curl.exe</code> 命令；浏览器可把 SOCKS5 代理指向 <code>82.156.236.104:{tunnelEditForm.publicPort}</code>。</p>
+                      </div>
+                    ) : null}
                   </section>
                 </div>
 
