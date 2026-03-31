@@ -15,6 +15,7 @@ type NodeCapabilities struct {
 	HTTPSRelay bool `json:"httpsRelay"`
 	UDPRelay   bool `json:"udpRelay"`
 	P2PAssist  bool `json:"p2pAssist"`
+	SOCKS5Connect bool `json:"socks5Connect"`
 }
 
 type NodeRole string
@@ -135,6 +136,7 @@ type NodeOption struct {
 	NodeID   string `json:"nodeId"`
 	NodeName string `json:"nodeName"`
 	Status   string `json:"status"`
+	SupportsSOCKS5 bool `json:"supportsSOCKS5"`
 }
 
 type NodeOptionsResponse struct {

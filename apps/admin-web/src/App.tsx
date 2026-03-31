@@ -40,6 +40,7 @@ type NodeOption = {
   nodeId: string;
   nodeName: string;
   status: string;
+  supportsSOCKS5?: boolean;
 };
 
 type NodeOptionsResponse = {
@@ -1108,7 +1109,7 @@ export default function App() {
                           <span>节点</span>
                           <select value={tunnelForm.nodeId} onChange={(event) => { setTunnelForm((current) => ({ ...current, nodeId: event.target.value })); setHasInitializedNodeId(true); }} required>
                             <option value="">选择节点</option>
-                            {allNodes.map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
+                            {allNodes.filter((node) => tunnelForm.type !== "socks5" || node.supportsSOCKS5).map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
                           </select>
                         </label>
                         <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>

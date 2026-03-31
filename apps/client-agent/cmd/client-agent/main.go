@@ -121,9 +121,10 @@ func register(client *http.Client, baseURL, nodeID, nodeName string) (string, er
 		NodeName:     nodeName,
 		AgentVersion: agentVersion,
 		Capabilities: types.NodeCapabilities{
-			TCPRelay:   true,
-			HTTPRelay:  true,
-			HTTPSRelay: true,
+			TCPRelay:      true,
+			HTTPRelay:     true,
+			HTTPSRelay:    true,
+			SOCKS5Connect: true,
 		},
 		Metadata: map[string]string{
 			"hostname": defaultNodeName(),

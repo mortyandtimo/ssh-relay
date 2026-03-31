@@ -461,7 +461,7 @@ func (s *Server) handleNodeOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	options := make([]types.NodeOption, 0, len(items))
 	for _, item := range items {
-		options = append(options, types.NodeOption{NodeID: item.NodeID, NodeName: item.NodeName, Status: item.Status})
+		options = append(options, types.NodeOption{NodeID: item.NodeID, NodeName: item.NodeName, Status: item.Status, SupportsSOCKS5: item.Capabilities.SOCKS5Connect})
 	}
 	writeJSON(w, http.StatusOK, types.NodeOptionsResponse{Items: options})
 }
@@ -551,6 +551,14 @@ func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		spec = normalized
+		if err := s.ensureTunnelNodeCapability(r.Context(), req.NodeID, spec.Type); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
 		if spec.Metadata == nil {
 			spec.Metadata = map[string]string{}
 		}
@@ -611,6 +619,14 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		spec = normalized
+		if err := s.ensureTunnelNodeCapability(r.Context(), req.NodeID, spec.Type); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
 		if spec.Metadata == nil {
 			spec.Metadata = map[string]string{}
 		}
@@ -1027,6 +1043,20 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 		return types.TunnelSpec{}, fmt.Errorf("unsupported tunnel type %s", spec.Type)
 	}
 	return spec, nil
+}
+
+func (s *Server) ensureTunnelNodeCapability(ctx context.Context, nodeID, tunnelType string) error {
+	if tunnelType != "socks5" {
+		return nil
+	}
+	node, err := s.store.GetNode(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	if !node.Capabilities.SOCKS5Connect {
+		return errors.New("selected node does not support socks5 connect")
+	}
+	return nil
 }
 
 func envOrDefault(key, fallback string) string {

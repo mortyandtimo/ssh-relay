@@ -432,7 +432,14 @@ func TestSOCKS5TunnelLifecycleVisibleToAgentAndRoutes(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
 	adminCookies := bootstrapAdminAndCollectCookies(t, server)
-	registerOut := registerNodeThroughAgent(t, server, "socks-node")
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "socks-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, HTTPRelay: true, HTTPSRelay: true, SOCKS5Connect: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
 
 	createBody, err := json.Marshal(map[string]any{
 		"id":         "tunnel-socks5-a",
@@ -488,7 +495,14 @@ func TestSOCKS5TunnelCreateUpdateValidation(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
 	adminCookies := bootstrapAdminAndCollectCookies(t, server)
-	registerOut := registerNodeThroughAgent(t, server, "socks-validate-node")
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "socks-validate-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, SOCKS5Connect: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
 
 	createBody, _ := json.Marshal(map[string]any{
 		"id":         "tunnel-socks5-v",
@@ -537,6 +551,106 @@ func TestSOCKS5TunnelCreateUpdateValidation(t *testing.T) {
 	}
 	if updated.TargetHost != "socks5" || updated.TargetPort != 1080 {
 		t.Fatalf("expected normalized socks5 target after update, got %s:%d", updated.TargetHost, updated.TargetPort)
+	}
+}
+
+func TestSOCKS5TunnelRequiresSOCKS5CapableNode(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	unsupportedBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeID:       "node-no-socks5",
+		NodeName:     "node-no-socks5",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{TCPRelay: true},
+	})
+	unsupportedReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(unsupportedBody))
+	unsupportedRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unsupportedRes, unsupportedReq)
+	if unsupportedRes.Code != http.StatusOK {
+		t.Fatalf("expected unsupported node register 200, got %d", unsupportedRes.Code)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"nodeId":     "node-no-socks5",
+		"name":       "socks-blocked",
+		"type":       "socks5",
+		"publicPort": 13080,
+		"status":     "active",
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusBadRequest {
+		t.Fatalf("expected create reject 400, got %d", createRes.Code)
+	}
+
+	supportedBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeID:       "node-has-socks5",
+		NodeName:     "node-has-socks5",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{TCPRelay: true, SOCKS5Connect: true},
+	})
+	supportedReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(supportedBody))
+	supportedRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(supportedRes, supportedReq)
+	if supportedRes.Code != http.StatusOK {
+		t.Fatalf("expected supported node register 200, got %d", supportedRes.Code)
+	}
+
+	allowedBody, _ := json.Marshal(map[string]any{
+		"nodeId":     "node-has-socks5",
+		"name":       "socks-allowed",
+		"type":       "socks5",
+		"publicPort": 13081,
+		"status":     "active",
+	})
+	allowedReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(allowedBody))
+	applyCookies(allowedReq, adminCookies)
+	allowedRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(allowedRes, allowedReq)
+	if allowedRes.Code != http.StatusCreated {
+		t.Fatalf("expected create allowed 201, got %d", allowedRes.Code)
+	}
+}
+
+func TestNodeOptionsExposeSOCKS5Capability(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	bodyA, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-opt-a", NodeName: "node-opt-a", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}})
+	reqA := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(bodyA))
+	resA := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resA, reqA)
+
+	bodyB, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-opt-b", NodeName: "node-opt-b", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, SOCKS5Connect: true}})
+	reqB := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(bodyB))
+	resB := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resB, reqB)
+
+	optionsReq := httptest.NewRequest(http.MethodGet, "/api/node-options", nil)
+	applyCookies(optionsReq, adminCookies)
+	optionsRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(optionsRes, optionsReq)
+	if optionsRes.Code != http.StatusOK {
+		t.Fatalf("expected node options status 200, got %d", optionsRes.Code)
+	}
+	var payload types.NodeOptionsResponse
+	if err := json.NewDecoder(optionsRes.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, item := range payload.Items {
+		seen[item.NodeID] = item.SupportsSOCKS5
+	}
+	if seen["node-opt-a"] {
+		t.Fatal("expected node-opt-a to not support socks5")
+	}
+	if !seen["node-opt-b"] {
+		t.Fatal("expected node-opt-b to support socks5")
 	}
 }
 
