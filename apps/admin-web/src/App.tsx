@@ -575,7 +575,7 @@ export default function App() {
       setCurrentUser(payload.user);
       setMessage("登录成功。");
       setMainView(payload.user.role === "user" ? "overview" : "connections");
-      await refreshDashboard(false, payload.user, false, auditFilterRef.current, nodeFilterRef.current);
+      void refreshDashboard(false, payload.user, false, auditFilterRef.current, nodeFilterRef.current);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "登录失败");
     } finally {
