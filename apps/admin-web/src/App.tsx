@@ -191,6 +191,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<UserSummary | null>(null);
   const [nodes, setNodes] = useState<NodeSummary[]>([]);
   const [nodeTotal, setNodeTotal] = useState(0);
+  const [allNodes, setAllNodes] = useState<NodeSummary[]>([]);
   const [selectedNodeID, setSelectedNodeID] = useState<string | null>(null);
   const [nodeFilter, setNodeFilter] = useState<NodeFilterState>(initialNodeFilter);
   const [nodeEditForm, setNodeEditForm] = useState<NodeEditForm | null>(null);
@@ -415,16 +416,19 @@ export default function App() {
         const query = buildNodeQuery(nodeFilterValue).toString();
         return query ? "?" + query : "";
       })();
+      const allNodesPath = "/api/nodes";
       const overviewRequests =
         user.role !== "user"
           ? [
               requestJSON<NodeListResponse>(nodePath),
+              requestJSON<NodeListResponse>(allNodesPath),
               requestJSON<{ items: TunnelSpec[] }>("/api/tunnels"),
               requestJSON<ServerMetrics>("/api/server/metrics"),
               requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime"),
             ]
           : [
               Promise.resolve({ items: [] as NodeSummary[], total: 0, limit: nodeFilterValue.limit, offset: nodeFilterValue.offset }),
+              Promise.resolve({ items: [] as NodeSummary[], total: 0, limit: 0, offset: 0 }),
               Promise.resolve({ items: [] as TunnelSpec[] }),
               Promise.resolve(null as ServerMetrics | null),
               Promise.resolve(null as RelayRuntimeSummary | null),
@@ -445,7 +449,8 @@ export default function App() {
         return;
       }
 
-      const [nodesPayload, tunnelsPayload, metricsPayload, relayPayload, usersPayload, auditPayload] = results as [
+      const [nodesPayload, allNodesPayload, tunnelsOnlyPayload, metricsOnlyPayload, relayOnlyPayload, usersPayloadFixed, auditPayloadFixed] = results as [
+        NodeListResponse,
         NodeListResponse,
         { items: TunnelSpec[] },
         ServerMetrics | null,
@@ -456,12 +461,13 @@ export default function App() {
 
       setNodes(nodesPayload.items || []);
       setNodeTotal(nodesPayload.total || 0);
-      setTunnels(tunnelsPayload.items || []);
-      setMetrics(metricsPayload);
-      setRelayRuntime(relayPayload);
-      setUsers(usersPayload?.items || []);
-      setAuditLogs(auditPayload?.items || []);
-      setAuditTotal(auditPayload?.total || 0);
+      setAllNodes(allNodesPayload.items || []);
+      setTunnels(tunnelsOnlyPayload.items || []);
+      setMetrics(metricsOnlyPayload);
+      setRelayRuntime(relayOnlyPayload);
+      setUsers(usersPayloadFixed?.items || []);
+      setAuditLogs(auditPayloadFixed?.items || []);
+      setAuditTotal(auditPayloadFixed?.total || 0);
 
       if (!hasInitializedNodeId) {
         const defaultNodeId = nodesPayload.items?.[0]?.nodeId || "";
@@ -484,6 +490,7 @@ export default function App() {
     setCurrentUser(null);
     setNodes([]);
     setNodeTotal(0);
+    setAllNodes([]);
     setSelectedNodeID(null);
     setNodeFilter(initialNodeFilter);
     setNodeEditForm(null);
@@ -1082,7 +1089,7 @@ export default function App() {
                           <span>节点</span>
                           <select value={tunnelForm.nodeId} onChange={(event) => { setTunnelForm((current) => ({ ...current, nodeId: event.target.value })); setHasInitializedNodeId(true); }} required>
                             <option value="">选择节点</option>
-                            {nodes.map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
+                            {allNodes.map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
                           </select>
                         </label>
                         <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
