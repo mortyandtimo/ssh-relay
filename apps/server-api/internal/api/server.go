@@ -319,11 +319,17 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w, http.MethodPost)
 		return
 	}
+	actorType := "system"
+	actorID := ""
 	if sessionCookie, err := r.Cookie(sessionCookieName); err == nil {
+		if session, err := s.store.GetWebSessionByID(r.Context(), sessionCookie.Value); err == nil {
+			actorType = "user"
+			actorID = session.UserID
+		}
 		_ = s.store.DeleteWebSession(r.Context(), sessionCookie.Value)
 	}
 	s.clearAuthCookies(w)
-	s.writeAudit(r, "logout", "session", "", nil)
+	_, _ = s.store.WriteAuditLog(r.Context(), store.AuditLogParams{ActorType: actorType, ActorID: actorID, Action: "logout", ResourceType: "session"})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "logged_out"})
 }
 
@@ -392,6 +398,15 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 		s.writeAudit(r, "update_user", "user", user.ID, map[string]string{"email": user.Email, "role": string(user.Role)})
 		writeJSON(w, http.StatusOK, user)
 	case http.MethodDelete:
+		user, err := s.store.GetUser(r.Context(), id)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
 		if err := s.store.DeleteUser(r.Context(), id); err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, store.ErrNotFound) {
@@ -400,8 +415,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
-		s.writeAudit(r, "delete_user", "user", id, nil)
-		s.writeAudit(r, "delete_tunnel", "tunnel", id, nil)
+		s.writeAudit(r, "delete_user", "user", id, map[string]string{"email": user.Email, "displayName": user.DisplayName, "role": string(user.Role)})
 		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
 	default:
 		writeMethodNotAllowed(w, http.MethodPut+", "+http.MethodDelete)
@@ -518,6 +532,15 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 		s.writeAudit(r, "update_tunnel", "tunnel", tunnel.ID, map[string]string{"nodeId": tunnel.NodeID, "publicPort": fmt.Sprintf("%d", tunnel.PublicPort), "status": tunnel.Status})
 		writeJSON(w, http.StatusOK, tunnel)
 	case http.MethodDelete:
+		tunnel, err := s.store.GetTunnel(r.Context(), id)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
 		if err := s.store.DeleteTunnel(r.Context(), id); err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, store.ErrNotFound) {
@@ -526,6 +549,7 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
+		s.writeAudit(r, "delete_tunnel", "tunnel", id, map[string]string{"nodeId": tunnel.NodeID, "publicPort": fmt.Sprintf("%d", tunnel.PublicPort), "targetHost": tunnel.TargetHost, "targetPort": fmt.Sprintf("%d", tunnel.TargetPort)})
 		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut+", "+http.MethodDelete)
