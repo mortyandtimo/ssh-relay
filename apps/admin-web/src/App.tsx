@@ -92,6 +92,17 @@ type AuditLogListResponse = {
   offset: number;
 };
 
+type AuditFilterState = {
+  action: string;
+  actorType: string;
+  resourceType: string;
+  actorID: string;
+  startAt: string;
+  endAt: string;
+  limit: number;
+  offset: number;
+};
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
 
 const initialTunnelForm: TunnelForm = {
@@ -100,6 +111,17 @@ const initialTunnelForm: TunnelForm = {
   targetHost: "127.0.0.1",
   targetPort: "",
   publicPort: "",
+};
+
+const initialAuditFilter: AuditFilterState = {
+  action: "",
+  actorType: "",
+  resourceType: "",
+  actorID: "",
+  startAt: "",
+  endAt: "",
+  limit: 20,
+  offset: 0,
 };
 
 export default function App() {
@@ -117,7 +139,7 @@ export default function App() {
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [bootstrapForm, setBootstrapForm] = useState({ email: "", displayName: "管理员", password: "", bootstrapSecret: "" });
   const [userForm, setUserForm] = useState({ email: "", displayName: "", password: "", role: "manager" as UserRole });
-  const [auditFilter, setAuditFilter] = useState({ action: "", actorType: "", resourceType: "", actorID: "", startAt: "", endAt: "", limit: 20, offset: 0 });
+  const [auditFilter, setAuditFilter] = useState<AuditFilterState>(initialAuditFilter);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busyAction, setBusyAction] = useState("");
@@ -168,7 +190,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [currentUser, hasInitializedNodeId, auditFilter]);
+  }, [currentUser, hasInitializedNodeId]);
 
   async function requestJSON<T>(path: string, init?: RequestInit, allowRefresh = true): Promise<T> {
     const response = await fetch(apiBaseUrl + path, {
@@ -230,20 +252,25 @@ export default function App() {
     }
   }
 
-  async function refreshDashboard(showNotice: boolean, user = currentUser, cancelled = false) {
+  function buildAuditQuery(filter: AuditFilterState) {
+    const auditQuery = new URLSearchParams();
+    auditQuery.set("limit", String(filter.limit));
+    auditQuery.set("offset", String(filter.offset));
+    if (filter.action) auditQuery.set("action", filter.action);
+    if (filter.actorType) auditQuery.set("actorType", filter.actorType);
+    if (filter.resourceType) auditQuery.set("resourceType", filter.resourceType);
+    if (filter.actorID) auditQuery.set("actorID", filter.actorID);
+    if (filter.startAt) auditQuery.set("startAt", new Date(filter.startAt).toISOString());
+    if (filter.endAt) auditQuery.set("endAt", new Date(filter.endAt).toISOString());
+    return auditQuery;
+  }
+
+  async function refreshDashboard(showNotice: boolean, user = currentUser, cancelled = false, filter = auditFilter) {
     if (!user) {
       return;
     }
     try {
-      const auditQuery = new URLSearchParams();
-      auditQuery.set("limit", String(auditFilter.limit));
-      auditQuery.set("offset", String(auditFilter.offset));
-      if (auditFilter.action) auditQuery.set("action", auditFilter.action);
-      if (auditFilter.actorType) auditQuery.set("actorType", auditFilter.actorType);
-      if (auditFilter.resourceType) auditQuery.set("resourceType", auditFilter.resourceType);
-      if (auditFilter.actorID) auditQuery.set("actorID", auditFilter.actorID);
-      if (auditFilter.startAt) auditQuery.set("startAt", new Date(auditFilter.startAt).toISOString());
-      if (auditFilter.endAt) auditQuery.set("endAt", new Date(auditFilter.endAt).toISOString());
+      const auditQuery = buildAuditQuery(filter);
 
       const requests = [
         requestJSON<{ items: NodeSummary[] }>("/api/nodes"),
@@ -600,7 +627,7 @@ export default function App() {
       {currentUser.role !== "user" ? (
         <section className="panel">
           <div className="panel-header"><div><p className="eyebrow">审计</p><h2>最近操作历史</h2></div></div>
-          <form className="tunnel-form" onSubmit={(event) => { event.preventDefault(); setAuditFilter((current) => ({ ...current, offset: 0 })); void refreshDashboard(false); }}>
+          <form className="tunnel-form" onSubmit={(event) => { event.preventDefault(); const nextFilter = { ...auditFilter, offset: 0 }; setAuditFilter(nextFilter); void refreshDashboard(false, currentUser, false, nextFilter); }}>
             <label><span>Action</span><input value={auditFilter.action} onChange={(event) => setAuditFilter((current) => ({ ...current, action: event.target.value }))} /></label>
             <label><span>Actor Type</span><input value={auditFilter.actorType} onChange={(event) => setAuditFilter((current) => ({ ...current, actorType: event.target.value }))} /></label>
             <label><span>Resource Type</span><input value={auditFilter.resourceType} onChange={(event) => setAuditFilter((current) => ({ ...current, resourceType: event.target.value }))} /></label>
@@ -631,8 +658,8 @@ export default function App() {
             </table>
           </div>
           <div className="actions-row">
-            <button type="button" className="secondary" disabled={auditFilter.offset === 0} onClick={() => { setAuditFilter((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) })); void refreshDashboard(false); }}>上一页</button>
-            <button type="button" className="secondary" disabled={auditFilter.offset + auditFilter.limit >= auditTotal} onClick={() => { setAuditFilter((current) => ({ ...current, offset: current.offset + current.limit })); void refreshDashboard(false); }}>下一页</button>
+            <button type="button" className="secondary" disabled={auditFilter.offset === 0} onClick={() => { const nextFilter = { ...auditFilter, offset: Math.max(0, auditFilter.offset - auditFilter.limit) }; setAuditFilter(nextFilter); void refreshDashboard(false, currentUser, false, nextFilter); }}>上一页</button>
+            <button type="button" className="secondary" disabled={auditFilter.offset + auditFilter.limit >= auditTotal} onClick={() => { const nextFilter = { ...auditFilter, offset: auditFilter.offset + auditFilter.limit }; setAuditFilter(nextFilter); void refreshDashboard(false, currentUser, false, nextFilter); }}>下一页</button>
             <span className="inline-note">总计 {auditTotal} 条，当前 offset {auditFilter.offset}</span>
           </div>
         </section>
