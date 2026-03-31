@@ -201,7 +201,7 @@ textarea {
 
 .overview-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 16px;
 }
 
@@ -224,7 +224,7 @@ textarea {
 
 .signal-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
   margin-top: 16px;
 }
@@ -249,7 +249,7 @@ textarea {
 .detail-hero {
   display: flex;
   justify-content: space-between;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 16px;
   margin-bottom: 16px;
 }
@@ -284,15 +284,16 @@ textarea {
 
 .spotlight-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 14px;
 }
 
 .compact-cards {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .spotlight-card {
+  min-width: 0;
   padding: 16px;
   border-radius: 18px;
   background: rgba(15, 33, 56, 0.04);
@@ -330,6 +331,11 @@ textarea {
   gap: 12px;
 }
 
+.spotlight-head > div,
+.detail-hero > div {
+  min-width: 0;
+}
+
 .spotlight-head strong {
   display: block;
   margin-bottom: 4px;
@@ -344,16 +350,17 @@ textarea {
 
 .split-layout {
   display: grid;
-  grid-template-columns: minmax(0, 360px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 340px) minmax(0, 1fr);
   gap: 16px;
+  align-items: start;
 }
 
 .connections-layout {
-  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
 }
 
 .tunnel-workspace {
-  grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 360px) minmax(0, 1fr);
   align-items: start;
 }
 
@@ -363,7 +370,7 @@ textarea {
 
 .detail-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
 }
 
@@ -373,7 +380,7 @@ textarea {
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 14px;
 }
 
@@ -396,6 +403,13 @@ textarea {
   border: 1px solid rgba(15, 33, 56, 0.14);
   padding: 11px 12px;
   background: #fff;
+  max-width: 100%;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
 }
 
 button {
@@ -419,6 +433,8 @@ button:disabled {
 }
 
 .table-wrap {
+  min-width: 0;
+  width: 100%;
   overflow-x: auto;
 }
 
@@ -467,6 +483,16 @@ th {
 
 .audit-pager {
   margin-top: 14px;
+}
+
+.workspace-panel,
+.subpanel,
+.detail-item,
+.muted-line,
+.muted,
+td {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .empty-state,
