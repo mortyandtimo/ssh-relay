@@ -333,3 +333,21 @@ code=200 total=0.040986
 
 - Current access token is a signed opaque payload rather than a full JWT stack, which is acceptable for the current self-hosted scope but still a lightweight implementation.
 - HTTPS and dedicated subdomain deployment still remain the next required hardening step before exposing the management plane more broadly.
+
+
+### Current Standby Pool Definition Note
+
+- The management UI currently shows live relay runtime values, so the displayed standby pool numbers are real runtime data, not placeholders.
+- As of the current cloud deploy, the standby pool is **not yet a fully elastic policy**.
+- The current `relay-tcp` implementation still effectively runs with a fixed per-pool window:
+  - `target = 8`
+  - `max = 8`
+- This is why the admin page currently shows standby pool upper bound `8` for the active reverse TCP tunnel.
+- Code-level source of truth for the current runtime:
+  - `standbyPoolTargetSize = 8`
+  - `standbyPoolMaxSize = 16`
+  - but pool construction is still using `newStandbyPool(key, standbyPoolTargetSize, standbyPoolTargetSize)` on the active route path, so live runtime currently behaves as fixed `8/8`.
+- Conclusion:
+  - current relay runtime summary is real
+  - current pool lifecycle is stabilized
+  - current pool policy is still fixed-window, not the final elastic design
