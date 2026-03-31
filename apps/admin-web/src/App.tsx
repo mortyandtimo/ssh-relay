@@ -102,7 +102,7 @@ export default function App() {
   const [relayRuntime, setRelayRuntime] = useState<RelayRuntimeSummary | null>(null);
   const [tunnelForm, setTunnelForm] = useState<TunnelForm>(initialTunnelForm);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
-  const [bootstrapForm, setBootstrapForm] = useState({ email: "", displayName: "管理员", password: "" });
+  const [bootstrapForm, setBootstrapForm] = useState({ email: "", displayName: "管理员", password: "", bootstrapSecret: "" });
   const [userForm, setUserForm] = useState({ email: "", displayName: "", password: "", role: "manager" as UserRole });
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -266,10 +266,12 @@ export default function App() {
     try {
       const payload = await requestJSON<{ user: UserSummary }>("/api/auth/bootstrap", {
         method: "POST",
-        body: JSON.stringify(bootstrapForm),
+        headers: { "X-Bootstrap-Secret": bootstrapForm.bootstrapSecret },
+        body: JSON.stringify({ email: bootstrapForm.email, displayName: bootstrapForm.displayName, password: bootstrapForm.password }),
       });
       setCurrentUser(payload.user);
       setBootstrapRequired(false);
+      setBootstrapForm({ email: "", displayName: "管理员", password: "", bootstrapSecret: "" });
       setMessage("管理员账户已初始化。");
       await refreshDashboard(false, payload.user);
     } catch (submitError) {
@@ -429,6 +431,7 @@ export default function App() {
             <label><span>邮箱</span><input value={bootstrapForm.email} onChange={(event) => setBootstrapForm((current) => ({ ...current, email: event.target.value }))} required /></label>
             <label><span>显示名称</span><input value={bootstrapForm.displayName} onChange={(event) => setBootstrapForm((current) => ({ ...current, displayName: event.target.value }))} required /></label>
             <label><span>密码</span><input type="password" value={bootstrapForm.password} onChange={(event) => setBootstrapForm((current) => ({ ...current, password: event.target.value }))} required /></label>
+            <label><span>Bootstrap Secret</span><input type="password" value={bootstrapForm.bootstrapSecret} onChange={(event) => setBootstrapForm((current) => ({ ...current, bootstrapSecret: event.target.value }))} required /></label>
             <button type="submit" disabled={busyAction === "bootstrap"}>{busyAction === "bootstrap" ? "初始化中..." : "创建管理员"}</button>
           </form>
         </section>

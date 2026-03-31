@@ -48,6 +48,7 @@ type Server struct {
 	refreshTokenTTL      time.Duration
 	adminBootstrapSecret string
 	allowedOrigins       map[string]struct{}
+	authCookiesSecure    bool
 }
 
 func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *Server {
@@ -64,6 +65,7 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 		refreshTokenTTL:      7 * 24 * time.Hour,
 		adminBootstrapSecret: strings.TrimSpace(os.Getenv("SERVER_API_ADMIN_BOOTSTRAP_SECRET")),
 		allowedOrigins:       parseAllowedOrigins(os.Getenv("SERVER_API_ALLOWED_ORIGINS")),
+		authCookiesSecure:    parseBoolEnv(os.Getenv("SERVER_API_AUTH_COOKIES_SECURE")),
 	}
 	s.routes()
 	return s
@@ -659,15 +661,15 @@ func (s *Server) writeAuthCookies(w http.ResponseWriter, sessionID, refreshToken
 	if err != nil {
 		return err
 	}
-	http.SetCookie(w, &http.Cookie{Name: accessCookieName, Value: accessToken, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: accessExpiry})
-	http.SetCookie(w, &http.Cookie{Name: refreshCookieName, Value: refreshToken, Path: "/api/auth", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: refreshExpiry})
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: sessionID, Path: "/api/auth", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: refreshExpiry})
+	http.SetCookie(w, &http.Cookie{Name: accessCookieName, Value: accessToken, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: accessExpiry, Secure: s.authCookiesSecure})
+	http.SetCookie(w, &http.Cookie{Name: refreshCookieName, Value: refreshToken, Path: "/api/auth", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: refreshExpiry, Secure: s.authCookiesSecure})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: sessionID, Path: "/api/auth", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: refreshExpiry, Secure: s.authCookiesSecure})
 	return nil
 }
 
 func (s *Server) clearAuthCookies(w http.ResponseWriter) {
 	for _, item := range []struct{ name, path string }{{accessCookieName, "/"}, {refreshCookieName, "/api/auth"}, {sessionCookieName, "/api/auth"}} {
-		http.SetCookie(w, &http.Cookie{Name: item.name, Value: "", Path: item.path, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(0, 0)})
+		http.SetCookie(w, &http.Cookie{Name: item.name, Value: "", Path: item.path, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(0, 0), Secure: s.authCookiesSecure})
 	}
 }
 
@@ -780,6 +782,15 @@ func clientIP(r *http.Request) string {
 		return strings.TrimSpace(parts[0])
 	}
 	return r.RemoteAddr
+}
+
+func parseBoolEnv(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func envOrDefault(key, fallback string) string {

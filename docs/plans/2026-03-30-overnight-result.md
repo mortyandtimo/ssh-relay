@@ -10,9 +10,9 @@
   - binaries under `/opt/cloud-relay-platform/bin`
 - Reverse TCP production path remains verified and unchanged at protocol level:
   - `82.156.236.104:10086 -> node-1774805183388699102 -> 127.0.0.1:16354`
-- Management console is now same-origin and served by `server-api` itself:
+- Management console is same-origin and served by `server-api` itself:
   - `http://82.156.236.104:7710/admin/`
-- Management authentication is now cookie-backed Web session auth with three roles:
+- Management authentication is cookie-backed Web session auth with three roles:
   - `admin`
   - `manager`
   - `user`
@@ -25,64 +25,91 @@
 ## Current Risk
 
 - Reverse TCP pool lifecycle is stabilized, but pool sizing policy is still fixed-window rather than fully elastic.
-- Access token implementation is currently a signed opaque payload, which is acceptable for the current self-hosted phase but still a lightweight session design.
+- Access token implementation is currently a signed opaque payload, acceptable for current self-hosted scope but still a lightweight session design.
 - HTTPS and dedicated subdomain deployment are still pending and remain the next hardening step before wider exposure.
-- Bootstrap endpoint security now depends on explicit `SERVER_API_ADMIN_BOOTSTRAP_SECRET`; missing or incorrect configuration will correctly block bootstrap.
-- CORS is no longer open by default; any future cross-origin development workflow must be added explicitly through allowlist configuration.
+- Bootstrap requires explicit secret distribution and manual operator knowledge during first install.
+- Current CORS policy is explicit allowlist based; any future cross-origin development flow must be configured deliberately.
 
 ## Latest Deployment Verification
 
-### Auth And Management Plane
+### Bootstrap And First Install Flow
 
-- `GET /api/auth/bootstrap-status` works on cloud and currently returns `required=false` after admin bootstrap.
-- Same-origin admin page is live:
-  - `GET http://82.156.236.104:7710/admin/ -> 200`
-- Same-origin static assets are live:
-  - `GET http://82.156.236.104:7710/admin/assets/... -> 200`
+- Current bootstrap secret is configured through:
+  - `SERVER_API_ADMIN_BOOTSTRAP_SECRET`
+- Current cloud value is set in `/etc/cloud-relay-platform/server-api.env`.
+- `admin-web` bootstrap page now includes a Bootstrap Secret input.
+- Current first-install flow is:
+  1. Open `http://82.156.236.104:7710/admin/`
+  2. If `bootstrap-status` returns `required=true`, fill:
+     - email
+     - display name
+     - password
+     - bootstrap secret
+  3. Submit bootstrap
+  4. On success, the page clears the bootstrap secret field and enters the logged-in management state
+- Runtime bootstrap validation rules are now:
+  - secret correct and bootstrap required -> `201`
+  - secret missing or wrong -> `401`
+  - secret correct but bootstrap already completed -> `409`
+
+### Session Cookies
+
+- Auth cookies now support configurable `Secure` behavior through:
+  - `SERVER_API_AUTH_COOKIES_SECURE`
+- Current cloud deployment keeps this disabled so existing HTTP deployment is not broken.
+- Future HTTPS deployment can enable it without code changes.
+
+### CORS
+
+- CORS is no longer open by default and does not reflect arbitrary origin.
+- Allowed origins are now configured through:
+  - `SERVER_API_ALLOWED_ORIGINS`
+- Current cloud allowlist is:
+  - `http://82.156.236.104:7710`
+  - `http://127.0.0.1:7710`
+- Same-origin `/admin` continues to work without permissive cross-origin behavior.
+- Non-allowlisted origin preflight no longer receives `Access-Control-Allow-Origin`.
+
+### Admin Web Session Behavior
+
 - Login issues Web session cookies:
   - `crp_access`
   - `crp_refresh`
   - `crp_session`
 - Management API without login returns `401`.
-- Admin session can access `/api/users`, `/api/nodes`, `/api/tunnels`, `/api/server/metrics`, `/api/relay/tcp/runtime`.
-- Manager/user role behavior is covered by local tests.
-- Admin web request layer now supports `401 -> POST /api/auth/refresh -> retry original request`; refresh failure returns the UI to login state.
-
-### Bootstrap Security
-
-- `/api/auth/bootstrap` is no longer meant to be publicly usable without bootstrap secret.
-- Expected behavior now:
-  - missing secret -> `401`
-  - wrong secret -> `401`
-  - correct secret -> bootstrap allowed only while bootstrap is still required
-- Current cloud state already has an initialized admin, so bootstrap now returns `required=false` from status and normal bootstrap retry returns conflict after initialization.
-
-### CORS
-
-- CORS is no longer raw-reflection for arbitrary origin.
-- Allowed origins are now driven by explicit allowlist configuration via `SERVER_API_ALLOWED_ORIGINS`.
-- Same-origin `/admin` continues to work without depending on permissive cross-origin behavior.
+- `admin-web` request layer now supports:
+  - request returns `401`
+  - frontend automatically `POST /api/auth/refresh`
+  - refresh succeeds -> original request is retried automatically
+  - refresh fails -> UI returns to login state
+- Existing tunnel form state logic remains intact and is not overwritten by the refresh path.
 
 ### Reverse TCP Runtime
 
-- Reverse TCP public path still succeeds after the auth and admin changes:
+- Reverse TCP public path still succeeds after these auth/initialization changes:
 
 ```text
-code=200 total=0.040986
+code=200 total=0.042746
 ```
 
 - Live relay runtime summary remains available through authenticated management API and still reports real standby values.
 - Current admin-page standby pool values are live runtime data and currently reflect the fixed `8/8` window for the active tunnel.
 
-### Local Validation Commands Used For Current Round
+### Local Validation Commands Used For This Round
 
 ```bash
-env -u GOOS -u GOARCH GOCACHE=/tmp/cloud-relay-gocache-final go test ./apps/server-api/internal/api ./apps/server-api/internal/store ./apps/relay-tcp/internal/runtime
+env -u GOOS -u GOARCH GOCACHE=/tmp/cloud-relay-gocache-round2c go test ./apps/server-api/internal/api ./apps/server-api/internal/store ./apps/relay-tcp/internal/runtime
 npm --prefix apps/admin-web run build
-psql postgres://postgres:wdblsw12138@127.0.0.1:5432/cloud_relay?sslmode=disable -f db/schema.sql
-curl http://127.0.0.1:7710/api/auth/bootstrap-status
-curl http://127.0.0.1:7710/admin/
-curl http://127.0.0.1:7710/admin/assets/index-DH-GNW08.js
+```
+
+### Cloud Validation Commands Used For This Round
+
+```bash
+curl -s -o /tmp/bootstrap_no_secret.json -w '%{http_code}' -H 'Content-Type: application/json' -d '{...}' http://127.0.0.1:7710/api/auth/bootstrap
+cat /tmp/bootstrap_no_secret.json
+curl -i -s -X OPTIONS -H 'Origin: http://evil.example.com' -H 'Access-Control-Request-Method: POST' http://127.0.0.1:7710/api/auth/login
+curl -i -s -X OPTIONS -H 'Origin: http://82.156.236.104:7710' -H 'Access-Control-Request-Method: POST' http://127.0.0.1:7710/api/auth/login
+curl -s http://127.0.0.1:7710/api/auth/bootstrap-status
 curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
 ' http://82.156.236.104:10086
 ```
