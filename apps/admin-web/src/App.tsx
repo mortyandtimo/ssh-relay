@@ -16,6 +16,7 @@ type NodeSummary = {
   capabilities: NodeCapabilities;
   activeTunnels: number;
   lastSeenAt: string;
+  metadata?: Record<string, string>;
 };
 
 type TunnelSpec = {
@@ -61,6 +62,18 @@ type TunnelForm = {
   targetHost: string;
   targetPort: string;
   publicPort: string;
+};
+
+type TunnelEditForm = {
+  id: string;
+  nodeId: string;
+  name: string;
+  targetHost: string;
+  targetPort: string;
+  publicPort: string;
+  status: string;
+  type: string;
+  transportPolicy: string;
 };
 
 type UserRole = "admin" | "manager" | "user";
@@ -131,7 +144,10 @@ export default function App() {
   const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
   const [currentUser, setCurrentUser] = useState<UserSummary | null>(null);
   const [nodes, setNodes] = useState<NodeSummary[]>([]);
+  const [selectedNodeID, setSelectedNodeID] = useState<string | null>(null);
   const [tunnels, setTunnels] = useState<TunnelSpec[]>([]);
+  const [editingTunnelID, setEditingTunnelID] = useState<string | null>(null);
+  const [tunnelEditForm, setTunnelEditForm] = useState<TunnelEditForm | null>(null);
   const [users, setUsers] = useState<UserSummary[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
   const [auditTotal, setAuditTotal] = useState(0);
@@ -182,6 +198,31 @@ export default function App() {
   useEffect(() => {
     auditFilterRef.current = auditFilter;
   }, [auditFilter]);
+
+  useEffect(() => {
+    if (nodes.length === 0) {
+      setSelectedNodeID(null);
+      return;
+    }
+    setSelectedNodeID((current) => {
+      if (current && nodes.some((node) => node.nodeId === current)) {
+        return current;
+      }
+      return nodes[0].nodeId;
+    });
+  }, [nodes]);
+
+  useEffect(() => {
+    if (tunnels.length === 0) {
+      setEditingTunnelID(null);
+      setTunnelEditForm(null);
+      return;
+    }
+    if (editingTunnelID && !tunnels.some((tunnel) => tunnel.id === editingTunnelID)) {
+      setEditingTunnelID(null);
+      setTunnelEditForm(null);
+    }
+  }, [editingTunnelID, tunnels]);
 
   useEffect(() => {
     if (!currentUser) {
@@ -343,7 +384,10 @@ export default function App() {
   function resetConsoleState() {
     setCurrentUser(null);
     setNodes([]);
+    setSelectedNodeID(null);
     setTunnels([]);
+    setEditingTunnelID(null);
+    setTunnelEditForm(null);
     setUsers([]);
     setAuditLogs([]);
     setAuditTotal(0);
@@ -351,6 +395,16 @@ export default function App() {
     setRelayRuntime(null);
     setTunnelForm(initialTunnelForm);
     setHasInitializedNodeId(false);
+  }
+
+  function beginTunnelEdit(tunnel: TunnelSpec) {
+    setEditingTunnelID(tunnel.id);
+    setTunnelEditForm(toTunnelEditForm(tunnel));
+  }
+
+  function clearTunnelEdit() {
+    setEditingTunnelID(null);
+    setTunnelEditForm(null);
   }
 
   async function submitBootstrap(event: FormEvent<HTMLFormElement>) {
@@ -445,6 +499,38 @@ export default function App() {
     }
   }
 
+  async function submitTunnelEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!tunnelEditForm) {
+      return;
+    }
+    const actionKey = "edit-tunnel:" + tunnelEditForm.id;
+    setBusyAction(actionKey);
+    setError("");
+    setMessage("");
+    try {
+      await requestJSON<TunnelSpec>("/api/tunnels/" + tunnelEditForm.id, {
+        method: "PUT",
+        body: JSON.stringify({
+          nodeId: tunnelEditForm.nodeId,
+          name: tunnelEditForm.name,
+          type: tunnelEditForm.type,
+          transportPolicy: tunnelEditForm.transportPolicy,
+          targetHost: tunnelEditForm.targetHost,
+          targetPort: Number(tunnelEditForm.targetPort),
+          publicPort: Number(tunnelEditForm.publicPort),
+          status: tunnelEditForm.status,
+        }),
+      });
+      setMessage("隧道已更新。");
+      await refreshDashboard(false, currentUser, false, auditFilterRef.current);
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "更新隧道失败");
+    } finally {
+      setBusyAction("");
+    }
+  }
+
   async function updateTunnelStatus(tunnel: TunnelSpec, status: "active" | "paused") {
     const actionKey = tunnel.id + ":" + status;
     setBusyAction(actionKey);
@@ -480,6 +566,9 @@ export default function App() {
     setMessage("");
     try {
       await requestJSON<{ status: string }>("/api/tunnels/" + tunnel.id, { method: "DELETE" });
+      if (editingTunnelID === tunnel.id) {
+        clearTunnelEdit();
+      }
       setMessage("隧道已删除。");
       await refreshDashboard(false, currentUser, false, auditFilterRef.current);
     } catch (actionError) {
@@ -517,6 +606,14 @@ export default function App() {
     void refreshDashboard(false, currentUser, false, nextFilter);
   }
 
+  function clearAuditFilters() {
+    const nextFilter = { ...initialAuditFilter };
+    setAuditFilter(nextFilter);
+    auditFilterRef.current = nextFilter;
+    setExpandedAuditID(null);
+    void refreshDashboard(false, currentUser, false, nextFilter);
+  }
+
   function goToAuditPage(nextOffset: number) {
     const nextFilter = { ...auditFilter, offset: nextOffset };
     setAuditFilter(nextFilter);
@@ -533,6 +630,7 @@ export default function App() {
       createdAt: "",
       updatedAt: "",
     };
+  const selectedNode = selectedNodeID ? nodes.find((node) => node.nodeId === selectedNodeID) ?? null : null;
   const onlineNodes = nodes.filter((node) => node.status === "online").length;
   const activeTunnels = tunnels.filter((tunnel) => tunnel.status === "active").length;
   const canOperate = activeUser.role !== "user";
@@ -684,70 +782,127 @@ export default function App() {
             </div>
 
             {connectionView === "nodes" ? (
-              <>
-                <div className="spotlight-grid">
-                  {nodes.length === 0 ? <EmptyState title="暂无节点" body="当前没有可展示的节点状态。" /> : nodes.map((node) => (
-                    <article key={node.nodeId} className="spotlight-card">
-                      <div className="spotlight-head">
-                        <div>
-                          <strong>{node.nodeName}</strong>
-                          <span className="muted-line">{node.nodeId}</span>
+              <div className="split-layout connections-layout">
+                <section className="subpanel workspace-column">
+                  <h3>节点列表</h3>
+                  <div className="spotlight-grid">
+                    {nodes.length === 0 ? <EmptyState title="暂无节点" body="当前没有可展示的节点状态。" /> : nodes.map((node) => (
+                      <article key={node.nodeId} className={selectedNodeID === node.nodeId ? "spotlight-card interactive-card selected-card" : "spotlight-card interactive-card"} onClick={() => setSelectedNodeID(node.nodeId)}>
+                        <div className="spotlight-head">
+                          <div>
+                            <strong>{node.nodeName}</strong>
+                            <span className="muted-line">{node.nodeId}</span>
+                          </div>
+                          <span className={statusPillClass(node.status)}>{node.status}</span>
                         </div>
-                        <span className={statusPillClass(node.status)}>{node.status}</span>
+                        <div className="spotlight-meta">
+                          <span>Agent {node.agentVersion}</span>
+                          <span>{node.activeTunnels} 条隧道</span>
+                        </div>
+                        <div className="capability-row">{capabilitySummary(node.capabilities)}</div>
+                        <div className="muted-line">主机名：{nodeMeta(node, "hostname", node.nodeName)}</div>
+                        <div className="muted-line">最后心跳：{formatDate(node.lastSeenAt)}</div>
+                      </article>
+                    ))}
+                  </div>
+                  <div className="table-wrap compact-table">
+                    <table>
+                      <thead><tr><th>节点</th><th>状态</th><th>Agent</th><th>隧道数</th><th>能力</th><th>最后心跳</th></tr></thead>
+                      <tbody>
+                        {nodes.length === 0 ? <tr><td colSpan={6}>暂无节点。</td></tr> : nodes.map((node) => (
+                          <tr key={node.nodeId} className={selectedNodeID === node.nodeId ? "clickable-row selected-row" : "clickable-row"} onClick={() => setSelectedNodeID(node.nodeId)}>
+                            <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div></td>
+                            <td><span className={statusPillClass(node.status)}>{node.status}</span></td>
+                            <td>{node.agentVersion}</td>
+                            <td>{node.activeTunnels}</td>
+                            <td>{capabilitySummary(node.capabilities)}</td>
+                            <td>{formatDate(node.lastSeenAt)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section className="subpanel detail-panel">
+                  <h3>节点详情</h3>
+                  {selectedNode ? (
+                    <>
+                      <div className="detail-hero">
+                        <div>
+                          <strong>{selectedNode.nodeName}</strong>
+                          <span className="muted-line">{selectedNode.nodeId}</span>
+                        </div>
+                        <span className={statusPillClass(selectedNode.status)}>{selectedNode.status}</span>
                       </div>
-                      <div className="spotlight-meta">
-                        <span>Agent {node.agentVersion}</span>
-                        <span>{node.activeTunnels} 条隧道</span>
+                      <div className="detail-grid">
+                        <DetailItem label="nodeId" value={selectedNode.nodeId} />
+                        <DetailItem label="nodeName" value={selectedNode.nodeName} />
+                        <DetailItem label="hostname" value={nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} />
+                        <DetailItem label="os" value={nodeMeta(selectedNode, "os")} />
+                        <DetailItem label="arch" value={nodeMeta(selectedNode, "arch")} />
+                        <DetailItem label="capabilities" value={capabilitySummary(selectedNode.capabilities)} />
+                        <DetailItem label="lastSeenAt" value={formatDate(selectedNode.lastSeenAt)} />
+                        <DetailItem label="activeTunnels" value={String(selectedNode.activeTunnels)} />
                       </div>
-                      <div className="capability-row">{capabilitySummary(node.capabilities)}</div>
-                      <div className="muted-line">最后心跳：{formatDate(node.lastSeenAt)}</div>
-                    </article>
-                  ))}
-                </div>
-                <div className="table-wrap compact-table">
-                  <table>
-                    <thead><tr><th>节点</th><th>状态</th><th>Agent</th><th>隧道数</th><th>能力</th><th>最后心跳</th></tr></thead>
-                    <tbody>
-                      {nodes.length === 0 ? <tr><td colSpan={6}>暂无节点。</td></tr> : nodes.map((node) => (
-                        <tr key={node.nodeId}>
-                          <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div></td>
-                          <td><span className={statusPillClass(node.status)}>{node.status}</span></td>
-                          <td>{node.agentVersion}</td>
-                          <td>{node.activeTunnels}</td>
-                          <td>{capabilitySummary(node.capabilities)}</td>
-                          <td>{formatDate(node.lastSeenAt)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
+                    </>
+                  ) : <EmptyState title="未选择节点" body="点击节点卡片或表格行后，在这里查看详细信息。" />}
+                </section>
+              </div>
             ) : (
               <>
-                <div className="split-layout">
-                  <section className="subpanel form-panel">
-                    <h3>创建隧道</h3>
-                    <form className="form-grid" onSubmit={createTunnel}>
-                      <label>
-                        <span>节点</span>
-                        <select value={tunnelForm.nodeId} onChange={(event) => { setTunnelForm((current) => ({ ...current, nodeId: event.target.value })); setHasInitializedNodeId(true); }} required>
-                          <option value="">选择节点</option>
-                          {nodes.map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
-                        </select>
-                      </label>
-                      <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
-                      <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required /></label>
-                      <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required /></label>
-                      <label><span>公网端口</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
-                      <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
-                    </form>
-                  </section>
+                <div className="split-layout tunnel-workspace">
+                  <div className="workspace-column panel-stack">
+                    <section className="subpanel form-panel">
+                      <h3>创建隧道</h3>
+                      <form className="form-grid" onSubmit={createTunnel}>
+                        <label>
+                          <span>节点</span>
+                          <select value={tunnelForm.nodeId} onChange={(event) => { setTunnelForm((current) => ({ ...current, nodeId: event.target.value })); setHasInitializedNodeId(true); }} required>
+                            <option value="">选择节点</option>
+                            {nodes.map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
+                          </select>
+                        </label>
+                        <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
+                        <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required /></label>
+                        <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required /></label>
+                        <label><span>公网端口</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
+                        <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
+                      </form>
+                    </section>
+
+                    <section className="subpanel form-panel">
+                      <div className="section-head compact-head">
+                        <div>
+                          <p className="eyebrow">Edit</p>
+                          <h3>编辑隧道</h3>
+                        </div>
+                        {tunnelEditForm ? <span className="muted-line">当前编辑 {tunnelEditForm.id}</span> : null}
+                      </div>
+                      {tunnelEditForm ? (
+                        <form className="form-grid" onSubmit={submitTunnelEdit}>
+                          <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
+                          <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required /></label>
+                          <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required /></label>
+                          <label><span>公网端口</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
+                          <div className="detail-grid readonly-grid">
+                            <DetailItem label="nodeId" value={tunnelEditForm.nodeId} />
+                            <DetailItem label="status" value={tunnelEditForm.status} />
+                          </div>
+                          <div className="form-actions">
+                            <button type="submit" disabled={busyAction === "edit-tunnel:" + tunnelEditForm.id}>{busyAction === "edit-tunnel:" + tunnelEditForm.id ? "保存中..." : "保存修改"}</button>
+                            <button type="button" className="secondary" onClick={clearTunnelEdit}>取消编辑</button>
+                          </div>
+                        </form>
+                      ) : <EmptyState title="尚未选择隧道" body="点击右侧隧道卡片或表格中的编辑按钮后，在这里修改目标映射。" />}
+                    </section>
+                  </div>
 
                   <section className="subpanel">
                     <h3>重点隧道</h3>
                     <div className="spotlight-grid compact-cards">
                       {tunnels.length === 0 ? <EmptyState title="暂无隧道" body="创建后会在这里优先展示公网入口和目标映射。" /> : tunnels.map((tunnel) => (
-                        <article key={tunnel.id} className="spotlight-card tunnel-card">
+                        <article key={tunnel.id} className={editingTunnelID === tunnel.id ? "spotlight-card tunnel-card interactive-card selected-card" : "spotlight-card tunnel-card interactive-card"} onClick={() => beginTunnelEdit(tunnel)}>
                           <div className="spotlight-head">
                             <div>
                               <strong>{tunnel.name}</strong>
@@ -769,7 +924,7 @@ export default function App() {
                     <thead><tr><th>名称</th><th>节点</th><th>状态</th><th>公网</th><th>目标</th><th>操作</th></tr></thead>
                     <tbody>
                       {tunnels.length === 0 ? <tr><td colSpan={6}>暂无隧道。</td></tr> : tunnels.map((tunnel) => (
-                        <tr key={tunnel.id}>
+                        <tr key={tunnel.id} className={editingTunnelID === tunnel.id ? "selected-row" : undefined}>
                           <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
                           <td>{tunnel.nodeId}</td>
                           <td><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span></td>
@@ -777,6 +932,7 @@ export default function App() {
                           <td>{tunnel.targetHost}:{tunnel.targetPort}</td>
                           <td>
                             <div className="actions-row">
+                              <button type="button" className="secondary" onClick={() => beginTunnelEdit(tunnel)}>编辑</button>
                               <button type="button" disabled={busyAction === tunnel.id + ":active" || tunnel.status === "active"} onClick={() => void updateTunnelStatus(tunnel, "active")}>启用</button>
                               <button type="button" disabled={busyAction === tunnel.id + ":paused" || tunnel.status === "paused"} onClick={() => void updateTunnelStatus(tunnel, "paused")}>暂停</button>
                               <button type="button" className="danger" disabled={busyAction === tunnel.id + ":delete"} onClick={() => void deleteTunnel(tunnel)}>删除</button>
@@ -811,7 +967,11 @@ export default function App() {
                 <label><span>Actor ID</span><input value={auditFilter.actorID} onChange={(event) => setAuditFilter((current) => ({ ...current, actorID: event.target.value }))} /></label>
                 <label><span>开始时间</span><input type="datetime-local" value={auditFilter.startAt} onChange={(event) => setAuditFilter((current) => ({ ...current, startAt: event.target.value }))} /></label>
                 <label><span>结束时间</span><input type="datetime-local" value={auditFilter.endAt} onChange={(event) => setAuditFilter((current) => ({ ...current, endAt: event.target.value }))} /></label>
-                <button type="submit">应用筛选</button>
+                <div className="form-actions">
+                  <button type="submit">应用筛选</button>
+                  <button type="button" className="secondary" onClick={clearAuditFilters}>清空筛选</button>
+                  <span className="inline-note">清空后回到第一页，自动刷新继续沿用当前筛选。</span>
+                </div>
               </form>
             </section>
 
@@ -826,7 +986,7 @@ export default function App() {
                   <tbody>
                     {auditLogs.length === 0 ? <tr><td colSpan={5}>暂无审计日志。</td></tr> : auditLogs.map((entry) => (
                       <Fragment key={entry.id}>
-                        <tr className="audit-row" onClick={() => setExpandedAuditID((current) => current === entry.id ? null : entry.id)}>
+                        <tr className={expandedAuditID === entry.id ? "audit-row selected-row" : "audit-row"} onClick={() => setExpandedAuditID((current) => current === entry.id ? null : entry.id)}>
                           <td>{formatDate(entry.createdAt)}</td>
                           <td>{entry.actorType}{entry.actorId ? ":" + entry.actorId : ""}</td>
                           <td><strong>{entry.action}</strong></td>
@@ -919,6 +1079,15 @@ function MiniStat({ label, value }: { label: string; value: string }) {
   );
 }
 
+function DetailItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="detail-item">
+      <span>{label}</span>
+      <strong>{value || "-"}</strong>
+    </div>
+  );
+}
+
 function EmptyState({ title, body }: { title: string; body: string }) {
   return (
     <div className="empty-state">
@@ -953,6 +1122,32 @@ function roleClass(role: UserRole) {
   }
 }
 
+function toTunnelEditForm(tunnel: TunnelSpec): TunnelEditForm {
+  return {
+    id: tunnel.id,
+    nodeId: tunnel.nodeId,
+    name: tunnel.name,
+    targetHost: tunnel.targetHost,
+    targetPort: String(tunnel.targetPort),
+    publicPort: String(tunnel.publicPort),
+    status: tunnel.status,
+    type: tunnel.type,
+    transportPolicy: tunnel.transportPolicy,
+  };
+}
+
+function nodeMeta(node: NodeSummary, key: string, fallback = "-") {
+  const value = node.metadata?.[key];
+  return value && value.trim() ? value : fallback;
+}
+
 function formatDate(value: string) {
-  return new Date(value).toLocaleString();
+  if (!value) {
+    return "-";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString();
 }

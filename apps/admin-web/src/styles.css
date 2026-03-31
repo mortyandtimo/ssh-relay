@@ -42,7 +42,9 @@ textarea {
   min-width: 0;
 }
 
-.workspace-main {
+.workspace-main,
+.workspace-column,
+.panel-stack {
   display: grid;
   gap: 20px;
 }
@@ -132,7 +134,8 @@ textarea {
 }
 
 .mini-stat,
-.signal-card {
+.signal-card,
+.detail-item {
   padding: 14px;
   border-radius: 16px;
   background: rgba(15, 33, 56, 0.05);
@@ -140,7 +143,8 @@ textarea {
 
 .mini-stat span,
 .signal-card span,
-.metric-card span {
+.metric-card span,
+.detail-item span {
   display: block;
   font-size: 12px;
   color: #6f8096;
@@ -150,6 +154,12 @@ textarea {
 .mini-stat strong,
 .signal-card strong {
   font-size: 18px;
+}
+
+.detail-item strong {
+  font-size: 14px;
+  color: #1c3049;
+  word-break: break-word;
 }
 
 .status-pill {
@@ -235,7 +245,8 @@ textarea {
 }
 
 .section-head,
-.audit-header-row {
+.audit-header-row,
+.detail-hero {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
@@ -245,19 +256,28 @@ textarea {
 
 .section-head h2,
 .audit-header-row h3,
-.subpanel h3 {
+.subpanel h3,
+.detail-hero strong {
   margin: 0;
 }
 
-.inline-switches {
+.compact-head {
+  margin-bottom: 14px;
+}
+
+.inline-switches,
+.actions-row,
+.form-actions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  align-items: center;
 }
 
 .muted-line,
 .audit-page-status,
-.inline-note {
+.inline-note,
+.muted {
   color: #71839a;
   font-size: 13px;
 }
@@ -278,6 +298,29 @@ textarea {
   background: rgba(15, 33, 56, 0.04);
   display: grid;
   gap: 12px;
+}
+
+.interactive-card,
+.clickable-row {
+  cursor: pointer;
+}
+
+.interactive-card:hover {
+  background: rgba(15, 33, 56, 0.08);
+}
+
+.clickable-row:hover td,
+.audit-row:hover {
+  background: rgba(15, 33, 56, 0.05);
+}
+
+.selected-card {
+  background: rgba(26, 70, 136, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(26, 70, 136, 0.18);
+}
+
+.selected-row td {
+  background: rgba(26, 70, 136, 0.12);
 }
 
 .spotlight-head {
@@ -305,6 +348,29 @@ textarea {
   gap: 16px;
 }
 
+.connections-layout {
+  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
+}
+
+.tunnel-workspace {
+  grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.detail-panel {
+  align-self: start;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.readonly-grid {
+  grid-column: 1 / -1;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -316,6 +382,10 @@ textarea {
   gap: 8px;
   font-size: 13px;
   color: #34465f;
+}
+
+.form-actions {
+  grid-column: 1 / -1;
 }
 
 input,
@@ -339,6 +409,10 @@ button.secondary {
   color: #162a45;
 }
 
+button.danger {
+  background: #a53c28;
+}
+
 button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -354,7 +428,7 @@ table {
 }
 
 th,
- td {
+td {
   padding: 14px 12px;
   text-align: left;
   border-bottom: 1px solid rgba(15, 33, 56, 0.08);
@@ -380,10 +454,6 @@ th {
   cursor: pointer;
 }
 
-.audit-row:hover {
-  background: rgba(15, 33, 56, 0.03);
-}
-
 .payload-view {
   margin: 0;
   padding: 14px;
@@ -397,7 +467,6 @@ th {
 
 .audit-pager {
   margin-top: 14px;
-  align-items: center;
 }
 
 .empty-state,
@@ -448,7 +517,10 @@ th {
   .spotlight-grid,
   .compact-cards,
   .split-layout,
-  .form-grid {
+  .connections-layout,
+  .tunnel-workspace,
+  .form-grid,
+  .detail-grid {
     grid-template-columns: 1fr;
   }
 }
