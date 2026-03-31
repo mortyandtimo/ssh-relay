@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 type NodeCapabilities = {
   tcpRelay: boolean;
@@ -108,6 +108,7 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [busyAction, setBusyAction] = useState("");
   const [hasInitializedNodeId, setHasInitializedNodeId] = useState(false);
+  const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -155,7 +156,7 @@ export default function App() {
     };
   }, [currentUser, hasInitializedNodeId]);
 
-  async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
+  async function requestJSON<T>(path: string, init?: RequestInit, allowRefresh = true): Promise<T> {
     const response = await fetch(apiBaseUrl + path, {
       credentials: "include",
       ...init,
@@ -166,10 +167,51 @@ export default function App() {
       },
     });
     const payload = await response.json().catch(() => null);
+    if (response.status === 401 && allowRefresh && path !== "/api/auth/login" && path !== "/api/auth/bootstrap" && path !== "/api/auth/refresh" && path !== "/api/auth/bootstrap-status") {
+      const refreshed = await refreshAuthSession();
+      if (refreshed) {
+        return requestJSON<T>(path, init, false);
+      }
+      setCurrentUser(null);
+      setNodes([]);
+      setTunnels([]);
+      setUsers([]);
+      setMetrics(null);
+      setRelayRuntime(null);
+      setError("登录已失效，请重新登录。");
+      throw new Error("登录已失效，请重新登录。");
+    }
     if (!response.ok) {
       throw new Error(payload && typeof payload.error === "string" ? payload.error : "请求失败");
     }
     return payload as T;
+  }
+
+  async function refreshAuthSession(): Promise<boolean> {
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current;
+    }
+    const task = (async () => {
+      const response = await fetch(apiBaseUrl + "/api/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        return false;
+      }
+      const payload = await response.json().catch(() => null) as { user?: UserSummary } | null;
+      if (payload?.user) {
+        setCurrentUser(payload.user);
+      }
+      return true;
+    })();
+    refreshInFlightRef.current = task;
+    try {
+      return await task;
+    } finally {
+      refreshInFlightRef.current = null;
+    }
   }
 
   async function refreshDashboard(showNotice: boolean, user = currentUser, cancelled = false) {

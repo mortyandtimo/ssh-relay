@@ -15,6 +15,7 @@ import (
 
 func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
 	adminCookies := bootstrapAdminAndCollectCookies(t, server)
 
 	registerBody, err := json.Marshal(types.NodeRegisterRequest{
@@ -161,6 +162,7 @@ func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 
 func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
 	adminCookies := bootstrapAdminAndCollectCookies(t, server)
 
 	registerBody, err := json.Marshal(types.NodeRegisterRequest{
@@ -296,6 +298,7 @@ func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 
 	backend := store.NewInMemoryStore()
 	server := NewServer("test", backend, runtimeUpstream.URL)
+	server.adminBootstrapSecret = "bootstrap-secret"
 
 	statusReq := httptest.NewRequest(http.MethodGet, "/api/auth/bootstrap-status", nil)
 	statusRes := httptest.NewRecorder()
@@ -313,6 +316,7 @@ func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	bootstrapReq := httptest.NewRequest(http.MethodPost, "/api/auth/bootstrap", bytes.NewReader(bootstrapBody))
+	bootstrapReq.Header.Set("X-Bootstrap-Secret", "bootstrap-secret")
 	bootstrapRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(bootstrapRes, bootstrapReq)
 	if bootstrapRes.Code != http.StatusCreated {
@@ -524,10 +528,87 @@ func bootstrapAdminAndCollectCookies(t *testing.T, server *Server) []*http.Cooki
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/bootstrap", bytes.NewReader(body))
+	req.Header.Set("X-Bootstrap-Secret", "bootstrap-secret")
 	res := httptest.NewRecorder()
 	server.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusCreated {
 		t.Fatalf("expected bootstrap status 201, got %d", res.Code)
 	}
 	return res.Result().Cookies()
+}
+
+func TestBootstrapRequiresSecretWhenConfigured(t *testing.T) {
+	backend := store.NewInMemoryStore()
+	server := NewServer("test", backend, "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+
+	body, err := json.Marshal(types.BootstrapAdminRequest{Email: "admin@example.com", DisplayName: "管理员", Password: "AdminPass#2026"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	missingReq := httptest.NewRequest(http.MethodPost, "/api/auth/bootstrap", bytes.NewReader(body))
+	missingRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(missingRes, missingReq)
+	if missingRes.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing secret bootstrap 401, got %d", missingRes.Code)
+	}
+
+	invalidReq := httptest.NewRequest(http.MethodPost, "/api/auth/bootstrap", bytes.NewReader(body))
+	invalidReq.Header.Set("X-Bootstrap-Secret", "wrong")
+	invalidRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(invalidRes, invalidReq)
+	if invalidRes.Code != http.StatusUnauthorized {
+		t.Fatalf("expected invalid secret bootstrap 401, got %d", invalidRes.Code)
+	}
+
+	okReq := httptest.NewRequest(http.MethodPost, "/api/auth/bootstrap", bytes.NewReader(body))
+	okReq.Header.Set("X-Bootstrap-Secret", "bootstrap-secret")
+	okRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(okRes, okReq)
+	if okRes.Code != http.StatusCreated {
+		t.Fatalf("expected bootstrap with secret 201, got %d", okRes.Code)
+	}
+}
+
+func TestBootstrapRejectedWhenSecretNotConfigured(t *testing.T) {
+	backend := store.NewInMemoryStore()
+	server := NewServer("test", backend, "")
+	server.adminBootstrapSecret = ""
+
+	body, err := json.Marshal(types.BootstrapAdminRequest{Email: "admin@example.com", DisplayName: "管理员", Password: "AdminPass#2026"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/bootstrap", bytes.NewReader(body))
+	req.Header.Set("X-Bootstrap-Secret", "bootstrap-secret")
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("expected bootstrap disabled 401, got %d", res.Code)
+	}
+}
+
+func TestCORSAllowsOnlyConfiguredOrigins(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.allowedOrigins = map[string]struct{}{
+		"http://127.0.0.1:7710": {},
+		"http://localhost:5173": {},
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodOptions, "/api/auth/login", nil)
+	allowedReq.Header.Set("Origin", "http://127.0.0.1:7710")
+	allowedRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(allowedRes, allowedReq)
+	if allowedRes.Header().Get("Access-Control-Allow-Origin") != "http://127.0.0.1:7710" {
+		t.Fatalf("expected allowed origin reflected, got %q", allowedRes.Header().Get("Access-Control-Allow-Origin"))
+	}
+
+	rejectedReq := httptest.NewRequest(http.MethodOptions, "/api/auth/login", nil)
+	rejectedReq.Header.Set("Origin", "http://evil.example.com")
+	rejectedRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rejectedRes, rejectedReq)
+	if rejectedRes.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("expected rejected origin to get no allow-origin header, got %q", rejectedRes.Header().Get("Access-Control-Allow-Origin"))
+	}
 }

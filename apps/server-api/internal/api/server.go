@@ -47,6 +47,7 @@ type Server struct {
 	accessTokenTTL       time.Duration
 	refreshTokenTTL      time.Duration
 	adminBootstrapSecret string
+	allowedOrigins       map[string]struct{}
 }
 
 func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *Server {
@@ -62,13 +63,14 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 		accessTokenTTL:       15 * time.Minute,
 		refreshTokenTTL:      7 * 24 * time.Hour,
 		adminBootstrapSecret: strings.TrimSpace(os.Getenv("SERVER_API_ADMIN_BOOTSTRAP_SECRET")),
+		allowedOrigins:       parseAllowedOrigins(os.Getenv("SERVER_API_ALLOWED_ORIGINS")),
 	}
 	s.routes()
 	return s
 }
 
 func (s *Server) Handler() http.Handler {
-	return withCORS(s.mux)
+	return s.withCORS(s.mux)
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -206,6 +208,10 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w, http.MethodPost)
 		return
 	}
+	if err := s.authorizeBootstrap(r); err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
 	required, err := s.store.BootstrapStatus(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -230,6 +236,20 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, types.AuthUserResponse{User: user})
+}
+
+func (s *Server) authorizeBootstrap(r *http.Request) error {
+	if s.adminBootstrapSecret == "" {
+		return errors.New("bootstrap is disabled until SERVER_API_ADMIN_BOOTSTRAP_SECRET is configured")
+	}
+	secret := strings.TrimSpace(r.Header.Get("X-Bootstrap-Secret"))
+	if secret == "" {
+		secret = strings.TrimSpace(r.URL.Query().Get("bootstrapSecret"))
+	}
+	if secret == "" || secret != s.adminBootstrapSecret {
+		return errors.New("invalid bootstrap secret")
+	}
+	return nil
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -785,16 +805,42 @@ func writeMethodNotAllowed(w http.ResponseWriter, method string) {
 	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
-func withCORS(next http.Handler) http.Handler {
+func (s *Server) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" && s.isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Bootstrap-Secret")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) isAllowedOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	if _, ok := s.allowedOrigins[origin]; ok {
+		return true
+	}
+	return false
+}
+
+func parseAllowedOrigins(raw string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, item := range strings.Split(raw, ",") {
+		origin := strings.TrimSpace(item)
+		if origin == "" {
+			continue
+		}
+		out[origin] = struct{}{}
+	}
+	return out
 }
