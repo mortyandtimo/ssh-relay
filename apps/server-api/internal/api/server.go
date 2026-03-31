@@ -96,6 +96,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/users", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleUsers)))
 	s.mux.Handle("/api/users/", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleUserByID)))
 	s.mux.Handle("/api/nodes", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodes)))
+	s.mux.Handle("/api/nodes/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodeByID)))
 	s.mux.Handle("/api/tunnels", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnels)))
 	s.mux.Handle("/api/tunnels/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelByID)))
 	s.mux.Handle("/api/server/metrics", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleServerMetrics)))
@@ -423,16 +424,78 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.store.ListNodes(r.Context(), store.NodeFilter{
+			NodeRole:    strings.TrimSpace(r.URL.Query().Get("nodeRole")),
+			Environment: strings.TrimSpace(r.URL.Query().Get("environment")),
+			TrustLevel:  strings.TrimSpace(r.URL.Query().Get("trustLevel")),
+			Owner:       strings.TrimSpace(r.URL.Query().Get("owner")),
+			Tag:         strings.TrimSpace(r.URL.Query().Get("tag")),
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	default:
 		writeMethodNotAllowed(w, http.MethodGet)
+	}
+}
+
+func (s *Server) handleNodeByID(w http.ResponseWriter, r *http.Request) {
+	nodeID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/nodes/"))
+	if nodeID == "" {
+		writeError(w, http.StatusBadRequest, "node id is required")
 		return
 	}
-	items, err := s.store.ListNodes(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	switch r.Method {
+	case http.MethodGet:
+		node, err := s.store.GetNode(r.Context(), nodeID)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, node)
+	case http.MethodPut:
+		var req types.UpdateNodeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid node payload")
+			return
+		}
+		node, err := s.store.UpdateNode(r.Context(), store.UpdateNodeParams{
+			NodeID:      nodeID,
+			NodeRole:    req.NodeRole,
+			Environment: req.Environment,
+			TrustLevel:  req.TrustLevel,
+			Owner:       req.Owner,
+			Location:    req.Location,
+			Tags:        req.Tags,
+		})
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		s.writeAudit(r, "update_node", "node", node.NodeID, map[string]string{
+			"nodeRole":    string(node.NodeRole),
+			"environment": string(node.Environment),
+			"trustLevel":  string(node.TrustLevel),
+			"owner":       node.Owner,
+			"location":    node.Location,
+			"tags":        strings.Join(node.Tags, ","),
+		})
+		writeJSON(w, http.StatusOK, node)
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {

@@ -124,3 +124,29 @@ curl -s -o /dev/null -w 'code=%{http_code} total=%{time_total}
   - `/admin/` now serves `dist/index.html` referencing `index-BHqO471Q.js` and `index-DluHM-uB.css`
   - local `curl http://127.0.0.1:7710/admin/` confirmed the updated entry HTML
 - Operator note: browsers that cached the old HTML or old bundle such as `index-D713E6AO.js` may still show the old error until a hard refresh is performed.
+
+### Node Metadata Enhancement (2026-03-31)
+
+- Node management now has fixed classification fields exposed through the existing node API:
+  - `nodeRole`: `cloud | local | third_party`
+  - `environment`: `prod | test | dev`
+  - `trustLevel`: `trusted | limited | external`
+  - `owner`
+  - `location`
+  - `tags: string[]`
+- These fields are currently persisted in `nodes.metadata` so the deployment does not require a PostgreSQL schema migration.
+- Existing Windows agent compatibility remains unchanged:
+  - agent register / heartbeat payload format is unchanged
+  - existing three-machine联调 roles are not remapped by code
+  - agent-reported base metadata such as `hostname / os / arch` still updates normally
+- Important runtime rule:
+  - management-defined node fields are no longer overwritten by a later agent re-register
+  - agent register continues to refresh agent-owned metadata keys like `hostname / os / arch`
+- Management API now supports:
+  - `GET /api/nodes?nodeRole=...&environment=...&trustLevel=...&owner=...&tag=...`
+  - `GET /api/nodes/{id}`
+  - `PUT /api/nodes/{id}` for updating fixed classification fields and tags
+- Admin web node workspace now supports:
+  - nodeRole / environment / trustLevel / owner / tags filtering
+  - visible grouped display by role without introducing a hard group tree
+  - node detail editing for the fixed fields and tags

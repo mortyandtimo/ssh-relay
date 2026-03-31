@@ -20,6 +20,24 @@ type TunnelFilter struct {
 	Status string
 }
 
+type NodeFilter struct {
+	NodeRole    string
+	Environment string
+	TrustLevel  string
+	Owner       string
+	Tag         string
+}
+
+type UpdateNodeParams struct {
+	NodeID      string
+	NodeRole    types.NodeRole
+	Environment types.NodeEnvironment
+	TrustLevel  types.NodeTrustLevel
+	Owner       string
+	Location    string
+	Tags        []string
+}
+
 type Counts struct {
 	RegisteredNodes   int
 	OnlineNodes       int
@@ -97,7 +115,9 @@ type Store interface {
 	Kind() string
 	RegisterNode(ctx context.Context, req types.NodeRegisterRequest) (types.NodeSummary, error)
 	HeartbeatNode(ctx context.Context, req types.NodeHeartbeatRequest) (types.NodeSummary, error)
-	ListNodes(ctx context.Context) ([]types.NodeSummary, error)
+	ListNodes(ctx context.Context, filter NodeFilter) ([]types.NodeSummary, error)
+	GetNode(ctx context.Context, nodeID string) (types.NodeSummary, error)
+	UpdateNode(ctx context.Context, params UpdateNodeParams) (types.NodeSummary, error)
 	CreateTunnel(ctx context.Context, spec types.TunnelSpec) (types.TunnelSpec, error)
 	GetTunnel(ctx context.Context, id string) (types.TunnelSpec, error)
 	UpdateTunnel(ctx context.Context, spec types.TunnelSpec) (types.TunnelSpec, error)

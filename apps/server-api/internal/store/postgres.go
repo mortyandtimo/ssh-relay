@@ -42,7 +42,19 @@ func (s *PostgresStore) RegisterNode(ctx context.Context, req types.NodeRegister
 	if err != nil {
 		return types.NodeSummary{}, err
 	}
-	meta, err := marshalMap(req.Metadata)
+	existingMeta := map[string]string{}
+	row := s.pool.QueryRow(ctx, `select metadata from nodes where id = $1`, nodeID)
+	var existingJSON []byte
+	if err := row.Scan(&existingJSON); err == nil {
+		existingMeta, err = unmarshalMap(existingJSON)
+		if err != nil {
+			return types.NodeSummary{}, err
+		}
+	} else if !strings.Contains(err.Error(), "no rows") {
+		return types.NodeSummary{}, err
+	}
+	mergedMeta := mergeAgentMetadata(existingMeta, req.Metadata)
+	meta, err := marshalMap(mergedMeta)
 	if err != nil {
 		return types.NodeSummary{}, err
 	}
@@ -69,7 +81,7 @@ func (s *PostgresStore) RegisterNode(ctx context.Context, req types.NodeRegister
 		Capabilities:  req.Capabilities,
 		ActiveTunnels: 0,
 		LastSeenAt:    now,
-		Metadata:      req.Metadata,
+		Metadata:      mergedMeta,
 	}, nil
 }
 
@@ -117,7 +129,7 @@ func (s *PostgresStore) HeartbeatNode(ctx context.Context, req types.NodeHeartbe
 	}, nil
 }
 
-func (s *PostgresStore) ListNodes(ctx context.Context) ([]types.NodeSummary, error) {
+func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]types.NodeSummary, error) {
 	rows, err := s.pool.Query(ctx, `
 		select
 			n.id,
@@ -129,8 +141,13 @@ func (s *PostgresStore) ListNodes(ctx context.Context) ([]types.NodeSummary, err
 			coalesce(n.last_seen_at, now()),
 			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active'), 0)
 		from nodes n
+		where ($1 = '' or coalesce(n.metadata->>'nodeRole', '') = $1)
+		  and ($2 = '' or coalesce(n.metadata->>'environment', '') = $2)
+		  and ($3 = '' or coalesce(n.metadata->>'trustLevel', '') = $3)
+		  and ($4 = '' or lower(coalesce(n.metadata->>'owner', '')) like '%' || lower($4) || '%')
+		  and ($5 = '' or lower(coalesce(n.metadata->>'tags', '')) like '%' || lower($5) || '%')
 		order by n.id
-	`)
+	`, filter.NodeRole, filter.Environment, filter.TrustLevel, filter.Owner, filter.Tag)
 	if err != nil {
 		return nil, err
 	}
@@ -160,9 +177,64 @@ func (s *PostgresStore) ListNodes(ctx context.Context) ([]types.NodeSummary, err
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, item)
+		items = append(items, hydrateNodeSummary(item))
 	}
 	return items, rows.Err()
+}
+
+func (s *PostgresStore) GetNode(ctx context.Context, nodeID string) (types.NodeSummary, error) {
+	row := s.pool.QueryRow(ctx, `
+		select
+			n.id,
+			n.name,
+			n.status,
+			n.agent_version,
+			n.capabilities,
+			n.metadata,
+			coalesce(n.last_seen_at, now()),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active'), 0)
+		from nodes n
+		where n.id = $1
+	`, nodeID)
+	var item types.NodeSummary
+	var capabilitiesJSON, metadataJSON []byte
+	if err := row.Scan(&item.NodeID, &item.NodeName, &item.Status, &item.AgentVersion, &capabilitiesJSON, &metadataJSON, &item.LastSeenAt, &item.ActiveTunnels); err != nil {
+		return types.NodeSummary{}, ErrNotFound
+	}
+	var err error
+	item.Capabilities, err = unmarshalCapabilities(capabilitiesJSON)
+	if err != nil {
+		return types.NodeSummary{}, err
+	}
+	item.Metadata, err = unmarshalMap(metadataJSON)
+	if err != nil {
+		return types.NodeSummary{}, err
+	}
+	return hydrateNodeSummary(item), nil
+}
+
+func (s *PostgresStore) UpdateNode(ctx context.Context, params UpdateNodeParams) (types.NodeSummary, error) {
+	current, err := s.GetNode(ctx, params.NodeID)
+	if err != nil {
+		return types.NodeSummary{}, err
+	}
+	metadata := mergeNodeMetadata(current.Metadata, params)
+	metaJSON, err := marshalMap(metadata)
+	if err != nil {
+		return types.NodeSummary{}, err
+	}
+	commandTag, err := s.pool.Exec(ctx, `
+		update nodes
+		set metadata = $2, updated_at = now()
+		where id = $1
+	`, params.NodeID, metaJSON)
+	if err != nil {
+		return types.NodeSummary{}, err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return types.NodeSummary{}, ErrNotFound
+	}
+	return s.GetNode(ctx, params.NodeID)
 }
 
 func (s *PostgresStore) CreateTunnel(ctx context.Context, spec types.TunnelSpec) (types.TunnelSpec, error) {

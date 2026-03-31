@@ -50,6 +50,8 @@ func (s *InMemoryStore) RegisterNode(_ context.Context, req types.NodeRegisterRe
 		nodeID = fmt.Sprintf("node-%d", time.Now().UnixNano())
 	}
 	now := time.Now().UTC()
+	s.mu.Lock()
+	existing := s.nodes[nodeID]
 	summary := types.NodeSummary{
 		NodeID:        nodeID,
 		NodeName:      req.NodeName,
@@ -58,10 +60,9 @@ func (s *InMemoryStore) RegisterNode(_ context.Context, req types.NodeRegisterRe
 		Capabilities:  req.Capabilities,
 		ActiveTunnels: s.countActiveTunnelsForNode(nodeID),
 		LastSeenAt:    now,
-		Metadata:      req.Metadata,
+		Metadata:      mergeAgentMetadata(existing.Summary.Metadata, req.Metadata),
 	}
-
-	s.mu.Lock()
+	summary = hydrateNodeSummary(summary)
 	s.nodes[nodeID] = nodeRecord{Summary: summary, Metrics: map[string]string{}}
 	s.mu.Unlock()
 	return summary, nil
@@ -79,19 +80,47 @@ func (s *InMemoryStore) HeartbeatNode(_ context.Context, req types.NodeHeartbeat
 	record.Summary.LastSeenAt = now
 	record.Summary.ActiveTunnels = req.ActiveTunnels
 	record.Metrics = req.Metrics
+	record.Summary = hydrateNodeSummary(record.Summary)
 	s.nodes[req.NodeID] = record
 	return record.Summary, nil
 }
 
-func (s *InMemoryStore) ListNodes(_ context.Context) ([]types.NodeSummary, error) {
+func (s *InMemoryStore) ListNodes(_ context.Context, filter NodeFilter) ([]types.NodeSummary, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	items := make([]types.NodeSummary, 0, len(s.nodes))
 	for _, record := range s.nodes {
-		items = append(items, record.Summary)
+		summary := hydrateNodeSummary(record.Summary)
+		if !matchesNodeFilter(summary, filter) {
+			continue
+		}
+		items = append(items, summary)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].NodeID < items[j].NodeID })
 	return items, nil
+}
+
+func (s *InMemoryStore) GetNode(_ context.Context, nodeID string) (types.NodeSummary, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, ok := s.nodes[nodeID]
+	if !ok {
+		return types.NodeSummary{}, ErrNotFound
+	}
+	return hydrateNodeSummary(record.Summary), nil
+}
+
+func (s *InMemoryStore) UpdateNode(_ context.Context, params UpdateNodeParams) (types.NodeSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.nodes[params.NodeID]
+	if !ok {
+		return types.NodeSummary{}, ErrNotFound
+	}
+	record.Summary.Metadata = mergeNodeMetadata(record.Summary.Metadata, params)
+	record.Summary = hydrateNodeSummary(record.Summary)
+	s.nodes[params.NodeID] = record
+	return record.Summary, nil
 }
 
 func (s *InMemoryStore) CreateTunnel(_ context.Context, spec types.TunnelSpec) (types.TunnelSpec, error) {
@@ -455,6 +484,129 @@ func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {
 		tunnel.Metadata = map[string]string{}
 	}
 	return tunnel
+}
+
+func hydrateNodeSummary(summary types.NodeSummary) types.NodeSummary {
+	meta := parseNodeMetadata(summary.Metadata)
+	summary.Metadata = meta.Extra
+	summary.NodeRole = meta.NodeRole
+	summary.Environment = meta.Environment
+	summary.TrustLevel = meta.TrustLevel
+	summary.Owner = meta.Owner
+	summary.Location = meta.Location
+	summary.Tags = meta.Tags
+	return summary
+}
+
+func parseNodeMetadata(input map[string]string) types.NodeMetadata {
+	extra := map[string]string{}
+	for key, value := range input {
+		extra[key] = value
+	}
+	meta := types.NodeMetadata{Extra: extra}
+	meta.Hostname = strings.TrimSpace(extra["hostname"])
+	meta.OS = strings.TrimSpace(extra["os"])
+	meta.Arch = strings.TrimSpace(extra["arch"])
+	meta.NodeRole = types.NodeRole(strings.TrimSpace(extra["nodeRole"]))
+	meta.Environment = types.NodeEnvironment(strings.TrimSpace(extra["environment"]))
+	meta.TrustLevel = types.NodeTrustLevel(strings.TrimSpace(extra["trustLevel"]))
+	meta.Owner = strings.TrimSpace(extra["owner"])
+	meta.Location = strings.TrimSpace(extra["location"])
+	meta.Tags = splitTags(extra["tags"])
+	return meta
+}
+
+func mergeNodeMetadata(existing map[string]string, params UpdateNodeParams) map[string]string {
+	merged := map[string]string{}
+	for key, value := range existing {
+		merged[key] = value
+	}
+	merged["nodeRole"] = string(params.NodeRole)
+	merged["environment"] = string(params.Environment)
+	merged["trustLevel"] = string(params.TrustLevel)
+	merged["owner"] = strings.TrimSpace(params.Owner)
+	merged["location"] = strings.TrimSpace(params.Location)
+	merged["tags"] = strings.Join(normalizeTags(params.Tags), ",")
+	return merged
+}
+
+func mergeAgentMetadata(existing, incoming map[string]string) map[string]string {
+	merged := map[string]string{}
+	for key, value := range existing {
+		merged[key] = value
+	}
+	reserved := map[string]struct{}{
+		"nodeRole":    {},
+		"environment": {},
+		"trustLevel":  {},
+		"owner":       {},
+		"location":    {},
+		"tags":        {},
+	}
+	for key, value := range incoming {
+		if _, ok := reserved[key]; ok {
+			if current := strings.TrimSpace(merged[key]); current != "" {
+				continue
+			}
+		}
+		merged[key] = value
+	}
+	return merged
+}
+
+func matchesNodeFilter(summary types.NodeSummary, filter NodeFilter) bool {
+	if filter.NodeRole != "" && string(summary.NodeRole) != filter.NodeRole {
+		return false
+	}
+	if filter.Environment != "" && string(summary.Environment) != filter.Environment {
+		return false
+	}
+	if filter.TrustLevel != "" && string(summary.TrustLevel) != filter.TrustLevel {
+		return false
+	}
+	if filter.Owner != "" && !strings.Contains(strings.ToLower(summary.Owner), strings.ToLower(filter.Owner)) {
+		return false
+	}
+	if filter.Tag != "" {
+		needle := strings.ToLower(strings.TrimSpace(filter.Tag))
+		matched := false
+		for _, tag := range summary.Tags {
+			if strings.Contains(strings.ToLower(tag), needle) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func splitTags(input string) []string {
+	if strings.TrimSpace(input) == "" {
+		return []string{}
+	}
+	return normalizeTags(strings.Split(input, ","))
+}
+
+func normalizeTags(input []string) []string {
+	seen := map[string]struct{}{}
+	items := make([]string, 0, len(input))
+	for _, raw := range input {
+		tag := strings.TrimSpace(raw)
+		if tag == "" {
+			continue
+		}
+		key := strings.ToLower(tag)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		items = append(items, tag)
+	}
+	sort.Strings(items)
+	return items
 }
 
 func normalizeEmail(input string) string {

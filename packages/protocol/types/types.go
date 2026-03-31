@@ -17,6 +17,43 @@ type NodeCapabilities struct {
 	P2PAssist  bool `json:"p2pAssist"`
 }
 
+type NodeRole string
+
+const (
+	NodeRoleCloud      NodeRole = "cloud"
+	NodeRoleLocal      NodeRole = "local"
+	NodeRoleThirdParty NodeRole = "third_party"
+)
+
+type NodeEnvironment string
+
+const (
+	NodeEnvironmentProd NodeEnvironment = "prod"
+	NodeEnvironmentTest NodeEnvironment = "test"
+	NodeEnvironmentDev  NodeEnvironment = "dev"
+)
+
+type NodeTrustLevel string
+
+const (
+	NodeTrustTrusted NodeTrustLevel = "trusted"
+	NodeTrustLimited NodeTrustLevel = "limited"
+	NodeTrustExternal NodeTrustLevel = "external"
+)
+
+type NodeMetadata struct {
+	Hostname    string   `json:"hostname,omitempty"`
+	OS          string   `json:"os,omitempty"`
+	Arch        string   `json:"arch,omitempty"`
+	NodeRole    NodeRole `json:"nodeRole,omitempty"`
+	Environment NodeEnvironment `json:"environment,omitempty"`
+	TrustLevel  NodeTrustLevel `json:"trustLevel,omitempty"`
+	Owner       string   `json:"owner,omitempty"`
+	Location    string   `json:"location,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Extra       map[string]string `json:"-"`
+}
+
 type NodeRegisterRequest struct {
 	NodeID       string            `json:"nodeId"`
 	NodeName     string            `json:"nodeName"`
@@ -70,6 +107,21 @@ type NodeSummary struct {
 	ActiveTunnels int               `json:"activeTunnels"`
 	LastSeenAt    time.Time         `json:"lastSeenAt"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
+	NodeRole      NodeRole          `json:"nodeRole,omitempty"`
+	Environment   NodeEnvironment   `json:"environment,omitempty"`
+	TrustLevel    NodeTrustLevel    `json:"trustLevel,omitempty"`
+	Owner         string            `json:"owner,omitempty"`
+	Location      string            `json:"location,omitempty"`
+	Tags          []string          `json:"tags,omitempty"`
+}
+
+type UpdateNodeRequest struct {
+	NodeRole    NodeRole        `json:"nodeRole,omitempty"`
+	Environment NodeEnvironment `json:"environment,omitempty"`
+	TrustLevel  NodeTrustLevel  `json:"trustLevel,omitempty"`
+	Owner       string          `json:"owner,omitempty"`
+	Location    string          `json:"location,omitempty"`
+	Tags        []string        `json:"tags,omitempty"`
 }
 
 type ServerMetrics struct {

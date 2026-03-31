@@ -8,6 +8,10 @@ type NodeCapabilities = {
   p2pAssist: boolean;
 };
 
+type NodeRole = "cloud" | "local" | "third_party" | "";
+type NodeEnvironment = "prod" | "test" | "dev" | "";
+type NodeTrustLevel = "trusted" | "limited" | "external" | "";
+
 type NodeSummary = {
   nodeId: string;
   nodeName: string;
@@ -17,6 +21,29 @@ type NodeSummary = {
   activeTunnels: number;
   lastSeenAt: string;
   metadata?: Record<string, string>;
+  nodeRole?: NodeRole;
+  environment?: NodeEnvironment;
+  trustLevel?: NodeTrustLevel;
+  owner?: string;
+  location?: string;
+  tags?: string[];
+};
+
+type NodeFilterState = {
+  nodeRole: NodeRole;
+  environment: NodeEnvironment;
+  trustLevel: NodeTrustLevel;
+  owner: string;
+  tag: string;
+};
+
+type NodeEditForm = {
+  nodeRole: NodeRole;
+  environment: NodeEnvironment;
+  trustLevel: NodeTrustLevel;
+  owner: string;
+  location: string;
+  tags: string;
 };
 
 type TunnelSpec = {
@@ -140,11 +167,21 @@ const initialAuditFilter: AuditFilterState = {
   offset: 0,
 };
 
+const initialNodeFilter: NodeFilterState = {
+  nodeRole: "",
+  environment: "",
+  trustLevel: "",
+  owner: "",
+  tag: "",
+};
+
 export default function App() {
   const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
   const [currentUser, setCurrentUser] = useState<UserSummary | null>(null);
   const [nodes, setNodes] = useState<NodeSummary[]>([]);
   const [selectedNodeID, setSelectedNodeID] = useState<string | null>(null);
+  const [nodeFilter, setNodeFilter] = useState<NodeFilterState>(initialNodeFilter);
+  const [nodeEditForm, setNodeEditForm] = useState<NodeEditForm | null>(null);
   const [tunnels, setTunnels] = useState<TunnelSpec[]>([]);
   const [editingTunnelID, setEditingTunnelID] = useState<string | null>(null);
   const [tunnelEditForm, setTunnelEditForm] = useState<TunnelEditForm | null>(null);
@@ -167,6 +204,7 @@ export default function App() {
   const [connectionView, setConnectionView] = useState<ConnectionView>("nodes");
   const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
   const auditFilterRef = useRef<AuditFilterState>(initialAuditFilter);
+  const nodeFilterRef = useRef<NodeFilterState>(initialNodeFilter);
 
   useEffect(() => {
     let cancelled = false;
@@ -181,7 +219,7 @@ export default function App() {
         const me = await requestJSON<{ user: UserSummary }>("/api/auth/me");
         if (cancelled) return;
         setCurrentUser(me.user);
-        await refreshDashboard(false, me.user, cancelled, auditFilterRef.current);
+        await refreshDashboard(false, me.user, cancelled, auditFilterRef.current, nodeFilterRef.current);
       } catch {
         if (!cancelled) {
           setCurrentUser(null);
@@ -200,8 +238,13 @@ export default function App() {
   }, [auditFilter]);
 
   useEffect(() => {
+    nodeFilterRef.current = nodeFilter;
+  }, [nodeFilter]);
+
+  useEffect(() => {
     if (nodes.length === 0) {
       setSelectedNodeID(null);
+      setNodeEditForm(null);
       return;
     }
     setSelectedNodeID((current) => {
@@ -211,6 +254,11 @@ export default function App() {
       return nodes[0].nodeId;
     });
   }, [nodes]);
+
+  useEffect(() => {
+    const selectedNode = selectedNodeID ? nodes.find((node) => node.nodeId === selectedNodeID) ?? null : null;
+    setNodeEditForm(selectedNode ? toNodeEditForm(selectedNode) : null);
+  }, [nodes, selectedNodeID]);
 
   useEffect(() => {
     if (tunnels.length === 0) {
@@ -230,7 +278,7 @@ export default function App() {
     }
     let cancelled = false;
     const timer = window.setInterval(() => {
-      void refreshDashboard(false, currentUser, cancelled, auditFilterRef.current);
+      void refreshDashboard(false, currentUser, cancelled, auditFilterRef.current, nodeFilterRef.current);
     }, 10000);
     return () => {
       cancelled = true;
@@ -311,16 +359,36 @@ export default function App() {
     return query;
   }
 
-  async function refreshDashboard(showNotice: boolean, user = currentUser, cancelled = false, filter = auditFilterRef.current) {
+  function buildNodeQuery(filter: NodeFilterState) {
+    const query = new URLSearchParams();
+    if (filter.nodeRole) query.set("nodeRole", filter.nodeRole);
+    if (filter.environment) query.set("environment", filter.environment);
+    if (filter.trustLevel) query.set("trustLevel", filter.trustLevel);
+    if (filter.owner) query.set("owner", filter.owner);
+    if (filter.tag) query.set("tag", filter.tag);
+    return query;
+  }
+
+  async function refreshDashboard(
+    showNotice: boolean,
+    user = currentUser,
+    cancelled = false,
+    audit = auditFilterRef.current,
+    nodeFilterValue = nodeFilterRef.current,
+  ) {
     if (!user) {
       return;
     }
 
     try {
+      const nodePath = "/api/nodes" + (() => {
+        const query = buildNodeQuery(nodeFilterValue).toString();
+        return query ? "?" + query : "";
+      })();
       const overviewRequests =
         user.role !== "user"
           ? [
-              requestJSON<{ items: NodeSummary[] }>("/api/nodes"),
+              requestJSON<{ items: NodeSummary[] }>(nodePath),
               requestJSON<{ items: TunnelSpec[] }>("/api/tunnels"),
               requestJSON<ServerMetrics>("/api/server/metrics"),
               requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime"),
@@ -339,7 +407,7 @@ export default function App() {
 
       const auditRequests =
         user.role !== "user"
-          ? [requestJSON<AuditLogListResponse>("/api/audit-logs?" + buildAuditQuery(filter).toString())]
+          ? [requestJSON<AuditLogListResponse>("/api/audit-logs?" + buildAuditQuery(audit).toString())]
           : [Promise.resolve(undefined as AuditLogListResponse | undefined)];
 
       const results = await Promise.all([...overviewRequests, ...userRequests, ...auditRequests]);
@@ -385,6 +453,8 @@ export default function App() {
     setCurrentUser(null);
     setNodes([]);
     setSelectedNodeID(null);
+    setNodeFilter(initialNodeFilter);
+    setNodeEditForm(null);
     setTunnels([]);
     setEditingTunnelID(null);
     setTunnelEditForm(null);
@@ -426,7 +496,7 @@ export default function App() {
       setBootstrapRequired(false);
       setBootstrapForm({ email: "", displayName: "管理员", password: "", bootstrapSecret: "" });
       setMessage("管理员账户已初始化。");
-      await refreshDashboard(false, payload.user, false, auditFilterRef.current);
+      await refreshDashboard(false, payload.user, false, auditFilterRef.current, nodeFilterRef.current);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "初始化失败");
     } finally {
@@ -447,7 +517,7 @@ export default function App() {
       setCurrentUser(payload.user);
       setMessage("登录成功。");
       setMainView(payload.user.role === "user" ? "overview" : "connections");
-      await refreshDashboard(false, payload.user, false, auditFilterRef.current);
+      await refreshDashboard(false, payload.user, false, auditFilterRef.current, nodeFilterRef.current);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "登录失败");
     } finally {
@@ -465,6 +535,36 @@ export default function App() {
       setMessage("已退出登录。");
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "退出失败");
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  async function submitNodeMetadata(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedNode || !nodeEditForm) {
+      return;
+    }
+    const actionKey = "update-node:" + selectedNode.nodeId;
+    setBusyAction(actionKey);
+    setError("");
+    setMessage("");
+    try {
+      await requestJSON<NodeSummary>("/api/nodes/" + selectedNode.nodeId, {
+        method: "PUT",
+        body: JSON.stringify({
+          nodeRole: nodeEditForm.nodeRole,
+          environment: nodeEditForm.environment,
+          trustLevel: nodeEditForm.trustLevel,
+          owner: nodeEditForm.owner,
+          location: nodeEditForm.location,
+          tags: splitTagInput(nodeEditForm.tags),
+        }),
+      });
+      setMessage("节点元数据已更新。");
+      await refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilterRef.current);
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "更新节点元数据失败");
     } finally {
       setBusyAction("");
     }
@@ -491,7 +591,7 @@ export default function App() {
       });
       setTunnelForm((current) => ({ ...initialTunnelForm, nodeId: current.nodeId }));
       setMessage("隧道已创建。");
-      await refreshDashboard(false, currentUser, false, auditFilterRef.current);
+      await refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilterRef.current);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "创建隧道失败");
     } finally {
@@ -523,7 +623,7 @@ export default function App() {
         }),
       });
       setMessage("隧道已更新。");
-      await refreshDashboard(false, currentUser, false, auditFilterRef.current);
+      await refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilterRef.current);
     } catch (updateError) {
       setError(updateError instanceof Error ? updateError.message : "更新隧道失败");
     } finally {
@@ -551,7 +651,7 @@ export default function App() {
         }),
       });
       setMessage(status === "active" ? "隧道已启用。" : "隧道已暂停。");
-      await refreshDashboard(false, currentUser, false, auditFilterRef.current);
+      await refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilterRef.current);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "更新隧道失败");
     } finally {
@@ -570,7 +670,7 @@ export default function App() {
         clearTunnelEdit();
       }
       setMessage("隧道已删除。");
-      await refreshDashboard(false, currentUser, false, auditFilterRef.current);
+      await refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilterRef.current);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "删除隧道失败");
     } finally {
@@ -590,7 +690,7 @@ export default function App() {
       });
       setUserForm({ email: "", displayName: "", password: "", role: "manager" });
       setMessage("用户已创建。");
-      await refreshDashboard(false, currentUser, false, auditFilterRef.current);
+      await refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilterRef.current);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "创建用户失败");
     } finally {
@@ -598,12 +698,24 @@ export default function App() {
     }
   }
 
+  function submitNodeFilters(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    nodeFilterRef.current = nodeFilter;
+    void refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilter);
+  }
+
+  function clearNodeFilters() {
+    setNodeFilter(initialNodeFilter);
+    nodeFilterRef.current = initialNodeFilter;
+    void refreshDashboard(false, currentUser, false, auditFilterRef.current, initialNodeFilter);
+  }
+
   function submitAuditFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const nextFilter = { ...auditFilter, offset: 0 };
     setAuditFilter(nextFilter);
     auditFilterRef.current = nextFilter;
-    void refreshDashboard(false, currentUser, false, nextFilter);
+    void refreshDashboard(false, currentUser, false, nextFilter, nodeFilterRef.current);
   }
 
   function clearAuditFilters() {
@@ -611,14 +723,14 @@ export default function App() {
     setAuditFilter(nextFilter);
     auditFilterRef.current = nextFilter;
     setExpandedAuditID(null);
-    void refreshDashboard(false, currentUser, false, nextFilter);
+    void refreshDashboard(false, currentUser, false, nextFilter, nodeFilterRef.current);
   }
 
   function goToAuditPage(nextOffset: number) {
     const nextFilter = { ...auditFilter, offset: nextOffset };
     setAuditFilter(nextFilter);
     auditFilterRef.current = nextFilter;
-    void refreshDashboard(false, currentUser, false, nextFilter);
+    void refreshDashboard(false, currentUser, false, nextFilter, nodeFilterRef.current);
   }
 
   const activeUser =
@@ -637,6 +749,7 @@ export default function App() {
   const canManageUsers = activeUser.role === "admin";
   const auditStart = auditLogs.length === 0 ? 0 : auditFilter.offset + 1;
   const auditEnd = Math.min(auditFilter.offset + auditFilter.limit, auditTotal);
+  const groupedNodes = groupNodesByRole(nodes);
 
   if (bootstrapRequired === null) {
     return (
@@ -698,7 +811,7 @@ export default function App() {
           <strong>{activeUser.displayName}</strong>
           <span className="muted-line">{activeUser.email}</span>
           <div className="sidebar-actions">
-            <button className="secondary" type="button" onClick={() => void refreshDashboard(true, currentUser, false, auditFilterRef.current)} disabled={busyAction === "refresh"}>刷新当前工作区</button>
+            <button className="secondary" type="button" onClick={() => void refreshDashboard(true, currentUser, false, auditFilterRef.current, nodeFilterRef.current)} disabled={busyAction === "refresh"}>刷新当前工作区</button>
             <button type="button" onClick={() => void logout()} disabled={busyAction === "logout"}>{busyAction === "logout" ? "退出中..." : "退出登录"}</button>
           </div>
         </div>
@@ -784,39 +897,92 @@ export default function App() {
             {connectionView === "nodes" ? (
               <div className="split-layout connections-layout">
                 <section className="subpanel workspace-column">
+                  <h3>节点筛选</h3>
+                  <form className="form-grid" onSubmit={submitNodeFilters}>
+                    <label>
+                      <span>节点角色</span>
+                      <select value={nodeFilter.nodeRole} onChange={(event) => setNodeFilter((current) => ({ ...current, nodeRole: event.target.value as NodeRole }))}>
+                        <option value="">全部</option>
+                        <option value="cloud">cloud</option>
+                        <option value="local">local</option>
+                        <option value="third_party">third_party</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>环境</span>
+                      <select value={nodeFilter.environment} onChange={(event) => setNodeFilter((current) => ({ ...current, environment: event.target.value as NodeEnvironment }))}>
+                        <option value="">全部</option>
+                        <option value="prod">prod</option>
+                        <option value="test">test</option>
+                        <option value="dev">dev</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>信任级别</span>
+                      <select value={nodeFilter.trustLevel} onChange={(event) => setNodeFilter((current) => ({ ...current, trustLevel: event.target.value as NodeTrustLevel }))}>
+                        <option value="">全部</option>
+                        <option value="trusted">trusted</option>
+                        <option value="limited">limited</option>
+                        <option value="external">external</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Owner</span>
+                      <input value={nodeFilter.owner} onChange={(event) => setNodeFilter((current) => ({ ...current, owner: event.target.value }))} />
+                    </label>
+                    <label>
+                      <span>标签</span>
+                      <input value={nodeFilter.tag} onChange={(event) => setNodeFilter((current) => ({ ...current, tag: event.target.value }))} placeholder="例如 win 或 office" />
+                    </label>
+                    <div className="form-actions">
+                      <button type="submit">应用筛选</button>
+                      <button type="button" className="secondary" onClick={clearNodeFilters}>清空筛选</button>
+                    </div>
+                  </form>
+
                   <h3>节点列表</h3>
-                  <div className="spotlight-grid">
-                    {nodes.length === 0 ? <EmptyState title="暂无节点" body="当前没有可展示的节点状态。" /> : nodes.map((node) => (
-                      <article key={node.nodeId} className={selectedNodeID === node.nodeId ? "spotlight-card interactive-card selected-card" : "spotlight-card interactive-card"} onClick={() => setSelectedNodeID(node.nodeId)}>
-                        <div className="spotlight-head">
-                          <div>
-                            <strong>{node.nodeName}</strong>
-                            <span className="muted-line">{node.nodeId}</span>
-                          </div>
-                          <span className={statusPillClass(node.status)}>{node.status}</span>
-                        </div>
-                        <div className="spotlight-meta">
-                          <span>Agent {node.agentVersion}</span>
-                          <span>{node.activeTunnels} 条隧道</span>
-                        </div>
-                        <div className="capability-row">{capabilitySummary(node.capabilities)}</div>
-                        <div className="muted-line">主机名：{nodeMeta(node, "hostname", node.nodeName)}</div>
-                        <div className="muted-line">最后心跳：{formatDate(node.lastSeenAt)}</div>
-                      </article>
-                    ))}
-                  </div>
+                  {groupedNodes.length === 0 ? <EmptyState title="暂无节点" body="当前没有可展示的节点状态。" /> : groupedNodes.map((group) => (
+                    <section key={group.key} className="node-group-section">
+                      <div className="group-heading">
+                        <strong>{group.label}</strong>
+                        <span className="muted-line">{group.items.length} 台</span>
+                      </div>
+                      <div className="spotlight-grid compact-cards">
+                        {group.items.map((node) => (
+                          <article key={node.nodeId} className={selectedNodeID === node.nodeId ? "spotlight-card interactive-card selected-card" : "spotlight-card interactive-card"} onClick={() => setSelectedNodeID(node.nodeId)}>
+                            <div className="spotlight-head">
+                              <div>
+                                <strong>{node.nodeName}</strong>
+                                <span className="muted-line">{node.nodeId}</span>
+                              </div>
+                              <span className={statusPillClass(node.status)}>{node.status}</span>
+                            </div>
+                            <div className="tag-strip">
+                              <span className="status-pill tone-neutral">{node.nodeRole || "unassigned"}</span>
+                              <span className="status-pill tone-info">{node.environment || "-"}</span>
+                              <span className="status-pill tone-warn">{node.trustLevel || "-"}</span>
+                            </div>
+                            <div className="muted-line">Owner: {node.owner || "-"}</div>
+                            <div className="muted-line">Location: {node.location || "-"}</div>
+                            <div className="muted-line">Tags: {formatTags(node.tags)}</div>
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  ))}
+
                   <div className="table-wrap compact-table">
                     <table>
-                      <thead><tr><th>节点</th><th>状态</th><th>Agent</th><th>隧道数</th><th>能力</th><th>最后心跳</th></tr></thead>
+                      <thead><tr><th>节点</th><th>角色</th><th>环境</th><th>信任级别</th><th>Owner</th><th>标签</th></tr></thead>
                       <tbody>
                         {nodes.length === 0 ? <tr><td colSpan={6}>暂无节点。</td></tr> : nodes.map((node) => (
                           <tr key={node.nodeId} className={selectedNodeID === node.nodeId ? "clickable-row selected-row" : "clickable-row"} onClick={() => setSelectedNodeID(node.nodeId)}>
                             <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div></td>
-                            <td><span className={statusPillClass(node.status)}>{node.status}</span></td>
-                            <td>{node.agentVersion}</td>
-                            <td>{node.activeTunnels}</td>
-                            <td>{capabilitySummary(node.capabilities)}</td>
-                            <td>{formatDate(node.lastSeenAt)}</td>
+                            <td>{node.nodeRole || "-"}</td>
+                            <td>{node.environment || "-"}</td>
+                            <td>{node.trustLevel || "-"}</td>
+                            <td>{node.owner || "-"}</td>
+                            <td>{formatTags(node.tags)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -826,7 +992,7 @@ export default function App() {
 
                 <section className="subpanel detail-panel">
                   <h3>节点详情</h3>
-                  {selectedNode ? (
+                  {selectedNode && nodeEditForm ? (
                     <>
                       <div className="detail-hero">
                         <div>
@@ -836,8 +1002,6 @@ export default function App() {
                         <span className={statusPillClass(selectedNode.status)}>{selectedNode.status}</span>
                       </div>
                       <div className="detail-grid">
-                        <DetailItem label="nodeId" value={selectedNode.nodeId} />
-                        <DetailItem label="nodeName" value={selectedNode.nodeName} />
                         <DetailItem label="hostname" value={nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} />
                         <DetailItem label="os" value={nodeMeta(selectedNode, "os")} />
                         <DetailItem label="arch" value={nodeMeta(selectedNode, "arch")} />
@@ -845,8 +1009,43 @@ export default function App() {
                         <DetailItem label="lastSeenAt" value={formatDate(selectedNode.lastSeenAt)} />
                         <DetailItem label="activeTunnels" value={String(selectedNode.activeTunnels)} />
                       </div>
+                      <form className="form-grid" onSubmit={submitNodeMetadata}>
+                        <label>
+                          <span>nodeRole</span>
+                          <select value={nodeEditForm.nodeRole} onChange={(event) => setNodeEditForm((current) => current ? { ...current, nodeRole: event.target.value as NodeRole } : current)}>
+                            <option value="">未设置</option>
+                            <option value="cloud">cloud</option>
+                            <option value="local">local</option>
+                            <option value="third_party">third_party</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span>environment</span>
+                          <select value={nodeEditForm.environment} onChange={(event) => setNodeEditForm((current) => current ? { ...current, environment: event.target.value as NodeEnvironment } : current)}>
+                            <option value="">未设置</option>
+                            <option value="prod">prod</option>
+                            <option value="test">test</option>
+                            <option value="dev">dev</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span>trustLevel</span>
+                          <select value={nodeEditForm.trustLevel} onChange={(event) => setNodeEditForm((current) => current ? { ...current, trustLevel: event.target.value as NodeTrustLevel } : current)}>
+                            <option value="">未设置</option>
+                            <option value="trusted">trusted</option>
+                            <option value="limited">limited</option>
+                            <option value="external">external</option>
+                          </select>
+                        </label>
+                        <label><span>owner</span><input value={nodeEditForm.owner} onChange={(event) => setNodeEditForm((current) => current ? { ...current, owner: event.target.value } : current)} /></label>
+                        <label><span>location</span><input value={nodeEditForm.location} onChange={(event) => setNodeEditForm((current) => current ? { ...current, location: event.target.value } : current)} /></label>
+                        <label><span>tags</span><input value={nodeEditForm.tags} onChange={(event) => setNodeEditForm((current) => current ? { ...current, tags: event.target.value } : current)} placeholder="逗号分隔" /></label>
+                        <div className="form-actions">
+                          <button type="submit" disabled={busyAction === "update-node:" + selectedNode.nodeId}>{busyAction === "update-node:" + selectedNode.nodeId ? "保存中..." : "保存节点元数据"}</button>
+                        </div>
+                      </form>
                     </>
-                  ) : <EmptyState title="未选择节点" body="点击节点卡片或表格行后，在这里查看详细信息。" />}
+                  ) : <EmptyState title="未选择节点" body="点击节点卡片或表格行后，在这里查看并编辑节点元数据。" />}
                 </section>
               </div>
             ) : (
@@ -1134,6 +1333,41 @@ function toTunnelEditForm(tunnel: TunnelSpec): TunnelEditForm {
     type: tunnel.type,
     transportPolicy: tunnel.transportPolicy,
   };
+}
+
+function toNodeEditForm(node: NodeSummary): NodeEditForm {
+  return {
+    nodeRole: node.nodeRole || "",
+    environment: node.environment || "",
+    trustLevel: node.trustLevel || "",
+    owner: node.owner || "",
+    location: node.location || "",
+    tags: (node.tags || []).join(", "),
+  };
+}
+
+function splitTagInput(input: string) {
+  return input.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function formatTags(tags?: string[]) {
+  return tags && tags.length > 0 ? tags.join(", ") : "-";
+}
+
+function groupNodesByRole(nodes: NodeSummary[]) {
+  const order: Array<{ key: string; label: string }> = [
+    { key: "cloud", label: "Cloud" },
+    { key: "local", label: "Local" },
+    { key: "third_party", label: "Third Party" },
+    { key: "unassigned", label: "Unassigned" },
+  ];
+  return order
+    .map((entry) => ({
+      key: entry.key,
+      label: entry.label,
+      items: nodes.filter((node) => (node.nodeRole || "unassigned") === entry.key),
+    }))
+    .filter((entry) => entry.items.length > 0);
 }
 
 function nodeMeta(node: NodeSummary, key: string, fallback = "-") {

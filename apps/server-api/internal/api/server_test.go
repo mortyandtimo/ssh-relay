@@ -278,6 +278,105 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 	}
 }
 
+func TestNodeMetadataFilterAndUpdate(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, err := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "node-local-a",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{TCPRelay: true, HTTPRelay: true},
+		Metadata: map[string]string{
+			"hostname":    "host-a",
+			"os":          "windows",
+			"arch":        "amd64",
+			"nodeRole":    "local",
+			"environment": "test",
+			"trustLevel":  "trusted",
+			"owner":       "alice",
+			"location":    "shanghai",
+			"tags":        "desk,win",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register status 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/nodes?nodeRole=local&environment=test&trustLevel=trusted&owner=ali&tag=desk", nil)
+	applyCookies(listReq, adminCookies)
+	listRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(listRes, listReq)
+	if listRes.Code != http.StatusOK {
+		t.Fatalf("expected list status 200, got %d", listRes.Code)
+	}
+	var listOut struct {
+		Items []types.NodeSummary `json:"items"`
+	}
+	if err := json.NewDecoder(listRes.Body).Decode(&listOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(listOut.Items) != 1 {
+		t.Fatalf("expected 1 filtered node, got %d", len(listOut.Items))
+	}
+	if listOut.Items[0].NodeRole != types.NodeRoleLocal || listOut.Items[0].Environment != types.NodeEnvironmentTest || listOut.Items[0].TrustLevel != types.NodeTrustTrusted {
+		t.Fatalf("expected metadata fields to be hydrated, got %+v", listOut.Items[0])
+	}
+	if len(listOut.Items[0].Tags) != 2 {
+		t.Fatalf("expected tags to be present, got %+v", listOut.Items[0].Tags)
+	}
+
+	updateBody, err := json.Marshal(types.UpdateNodeRequest{
+		NodeRole:    types.NodeRoleThirdParty,
+		Environment: types.NodeEnvironmentProd,
+		TrustLevel:  types.NodeTrustExternal,
+		Owner:       "bob",
+		Location:    "beijing",
+		Tags:        []string{"third", "edge"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/nodes/"+registerOut.NodeID, bytes.NewReader(updateBody))
+	applyCookies(updateReq, adminCookies)
+	updateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(updateRes, updateReq)
+	if updateRes.Code != http.StatusOK {
+		t.Fatalf("expected update status 200, got %d", updateRes.Code)
+	}
+	var updated types.NodeSummary
+	if err := json.NewDecoder(updateRes.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.NodeRole != types.NodeRoleThirdParty || updated.Environment != types.NodeEnvironmentProd || updated.TrustLevel != types.NodeTrustExternal {
+		t.Fatalf("expected updated node metadata, got %+v", updated)
+	}
+	if updated.Owner != "bob" || updated.Location != "beijing" {
+		t.Fatalf("expected updated owner/location, got %+v", updated)
+	}
+	if len(updated.Tags) != 2 || updated.Tags[0] != "edge" || updated.Tags[1] != "third" {
+		t.Fatalf("expected normalized tags, got %+v", updated.Tags)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/nodes/"+registerOut.NodeID, nil)
+	applyCookies(getReq, adminCookies)
+	getRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(getRes, getReq)
+	if getRes.Code != http.StatusOK {
+		t.Fatalf("expected get status 200, got %d", getRes.Code)
+	}
+}
+
 func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 	runtimeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(types.RelayRuntimeSummary{
