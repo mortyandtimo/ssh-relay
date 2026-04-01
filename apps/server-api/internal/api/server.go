@@ -88,6 +88,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/agent/tunnels", s.handleAgentTunnels)
 	s.mux.HandleFunc("/internal/routes/tcp", s.handleTCPRoutes)
 	s.mux.HandleFunc("/internal/routes/http", s.handleHTTPRoutes)
+	s.mux.HandleFunc("/internal/routes/https", s.handleHTTPSRoutes)
 
 	s.mux.HandleFunc("/api/auth/bootstrap-status", s.handleBootstrapStatus)
 	s.mux.HandleFunc("/api/auth/bootstrap", s.handleBootstrap)
@@ -717,6 +718,19 @@ func (s *Server) handleHTTPRoutes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": s.withTunnelHealth(r.Context(), items)})
 }
 
+func (s *Server) handleHTTPSRoutes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	items, err := s.store.ListTunnels(r.Context(), store.TunnelFilter{Type: "https", Status: "active"})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": s.withTunnelHealth(r.Context(), items)})
+}
+
 func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeMethodNotAllowed(w, http.MethodGet)
@@ -1196,6 +1210,23 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {
 			return types.TunnelSpec{}, errors.New("http tunnel requires targetHost and targetPort")
 		}
+		spec.Domain = strings.TrimSpace(spec.Domain)
+		spec.TLSMode = ""
+	case "https":
+		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {
+			return types.TunnelSpec{}, errors.New("https tunnel requires targetHost and targetPort")
+		}
+		spec.Domain = strings.TrimSpace(spec.Domain)
+		if spec.Domain == "" {
+			return types.TunnelSpec{}, errors.New("https tunnel requires domain")
+		}
+		spec.TLSMode = strings.TrimSpace(spec.TLSMode)
+		if spec.TLSMode == "" {
+			spec.TLSMode = "edge_terminate"
+		}
+		if spec.TLSMode != "edge_terminate" {
+			return types.TunnelSpec{}, errors.New("unsupported https tlsMode")
+		}
 	case "socks5":
 		spec.TargetHost = "socks5"
 		spec.TargetPort = 1080
@@ -1206,7 +1237,7 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 }
 
 func (s *Server) ensureTunnelNodeCapability(ctx context.Context, nodeID, tunnelType string) error {
-	if tunnelType != "socks5" && tunnelType != "http" {
+	if tunnelType != "socks5" && tunnelType != "http" && tunnelType != "https" {
 		return nil
 	}
 	node, err := s.store.GetNode(ctx, nodeID)
@@ -1216,7 +1247,7 @@ func (s *Server) ensureTunnelNodeCapability(ctx context.Context, nodeID, tunnelT
 	if tunnelType == "socks5" && !node.Capabilities.SOCKS5Connect {
 		return errors.New("selected node does not support socks5 connect")
 	}
-	if tunnelType == "http" && !node.Capabilities.HTTPRelay {
+	if (tunnelType == "http" || tunnelType == "https") && !node.Capabilities.HTTPRelay {
 		return errors.New("selected node does not support http relay")
 	}
 	return nil
