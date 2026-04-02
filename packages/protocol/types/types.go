@@ -192,6 +192,7 @@ type NodeOption struct {
 	SupportsHTTP   bool   `json:"supportsHTTP"`
 	SupportsHTTPS  bool   `json:"supportsHTTPS"`
 	SupportsSOCKS5 bool   `json:"supportsSOCKS5"`
+	SupportsP2P    bool   `json:"supportsP2P"`
 	Isolated       bool   `json:"isolated"`
 }
 

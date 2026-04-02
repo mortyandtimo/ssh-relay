@@ -47,6 +47,7 @@ type NodeOption = {
   supportsHTTP?: boolean;
   supportsHTTPS?: boolean;
   supportsSOCKS5?: boolean;
+  supportsP2P?: boolean;
   isolated?: boolean;
 };
 
@@ -1058,10 +1059,10 @@ export default function App() {
   const httpsCapableNodeCount = allNodes.filter((node) => node.supportsHTTPS ?? node.supportsHTTP).length;
   const udpCapableNodeCount = allNodes.filter((node) => node.supportsUDP).length;
   const socks5CapableNodeCount = allNodes.filter((node) => node.supportsSOCKS5).length;
-  const p2pCapableNodeCount = nodes.filter((node) => node.capabilities.p2pAssist).length;
+  const p2pCapableNodeCount = allNodes.filter((node) => node.supportsP2P).length;
   const p2pCandidateNodeCount = nodes.filter((node) => node.capabilities.p2pAssist && (node.nodeRole === "local" || node.nodeRole === "third_party") && node.status === "online").length;
-  const tunnelFormNodeSummary = nodes.find((node) => node.nodeId === tunnelForm.nodeId) ?? null;
-  const tunnelEditNodeSummary = tunnelEditForm ? nodes.find((node) => node.nodeId === tunnelEditForm.nodeId) ?? null : null;
+  const tunnelFormNodeOption = allNodes.find((node) => node.nodeId === tunnelForm.nodeId) ?? null;
+  const tunnelEditNodeOption = tunnelEditForm ? allNodes.find((node) => node.nodeId === tunnelEditForm.nodeId) ?? null : null;
   const offlineNodeCount = nodes.filter((node) => node.status !== "online").length;
   const cloudNodeCount = nodes.filter((node) => node.nodeRole === "cloud").length;
   const localNodeCount = nodes.filter((node) => node.nodeRole === "local").length;
@@ -1265,14 +1266,14 @@ export default function App() {
                     </div>
                   </div>
                   <div className="signal-strip">
-                    <SignalCard label="支持 p2pAssist 的节点" value={p2pCapableNodeCount === 0 ? "无" : String(p2pCapableNodeCount)} />
-                    <SignalCard label="具备基础 readiness 条件的潜在候选" value={p2pCandidateNodeCount === 0 ? "无" : String(p2pCandidateNodeCount)} />
+                    <SignalCard label="当前已加载节点中支持 p2pAssist 的节点" value={p2pCapableNodeCount === 0 ? "无" : String(p2pCapableNodeCount)} />
+                    <SignalCard label="当前已加载节点中具备基础 readiness 条件的潜在候选" value={p2pCandidateNodeCount === 0 ? "无" : String(p2pCandidateNodeCount)} />
                     <SignalCard label="p2p_preferred tunnel" value={p2pPreferredTunnelCount === 0 ? "无" : String(p2pPreferredTunnelCount)} />
                     <SignalCard label="当前主运行语义" value={p2pPreferredTunnelCount > 0 ? "仍为 relay_only 数据面" : "全部 relay_only"} />
                   </div>
                   <div className="empty-state placement-panel">
                     <strong>P2P 当前仅为下一阶段能力预留</strong>
-                    <p>当前已支持的只是 control-plane / 管理台表达：节点 P2P 协助能力、具备基础 readiness 条件的潜在候选可见性、transport policy 预留位。</p>
+                    <p>当前已支持的只是 control-plane / 管理台表达：当前已加载节点中的 P2P 协助能力、具备基础 readiness 条件的潜在候选可见性、transport policy 预留位。</p>
                     <p>当前为什么仍走 relay_only：本轮没有实现 NAT 穿透、ICE/STUN/TURN、复杂握手或真实 P2P 数据面。</p>
                   </div>
                 </section>
@@ -1848,7 +1849,7 @@ export default function App() {
                     {editingTunnelID !== null && tunnelEditForm ? (
                       <form className="form-grid" onSubmit={submitTunnelEdit}>
                         <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
-                        <label><span>传输策略</span><select value={tunnelEditForm.transportPolicy} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, transportPolicy: event.target.value as TunnelTransportPolicy } : current)}><option value="relay_only">relay_only</option><option value="p2p_preferred" disabled={!tunnelEditNodeSummary?.capabilities.p2pAssist}>p2p_preferred（预留）</option></select></label>
+                        <label><span>传输策略</span><select value={tunnelEditForm.transportPolicy} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, transportPolicy: event.target.value as TunnelTransportPolicy } : current)}><option value="relay_only">relay_only</option><option value="p2p_preferred" disabled={!tunnelEditNodeOption?.supportsP2P}>p2p_preferred（预留）</option></select></label>
                         {tunnelEditForm.type === "udp" ? <div className="form-note">UDP 当前为最小数据面 V1，已完成真实公网 echo 验证；当前仍不支持 UDP probe、复杂会话管理、生产级超时治理或 NAT 穿透。</div> : null}
                         <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
@@ -1867,7 +1868,7 @@ export default function App() {
                         {tunnelEditForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelEditForm.publicPort || "<公网端口>"}</code></div> : null}
                         {tunnelEditForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelEditForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
                         {tunnelEditForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
-                        <div className="form-note">P2P control-plane V1：{tunnelEditNodeSummary?.capabilities.p2pAssist ? <><code>p2p_preferred</code> 当前可选，但仅为预留语义，不代表已支持真实 P2P 数据面。</> : <>当前节点不具备 <code>p2pAssist</code>，不建议设为 <code>p2p_preferred</code>；当前运行仍按 <code>relay_only</code> 理解。</>}</div>
+                        <div className="form-note">P2P control-plane V1：{tunnelEditNodeOption?.supportsP2P ? <><code>p2p_preferred</code> 当前可选，但仅为预留语义，不代表已支持真实 P2P 数据面。</> : <>当前节点不具备 <code>p2pAssist</code>，不建议设为 <code>p2p_preferred</code>；当前运行仍按 <code>relay_only</code> 理解。</>}</div>
                         <div className="detail-grid readonly-grid">
                           <DetailItem label="nodeId" value={tunnelEditForm.nodeId} />
                           <DetailItem label="status" value={tunnelEditForm.status} />
@@ -1902,7 +1903,7 @@ export default function App() {
                           </select>
                         </label>
                         <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
-                        <label><span>传输策略</span><select value={tunnelForm.transportPolicy} onChange={(event) => setTunnelForm((current) => ({ ...current, transportPolicy: event.target.value as TunnelTransportPolicy }))}><option value="relay_only">relay_only</option><option value="p2p_preferred" disabled={!tunnelFormNodeSummary?.capabilities.p2pAssist}>p2p_preferred（预留）</option></select></label>
+                        <label><span>传输策略</span><select value={tunnelForm.transportPolicy} onChange={(event) => setTunnelForm((current) => ({ ...current, transportPolicy: event.target.value as TunnelTransportPolicy }))}><option value="relay_only">relay_only</option><option value="p2p_preferred" disabled={!tunnelFormNodeOption?.supportsP2P}>p2p_preferred（预留）</option></select></label>
                         <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
                         <label><span>{tunnelForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
@@ -1923,7 +1924,7 @@ export default function App() {
                         {tunnelFormNode?.status !== "online" ? <div className="form-note">当前选中节点 offline。按现有语义仍可查看或保留配置，但当前不可通信。</div> : null}
                         {tunnelFormNode?.isolated ? <div className="form-note">当前选中节点已隔离，后端会拒绝新建 tunnel。</div> : null}
                         {tunnelForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
-                        <div className="form-note">P2P control-plane V1：{tunnelFormNodeSummary?.capabilities.p2pAssist ? <><code>p2p_preferred</code> 仅作为下一阶段 transport policy 预留语义，不代表已支持 P2P 数据面。</> : <>当前节点不具备 <code>p2pAssist</code>，因此不建议也不开放 <code>p2p_preferred</code>；当前创建按 <code>relay_only</code> 理解。</>}</div>
+                        <div className="form-note">P2P control-plane V1：{tunnelFormNodeOption?.supportsP2P ? <><code>p2p_preferred</code> 仅作为下一阶段 transport policy 预留语义，不代表已支持 P2P 数据面。</> : <>当前节点不具备 <code>p2pAssist</code>，因此不建议也不开放 <code>p2p_preferred</code>；当前创建按 <code>relay_only</code> 理解。</>}</div>
                         <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
                       </form>
                     )}
