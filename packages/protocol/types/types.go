@@ -121,6 +121,11 @@ type TunnelSpec struct {
 	Metadata             map[string]string  `json:"metadata,omitempty"`
 }
 
+const (
+	TunnelTransportRelayOnly    = "relay_only"
+	TunnelTransportP2PPreferred = "p2p_preferred"
+)
+
 type AgentRelayHello struct {
 	NodeID     string `json:"nodeId"`
 	TunnelID   string `json:"tunnelId"`

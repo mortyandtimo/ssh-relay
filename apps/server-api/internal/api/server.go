@@ -1434,6 +1434,13 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 	if spec.Type == "" {
 		spec.Type = "tcp"
 	}
+	spec.TransportPolicy = strings.TrimSpace(spec.TransportPolicy)
+	if spec.TransportPolicy == "" {
+		spec.TransportPolicy = types.TunnelTransportRelayOnly
+	}
+	if spec.TransportPolicy != types.TunnelTransportRelayOnly && spec.TransportPolicy != types.TunnelTransportP2PPreferred {
+		return types.TunnelSpec{}, fmt.Errorf("unsupported transportPolicy %s", spec.TransportPolicy)
+	}
 	switch spec.Type {
 	case "tcp":
 		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {

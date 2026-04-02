@@ -161,6 +161,7 @@ type TunnelForm = {
   nodeId: string;
   name: string;
   type: "tcp" | "udp" | "http" | "https" | "socks5";
+  transportPolicy: TunnelTransportPolicy;
   targetHost: string;
   targetPort: string;
   publicPort: string;
@@ -183,6 +184,8 @@ type TunnelEditForm = {
   type: string;
   transportPolicy: string;
 };
+
+type TunnelTransportPolicy = "relay_only" | "p2p_preferred";
 
 type UserRole = "admin" | "manager" | "user";
 
@@ -233,6 +236,7 @@ const initialTunnelForm: TunnelForm = {
   nodeId: "",
   name: "",
   type: "tcp",
+  transportPolicy: "relay_only",
   targetHost: "127.0.0.1",
   targetPort: "",
   publicPort: "",
@@ -831,7 +835,7 @@ export default function App() {
           nodeId: tunnelForm.nodeId,
           name: tunnelForm.name,
           type: tunnelForm.type,
-          transportPolicy: "relay_only",
+          transportPolicy: tunnelForm.transportPolicy,
           targetHost: tunnelForm.type === "socks5" ? "socks5" : tunnelForm.targetHost,
           targetPort: tunnelForm.type === "socks5" ? 1080 : Number(tunnelForm.targetPort),
           publicPort: Number(tunnelForm.publicPort),
@@ -1054,6 +1058,8 @@ export default function App() {
   const httpsCapableNodeCount = allNodes.filter((node) => node.supportsHTTPS ?? node.supportsHTTP).length;
   const udpCapableNodeCount = allNodes.filter((node) => node.supportsUDP).length;
   const socks5CapableNodeCount = allNodes.filter((node) => node.supportsSOCKS5).length;
+  const p2pCapableNodeCount = nodes.filter((node) => node.capabilities.p2pAssist).length;
+  const p2pCandidateNodeCount = nodes.filter((node) => node.capabilities.p2pAssist && (node.nodeRole === "local" || node.nodeRole === "third_party") && node.status === "online").length;
   const offlineNodeCount = nodes.filter((node) => node.status !== "online").length;
   const cloudNodeCount = nodes.filter((node) => node.nodeRole === "cloud").length;
   const localNodeCount = nodes.filter((node) => node.nodeRole === "local").length;
@@ -1065,6 +1071,7 @@ export default function App() {
   const unprobedTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "not_probed").length;
   const recentFailedTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "recent_failure").length;
   const staleTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "stale").length;
+  const p2pPreferredTunnelCount = tunnels.filter((tunnel) => tunnel.transportPolicy === "p2p_preferred").length;
   const overloadedNodes = nodes.filter((node) => buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId)).loadState === "high_load");
   const idleNodes = nodes.filter((node) => buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId)).loadState === "idle");
   const nodesWithProblemTunnels = nodes.filter((node) => buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId)).problemCount > 0);
@@ -1246,6 +1253,25 @@ export default function App() {
                     {idleNodes.length > 0 ? idleNodes.slice(0, 3).map((node) => (
                       <article key={node.nodeId + ":idle"} className="spotlight-card compact-signal-card"><strong>{node.nodeName}</strong><span className="muted-line">已加载范围内空闲 / 暂无 active tunnel</span></article>
                     )) : <article className="spotlight-card compact-signal-card"><strong>当前已加载范围内无空闲节点</strong><span className="muted-line">在当前已加载节点里，所有节点都有一定承载。</span></article>}
+                  </div>
+                </section>
+                <section className="subpanel">
+                  <div className="section-head compact-head">
+                    <div>
+                      <h3>P2P readiness 摘要</h3>
+                      <span className="muted-line">这轮只建立 P2P 的控制面语义与运维表达，不提供 NAT 穿透、打洞或真实 P2P 数据面。</span>
+                    </div>
+                  </div>
+                  <div className="signal-strip">
+                    <SignalCard label="支持 p2pAssist 的节点" value={p2pCapableNodeCount === 0 ? "无" : String(p2pCapableNodeCount)} />
+                    <SignalCard label="local/third_party 候选" value={p2pCandidateNodeCount === 0 ? "无" : String(p2pCandidateNodeCount)} />
+                    <SignalCard label="p2p_preferred tunnel" value={p2pPreferredTunnelCount === 0 ? "无" : String(p2pPreferredTunnelCount)} />
+                    <SignalCard label="当前主运行语义" value={p2pPreferredTunnelCount > 0 ? "仍为 relay_only 数据面" : "全部 relay_only"} />
+                  </div>
+                  <div className="empty-state placement-panel">
+                    <strong>P2P 当前仅为下一阶段能力预留</strong>
+                    <p>当前已支持的只是 control-plane / 管理台表达：节点 P2P 协助能力、候选节点可见性、transport policy 预留位。</p>
+                    <p>当前为什么仍走 relay_only：本轮没有实现 NAT 穿透、ICE/STUN/TURN、复杂握手或真实 P2P 数据面。</p>
                   </div>
                 </section>
                 {relayRuntime?.pools?.length ? (
@@ -1527,7 +1553,7 @@ export default function App() {
                         <div className="section-head compact-head">
                           <div>
                             <h3>节点能力矩阵</h3>
-                            <span className="muted-line">直接判断该节点能否挂载 TCP / UDP / HTTP / HTTPS / SOCKS5；其中 UDP 当前已达到最小公网数据面 V1。</span>
+                            <span className="muted-line">直接判断该节点能否挂载 TCP / UDP / HTTP / HTTPS / SOCKS5，并观察 P2P 协助能力是否已具备控制面就绪条件。</span>
                           </div>
                         </div>
                         <div className="table-status-stack capability-matrix">
@@ -1537,6 +1563,20 @@ export default function App() {
                           <span className={capabilityPillClass(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}>HTTPS relay {capabilityEnabledLabel(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}</span>
                           <span className={capabilityPillClass(Boolean(selectedNode.capabilities.socks5Connect))}>SOCKS5 connect {capabilityEnabledLabel(Boolean(selectedNode.capabilities.socks5Connect))}</span>
                           <span className={capabilityPillClass(selectedNode.capabilities.p2pAssist)}>P2P assist {capabilityEnabledLabel(selectedNode.capabilities.p2pAssist)}</span>
+                        </div>
+                      </section>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>P2P readiness</h3>
+                            <span className="muted-line">这块只表达控制面与运维可见性，不代表当前已经能走真实 P2P 数据面。</span>
+                          </div>
+                        </div>
+                        <div className="ops-note-list">
+                          <div className={selectedNode.capabilities.p2pAssist ? "ops-note tone-info" : "ops-note tone-neutral"}>{selectedNode.capabilities.p2pAssist ? "该节点具备 p2pAssist 能力，可作为未来 P2P 协助节点候选。" : "该节点当前不具备 p2pAssist 能力，暂不作为未来 P2P 协助节点候选。"}</div>
+                          <div className={(selectedNode.nodeRole === "local" || selectedNode.nodeRole === "third_party") ? "ops-note tone-info" : "ops-note tone-neutral"}>{(selectedNode.nodeRole === "local" || selectedNode.nodeRole === "third_party") ? "该节点角色适合未来参与 P2P 候选组合判断。" : "该节点当前更适合作为云端中继节点，不作为首选 P2P 终端候选。"}</div>
+                          <div className="ops-note tone-neutral">当前仍为 relay_only 控制面阶段：本轮未实现 NAT 穿透、打洞或真实 P2P 数据面。</div>
                         </div>
                       </section>
 
@@ -1733,6 +1773,7 @@ export default function App() {
                             <FactRow label="目标地址" value={<code>{selectedTunnel.targetHost}:{selectedTunnel.targetPort}</code>} />
                             <FactRow label="运行依赖" value={tunnelRequirementSummary(selectedTunnel, nodes)} />
                             <FactRow label="当前归属" value={selectedTunnelPlacement ? selectedTunnelPlacement.summary : "-"} />
+                            <FactRow label="transportPolicy" value={<code>{selectedTunnel.transportPolicy || "relay_only"}</code>} />
                             {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <FactRow label="probePath" value={<code>{selectedTunnel.probePath || "/"}</code>} /> : null}
                             {selectedTunnel.type === "https" ? <FactRow label="publicPort" value={<span><code>{selectedTunnel.publicPort}</code> 仅作内部保留字段</span>} /> : null}
                           </div>
@@ -1776,6 +1817,20 @@ export default function App() {
                           </div>
                         ) : <EmptyState title="暂无归属解释" body="选中 tunnel 后，这里会给出当前节点是否合适以及只读替代建议。" />}
                       </section>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>P2P / transport policy</h3>
+                            <span className="muted-line">当前只承认 P2P 的控制面预留语义，不改现有 relay runtime。</span>
+                          </div>
+                        </div>
+                        <div className="empty-state placement-panel">
+                          <strong>{selectedTunnel.transportPolicy === "p2p_preferred" ? "p2p_preferred（预留语义）" : "relay_only（当前默认）"}</strong>
+                          <p>当前为什么仍走 relay_only：本轮没有实现 NAT 穿透、打洞、ICE/STUN/TURN 或真实 P2P 数据面。</p>
+                          <p>当前可见性价值：让运维能知道这个 tunnel 将来是否优先尝试 P2P，而不是只能脑补 transport policy。</p>
+                        </div>
+                      </section>
                     </>
                   ) : <EmptyState title="尚未选择隧道" body="当前模块下方固定区域保持为新建与运维工作区；在上方列表中选择隧道后，这里会切换成当前隧道的编辑与排障面板。" />}
 
@@ -1791,6 +1846,7 @@ export default function App() {
                     {editingTunnelID !== null && tunnelEditForm ? (
                       <form className="form-grid" onSubmit={submitTunnelEdit}>
                         <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
+                        <label><span>传输策略</span><select value={tunnelEditForm.transportPolicy} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, transportPolicy: event.target.value as TunnelTransportPolicy } : current)}><option value="relay_only">relay_only</option><option value="p2p_preferred">p2p_preferred（预留）</option></select></label>
                         {tunnelEditForm.type === "udp" ? <div className="form-note">UDP 当前为最小数据面 V1，已完成真实公网 echo 验证；当前仍不支持 UDP probe、复杂会话管理、生产级超时治理或 NAT 穿透。</div> : null}
                         <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
@@ -1809,6 +1865,7 @@ export default function App() {
                         {tunnelEditForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelEditForm.publicPort || "<公网端口>"}</code></div> : null}
                         {tunnelEditForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelEditForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
                         {tunnelEditForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
+                        <div className="form-note">P2P control-plane V1：当前可以把 transport policy 标记为 <code>p2p_preferred</code> 作为未来扩展位，但本轮没有实现真实 P2P 数据面，运行仍按 relay_only 理解。</div>
                         <div className="detail-grid readonly-grid">
                           <DetailItem label="nodeId" value={tunnelEditForm.nodeId} />
                           <DetailItem label="status" value={tunnelEditForm.status} />
@@ -1843,6 +1900,7 @@ export default function App() {
                           </select>
                         </label>
                         <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
+                        <label><span>传输策略</span><select value={tunnelForm.transportPolicy} onChange={(event) => setTunnelForm((current) => ({ ...current, transportPolicy: event.target.value as TunnelTransportPolicy }))}><option value="relay_only">relay_only</option><option value="p2p_preferred">p2p_preferred（预留）</option></select></label>
                         <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
                         <label><span>{tunnelForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
@@ -1863,6 +1921,7 @@ export default function App() {
                         {tunnelFormNode?.status !== "online" ? <div className="form-note">当前选中节点 offline。按现有语义仍可查看或保留配置，但当前不可通信。</div> : null}
                         {tunnelFormNode?.isolated ? <div className="form-note">当前选中节点已隔离，后端会拒绝新建 tunnel。</div> : null}
                         {tunnelForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
+                        <div className="form-note">P2P control-plane V1：当前创建仍默认 <code>relay_only</code>；<code>p2p_preferred</code> 目前只作为下一阶段 transport policy 预留语义，不代表已支持 P2P 数据面。</div>
                         <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
                       </form>
                     )}
