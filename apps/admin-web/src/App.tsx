@@ -43,6 +43,7 @@ type NodeOption = {
   nodeName: string;
   status: string;
   supportsTCP?: boolean;
+  supportsUDP?: boolean;
   supportsHTTP?: boolean;
   supportsHTTPS?: boolean;
   supportsSOCKS5?: boolean;
@@ -64,7 +65,7 @@ type NodeFilterState = {
 };
 
 type NodeStatusFilter = "all" | "online" | "offline";
-type NodeCapabilityFilter = "all" | "tcp" | "http" | "https" | "socks5";
+type NodeCapabilityFilter = "all" | "tcp" | "udp" | "http" | "https" | "socks5";
 type NodeSortMode = "ops_priority" | "last_seen_desc" | "active_tunnels_desc" | "name_asc";
 
 type NodeEditForm = {
@@ -79,7 +80,7 @@ type NodeEditForm = {
 
 type TunnelHealthStatus = "healthy" | "node_offline" | "capability_missing" | "misconfigured" | "target_unreachable";
 type TunnelHealthFilter = "all" | "healthy" | "unhealthy";
-type TunnelTypeFilter = "all" | "tcp" | "http" | "https" | "socks5";
+type TunnelTypeFilter = "all" | "tcp" | "udp" | "http" | "https" | "socks5";
 type ProbeFreshnessState = "not_probed" | "recent_success" | "recent_failure" | "stale";
 type ProbeStateFilter = "all" | ProbeFreshnessState;
 type TunnelNodeStatusFilter = "all" | "online" | "offline";
@@ -144,7 +145,7 @@ type TunnelProbeResult = {
 type TunnelForm = {
   nodeId: string;
   name: string;
-  type: "tcp" | "http" | "https" | "socks5";
+  type: "tcp" | "udp" | "http" | "https" | "socks5";
   targetHost: string;
   targetPort: string;
   publicPort: string;
@@ -940,9 +941,11 @@ export default function App() {
   const tcpTunnelCount = tunnels.filter((tunnel) => tunnel.type === "tcp").length;
   const httpTunnelCount = tunnels.filter((tunnel) => tunnel.type === "http").length;
   const httpsTunnelCount = tunnels.filter((tunnel) => tunnel.type === "https").length;
+  const udpTunnelCount = tunnels.filter((tunnel) => tunnel.type === "udp").length;
   const socks5TunnelCount = tunnels.filter((tunnel) => tunnel.type === "socks5").length;
   const httpCapableNodeCount = allNodes.filter((node) => node.supportsHTTP).length;
   const httpsCapableNodeCount = allNodes.filter((node) => node.supportsHTTPS ?? node.supportsHTTP).length;
+  const udpCapableNodeCount = allNodes.filter((node) => node.supportsUDP).length;
   const socks5CapableNodeCount = allNodes.filter((node) => node.supportsSOCKS5).length;
   const offlineNodeCount = nodes.filter((node) => node.status !== "online").length;
   const cloudNodeCount = nodes.filter((node) => node.nodeRole === "cloud").length;
@@ -1092,6 +1095,7 @@ export default function App() {
                     <MetricCard label="Active 数" value={String(activeTunnels)} hint="当前处于 active 的 tunnel" />
                     <MetricCard label="HTTP 入口" value={String(httpTunnelCount)} hint="http://IP:端口 发布 Web/API" />
                     <MetricCard label="HTTPS 入口" value={String(httpsTunnelCount)} hint="https://domain 标准 443 入口" />
+                    <MetricCard label="UDP 预留" value={String(udpTunnelCount)} hint="udp://IP:端口 协议位预留，当前未开放" />
                     <MetricCard label="SOCKS5 入口" value={String(socks5TunnelCount)} hint="socks5://IP:端口 代理入口" />
                     <MetricCard label="TCP 入口" value={String(tcpTunnelCount)} hint="host:port 直连入口" />
                   </div>
@@ -1102,6 +1106,7 @@ export default function App() {
                     <SignalCard label="结果较旧" value={staleTunnelCount === 0 ? "无" : String(staleTunnelCount)} />
                     <SignalCard label="支持 HTTP 的节点" value={String(httpCapableNodeCount)} />
                     <SignalCard label="支持 HTTPS 的节点" value={String(httpsCapableNodeCount)} />
+                    <SignalCard label="支持 UDP 的节点" value={String(udpCapableNodeCount)} />
                     <SignalCard label="支持 SOCKS5 的节点" value={String(socks5CapableNodeCount)} />
                   </div>
                 </section>
@@ -1219,7 +1224,7 @@ export default function App() {
                               <td><span className={statusPillClass(node.status)}>{node.status}</span><div className="muted">{formatDate(node.lastSeenAt)}</div></td>
                               <td><div>{node.nodeRole ? roleLabel(node.nodeRole) : "-"}</div><div className="muted">{node.environment || "-"} / {node.trustLevel || "-"}</div></td>
                               <td><div>{node.activeTunnels}</div><div className="muted">负责人 {node.owner || "-"}</div></td>
-                              <td><div className="table-status-stack"><span className={capabilityPillClass(node.capabilities.tcpRelay)}>TCP</span><span className={capabilityPillClass(node.capabilities.httpRelay)}>HTTP</span><span className={capabilityPillClass(node.capabilities.httpsRelay || node.capabilities.httpRelay)}>HTTPS</span><span className={capabilityPillClass(Boolean(node.capabilities.socks5Connect))}>SOCKS5</span></div></td>
+                              <td><div className="table-status-stack"><span className={capabilityPillClass(node.capabilities.tcpRelay)}>TCP</span><span className={capabilityPillClass(node.capabilities.udpRelay)}>UDP</span><span className={capabilityPillClass(node.capabilities.httpRelay)}>HTTP</span><span className={capabilityPillClass(node.capabilities.httpsRelay || node.capabilities.httpRelay)}>HTTPS</span><span className={capabilityPillClass(Boolean(node.capabilities.socks5Connect))}>SOCKS5</span></div></td>
                               <td>{formatTags(node.tags)}</td>
                             </tr>
                           ))}
@@ -1314,11 +1319,12 @@ export default function App() {
                         <div className="section-head compact-head">
                           <div>
                             <h3>节点能力矩阵</h3>
-                            <span className="muted-line">直接判断该节点能否挂载 TCP / HTTP / HTTPS / SOCKS5，不再只看原始布尔字段。</span>
+                            <span className="muted-line">直接判断该节点能否挂载 TCP / UDP / HTTP / HTTPS / SOCKS5；其中 UDP 当前仅为预留扩展位。</span>
                           </div>
                         </div>
                         <div className="table-status-stack capability-matrix">
                           <span className={capabilityPillClass(selectedNode.capabilities.tcpRelay)}>TCP relay {capabilityEnabledLabel(selectedNode.capabilities.tcpRelay)}</span>
+                          <span className={capabilityPillClass(selectedNode.capabilities.udpRelay)}>UDP relay 预留 {selectedNode.capabilities.udpRelay ? "已预留" : "未启用"}</span>
                           <span className={capabilityPillClass(selectedNode.capabilities.httpRelay)}>HTTP relay {capabilityEnabledLabel(selectedNode.capabilities.httpRelay)}</span>
                           <span className={capabilityPillClass(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}>HTTPS relay {capabilityEnabledLabel(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}</span>
                           <span className={capabilityPillClass(Boolean(selectedNode.capabilities.socks5Connect))}>SOCKS5 connect {capabilityEnabledLabel(Boolean(selectedNode.capabilities.socks5Connect))}</span>
@@ -1414,7 +1420,7 @@ export default function App() {
                       </div>
                     </div>
                     <div className="form-grid">
-                      <label><span>入口类型</span><select value={tunnelTypeFilter} onChange={(event) => setTunnelTypeFilter(event.target.value as TunnelTypeFilter)}><option value="all">全部</option><option value="tcp">TCP</option><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
+                      <label><span>入口类型</span><select value={tunnelTypeFilter} onChange={(event) => setTunnelTypeFilter(event.target.value as TunnelTypeFilter)}><option value="all">全部</option><option value="tcp">TCP</option><option value="udp">UDP（预留）</option><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
                       <label><span>Probe 状态</span><select value={probeStateFilter} onChange={(event) => setProbeStateFilter(event.target.value as ProbeStateFilter)}><option value="all">全部</option><option value="not_probed">未探测</option><option value="recent_success">最近成功</option><option value="recent_failure">最近失败</option><option value="stale">结果较旧</option></select></label>
                       <label><span>节点状态</span><select value={tunnelNodeStatusFilter} onChange={(event) => setTunnelNodeStatusFilter(event.target.value as TunnelNodeStatusFilter)}><option value="all">全部</option><option value="online">节点在线</option><option value="offline">节点离线</option></select></label>
                       <label><span>排序</span><select value={tunnelSortMode} onChange={(event) => setTunnelSortMode(event.target.value as TunnelSortMode)}><option value="ops_priority">默认：异常/失败/较旧优先</option><option value="updated_desc">按更新时间</option><option value="name_asc">按名称</option><option value="health_priority">按健康优先级</option><option value="probe_desc">按最近 probe 时间</option></select></label>
@@ -1565,6 +1571,7 @@ export default function App() {
                     {editingTunnelID !== null && tunnelEditForm ? (
                       <form className="form-grid" onSubmit={submitTunnelEdit}>
                         <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
+                        {tunnelEditForm.type === "udp" ? <div className="form-note">UDP 当前仅为预留协议位，server-api 会明确拒绝创建/更新，暂不支持真实创建、探测或联调。</div> : null}
                         <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                         <label><span>{tunnelEditForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
@@ -1587,8 +1594,9 @@ export default function App() {
                       <form className="form-grid" onSubmit={createTunnel}>
                         <label>
                           <span>类型</span>
-                          <select value={tunnelForm.type} onChange={(event) => setTunnelForm((current) => ({ ...current, type: event.target.value as "tcp" | "http" | "https" | "socks5" }))}>
+                          <select value={tunnelForm.type} onChange={(event) => setTunnelForm((current) => ({ ...current, type: event.target.value as "tcp" | "udp" | "http" | "https" | "socks5" }))}>
                             <option value="tcp">TCP</option>
+                            <option value="udp" disabled>UDP（预留中）</option>
                             <option value="http">HTTP</option>
                             <option value="https">HTTPS</option>
                             <option value="socks5">SOCKS5</option>
@@ -1613,6 +1621,7 @@ export default function App() {
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>域名</span><input value={tunnelForm.domain} onChange={(event) => setTunnelForm((current) => ({ ...current, domain: event.target.value }))} placeholder="例如 app.example.com" /></label> : null}
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>probePath</span><input value={tunnelForm.probePath} onChange={(event) => setTunnelForm((current) => ({ ...current, probePath: event.target.value }))} placeholder="默认 /" /></label> : null}
                         {tunnelForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelForm.tlsMode} onChange={(event) => setTunnelForm((current) => ({ ...current, tlsMode: event.target.value as "" | "edge_terminate" }))}><option value="edge_terminate">edge_terminate</option></select></label> : null}
+                        {tunnelForm.type === "udp" ? <div className="form-note">UDP（预留中）：当前只预留协议位、节点能力位和端口冲突语义，暂不开放真实创建、探测或联调。</div> : null}
                         {tunnelForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelForm.publicPort || "<公网端口>"}</code></div> : null}
                         {tunnelForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
                         {tunnelFormNode?.status !== "online" ? <div className="form-note">当前选中节点 offline。按现有语义仍可查看或保留配置，但当前不可通信。</div> : null}
@@ -1874,6 +1883,17 @@ function TunnelRuntimeGuide({
     );
   }
 
+  if (type === "udp") {
+    return (
+      <div className="empty-state runtime-guide">
+        <strong>UDP relay 预留说明</strong>
+        <p>UDP 当前只保留协议位、节点能力位和端口语义，尚未开放真实数据面。</p>
+        <p>预留入口：<code>{entry}</code></p>
+        <p>当前不支持真实创建、探测、联调或转发验证。</p>
+      </div>
+    );
+  }
+
   return (
     <div className="empty-state runtime-guide">
       <strong>TCP relay 说明</strong>
@@ -2029,6 +2049,7 @@ function sortTunnels(tunnels: TunnelSpec[], nodes: NodeSummary[], mode: TunnelSo
 function tunnelTypeLabel(type: string) {
   if (type === "http") return "HTTP";
   if (type === "https") return "HTTPS";
+  if (type === "udp") return "UDP（预留）";
   return type === "socks5" ? "SOCKS5" : "TCP";
 }
 
@@ -2038,6 +2059,9 @@ function tunnelPublicEntry(tunnel: TunnelSpec) {
   }
   if (tunnel.type === "https") {
     return tunnel.domain ? "https://" + tunnel.domain : "https://<待绑定域名>";
+  }
+  if (tunnel.type === "udp") {
+    return "udp://82.156.236.104:" + tunnel.publicPort + "（预留中）";
   }
   if (tunnel.type === "socks5") {
     return "socks5://82.156.236.104:" + tunnel.publicPort;
@@ -2051,6 +2075,9 @@ function tunnelEntryPreview(type: string, publicPort: string, domain: string) {
   }
   if (type === "https") {
     return domain ? "https://" + domain : "https://<待绑定域名>";
+  }
+  if (type === "udp") {
+    return "udp://82.156.236.104:" + (publicPort || "<公网端口>") + "（预留中）";
   }
   if (type === "socks5") {
     return "socks5://82.156.236.104:" + (publicPort || "<公网端口>");
@@ -2070,6 +2097,9 @@ function tunnelTargetLabel(tunnel: TunnelSpec) {
   if (tunnel.type === "socks5") {
     return "节点侧 SOCKS5 CONNECT";
   }
+  if (tunnel.type === "udp") {
+    return "UDP 预留类型，当前未开放真实数据面";
+  }
   if (tunnel.type === "http") {
     return "发布 " + tunnel.targetHost + ":" + tunnel.targetPort + " 的 Web/API 服务";
   }
@@ -2085,6 +2115,9 @@ function tunnelTypeEntryHint(tunnel: TunnelSpec) {
   }
   if (tunnel.type === "https") {
     return "HTTPS 标准入口，依赖 Nginx 443 terminate";
+  }
+  if (tunnel.type === "udp") {
+    return "UDP 预留协议位，当前未开放";
   }
   if (tunnel.type === "socks5") {
     return "SOCKS5 CONNECT 代理入口";
@@ -2201,6 +2234,9 @@ function tunnelRequirementSummary(tunnel: TunnelSpec, nodes: NodeSummary[]) {
   } else if (tunnel.type === "https") {
     requirements.push((node?.capabilities.httpsRelay || node?.capabilities.httpRelay) ? "HTTPS 能力满足" : "HTTPS 能力缺失");
     requirements.push("443 入口依赖 Nginx terminate");
+  } else if (tunnel.type === "udp") {
+    requirements.push(node?.capabilities.udpRelay ? "UDP 能力已预留" : "UDP 能力未启用");
+    requirements.push("UDP 数据面未开放");
   } else if (tunnel.type === "socks5") {
     requirements.push(node?.capabilities.socks5Connect ? "SOCKS5 能力满足" : "SOCKS5 能力缺失");
   } else {
@@ -2281,6 +2317,7 @@ function matchesNodeOpsFilters(
   if (capabilityFilter !== "all") {
     const match =
       capabilityFilter === "tcp" ? node.capabilities.tcpRelay :
+      capabilityFilter === "udp" ? node.capabilities.udpRelay :
       capabilityFilter === "http" ? node.capabilities.httpRelay :
       capabilityFilter === "https" ? (node.capabilities.httpsRelay || node.capabilities.httpRelay) :
       Boolean(node.capabilities.socks5Connect);

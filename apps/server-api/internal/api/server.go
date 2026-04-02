@@ -468,7 +468,7 @@ func (s *Server) handleNodeOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	options := make([]types.NodeOption, 0, len(items))
 	for _, item := range items {
-		options = append(options, types.NodeOption{NodeID: item.NodeID, NodeName: item.NodeName, Status: item.Status, SupportsTCP: item.Capabilities.TCPRelay, SupportsHTTP: item.Capabilities.HTTPRelay, SupportsHTTPS: item.Capabilities.HTTPSRelay || item.Capabilities.HTTPRelay, SupportsSOCKS5: item.Capabilities.SOCKS5Connect, Isolated: item.Isolated})
+		options = append(options, types.NodeOption{NodeID: item.NodeID, NodeName: item.NodeName, Status: item.Status, SupportsTCP: item.Capabilities.TCPRelay, SupportsUDP: item.Capabilities.UDPRelay, SupportsHTTP: item.Capabilities.HTTPRelay, SupportsHTTPS: item.Capabilities.HTTPSRelay || item.Capabilities.HTTPRelay, SupportsSOCKS5: item.Capabilities.SOCKS5Connect, Isolated: item.Isolated})
 	}
 	writeJSON(w, http.StatusOK, types.NodeOptionsResponse{Items: options})
 }
@@ -1358,6 +1358,8 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 	case "socks5":
 		spec.TargetHost = "socks5"
 		spec.TargetPort = 1080
+	case "udp":
+		return types.TunnelSpec{}, errors.New("udp tunnel is reserved and not enabled yet")
 	default:
 		return types.TunnelSpec{}, fmt.Errorf("unsupported tunnel type %s", spec.Type)
 	}

@@ -167,6 +167,7 @@ type NodeOption struct {
 	NodeName       string `json:"nodeName"`
 	Status         string `json:"status"`
 	SupportsTCP    bool   `json:"supportsTCP"`
+	SupportsUDP    bool   `json:"supportsUDP"`
 	SupportsHTTP   bool   `json:"supportsHTTP"`
 	SupportsHTTPS  bool   `json:"supportsHTTPS"`
 	SupportsSOCKS5 bool   `json:"supportsSOCKS5"`

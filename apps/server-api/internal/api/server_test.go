@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1086,6 +1087,65 @@ func TestSOCKS5TunnelRequiresSOCKS5CapableNode(t *testing.T) {
 	server.Handler().ServeHTTP(allowedRes, allowedReq)
 	if allowedRes.Code != http.StatusCreated {
 		t.Fatalf("expected create allowed 201, got %d", allowedRes.Code)
+	}
+}
+
+func TestPublicPortConflictSemanticsByProtocol(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "edge-port-semantics", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, UDPRelay: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register status 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createTCPBody, _ := json.Marshal(map[string]any{"id": "tunnel-tcp-a", "nodeId": registerOut.NodeID, "name": "tcp-a", "type": "tcp", "targetHost": "127.0.0.1", "targetPort": 18080, "publicPort": 19090, "status": "active"})
+	createTCPReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createTCPBody))
+	applyCookies(createTCPReq, adminCookies)
+	createTCPRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createTCPRes, createTCPReq)
+	if createTCPRes.Code != http.StatusCreated {
+		t.Fatalf("expected tcp create 201, got %d", createTCPRes.Code)
+	}
+
+	tcpConflictBody, _ := json.Marshal(map[string]any{"id": "tunnel-tcp-b", "nodeId": registerOut.NodeID, "name": "tcp-b", "type": "tcp", "targetHost": "127.0.0.1", "targetPort": 18081, "publicPort": 19090, "status": "active"})
+	tcpConflictReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(tcpConflictBody))
+	applyCookies(tcpConflictReq, adminCookies)
+	tcpConflictRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(tcpConflictRes, tcpConflictReq)
+	if tcpConflictRes.Code != http.StatusConflict {
+		t.Fatalf("expected tcp/tcp conflict 409, got %d", tcpConflictRes.Code)
+	}
+
+	tcpUDPConflictAllowedBody, _ := json.Marshal(map[string]any{"id": "tunnel-udp-reserved-same-port", "nodeId": registerOut.NodeID, "name": "udp-same-port", "type": "udp", "targetHost": "127.0.0.1", "targetPort": 18082, "publicPort": 19090, "status": "active"})
+	tcpUDPConflictAllowedReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(tcpUDPConflictAllowedBody))
+	applyCookies(tcpUDPConflictAllowedReq, adminCookies)
+	tcpUDPConflictAllowedRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(tcpUDPConflictAllowedRes, tcpUDPConflictAllowedReq)
+	if tcpUDPConflictAllowedRes.Code != http.StatusBadRequest {
+		t.Fatalf("expected udp reserved reject 400, got %d", tcpUDPConflictAllowedRes.Code)
+	}
+	if !strings.Contains(tcpUDPConflictAllowedRes.Body.String(), "udp tunnel is reserved and not enabled yet") {
+		t.Fatalf("expected reserved udp message, got %s", tcpUDPConflictAllowedRes.Body.String())
+	}
+
+	memoryStore := store.NewInMemoryStore()
+	if _, err := memoryStore.CreateTunnel(context.Background(), types.TunnelSpec{ID: "tcp-store-a", Type: "tcp", Status: "active", PublicPort: 20000, TargetHost: "127.0.0.1", TargetPort: 80}); err != nil {
+		t.Fatalf("expected tcp store create success, got %v", err)
+	}
+	if _, err := memoryStore.CreateTunnel(context.Background(), types.TunnelSpec{ID: "udp-store-a", Type: "udp", Status: "active", PublicPort: 20000, TargetHost: "127.0.0.1", TargetPort: 53}); err != nil {
+		t.Fatalf("expected tcp/udp same port to coexist in store, got %v", err)
+	}
+	if _, err := memoryStore.CreateTunnel(context.Background(), types.TunnelSpec{ID: "udp-store-b", Type: "udp", Status: "active", PublicPort: 20000, TargetHost: "127.0.0.1", TargetPort: 54}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("expected udp/udp conflict, got %v", err)
 	}
 }
 

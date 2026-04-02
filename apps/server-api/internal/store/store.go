@@ -14,6 +14,17 @@ var ErrUnauthorized = errors.New("unauthorized")
 var ErrForbidden = errors.New("forbidden")
 var ErrBootstrapRequired = errors.New("bootstrap required")
 
+func TunnelPortBindingKey(tunnelType string) string {
+	switch tunnelType {
+	case "tcp", "socks5", "http":
+		return "tcp"
+	case "udp":
+		return "udp"
+	default:
+		return ""
+	}
+}
+
 type TunnelFilter struct {
 	NodeID string
 	Type   string
