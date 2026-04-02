@@ -1,4 +1,4 @@
-import { FormEvent, Fragment, useEffect, useRef, useState } from "react";
+import { FormEvent, Fragment, ReactNode, useEffect, useRef, useState } from "react";
 
 type NodeCapabilities = {
   tcpRelay: boolean;
@@ -1242,35 +1242,54 @@ export default function App() {
                   </div>
                   {selectedNode && nodeEditForm ? (
                     <>
-                      <div className="detail-hero">
+                      <div className="detail-hero workbench-hero">
                         <div>
+                          <p className="eyebrow">当前节点</p>
                           <strong>{selectedNode.nodeName}</strong>
                           <span className="muted-line">{selectedNode.nodeId}</span>
                         </div>
-                        <span className={statusPillClass(selectedNode.status)}>{selectedNode.status}</span>
+                        <div className="hero-status-group">
+                          <span className={statusPillClass(selectedNode.status)}>{selectedNode.status}</span>
+                          {selectedNode.isolated ? <span className="status-pill tone-danger">已隔离</span> : <span className="status-pill tone-good">未隔离</span>}
+                        </div>
                       </div>
 
-                      <div className="workbench-grid workbench-grid-wide">
-                        <div className="empty-state">
-                          <strong>基础状态</strong>
-                          <p>nodeId：<code>{selectedNode.nodeId}</code></p>
-                          <p>nodeName：<code>{selectedNode.nodeName}</code></p>
-                          <p>lastSeenAt：<code>{formatDate(selectedNode.lastSeenAt)}</code></p>
-                          <p>activeTunnels：<code>{String(selectedNode.activeTunnels)}</code></p>
-                          <p>hostname / os / arch：<code>{nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} / {nodeMeta(selectedNode, "os")} / {nodeMeta(selectedNode, "arch")}</code></p>
-                          <p>隔离状态：{selectedNode.isolated ? <span className="status-pill tone-danger">已隔离</span> : <span className="status-pill tone-good">未隔离</span>}</p>
-                          <div className="actions-row">
+                      <div className="workbench-grid workbench-grid-wide workbench-primary-grid">
+                        <div className="workbench-card workbench-card-primary">
+                          <div className="card-heading-row">
+                            <div>
+                              <span className="card-kicker">核心状态</span>
+                              <strong>当前节点概况</strong>
+                            </div>
+                            <div className="card-status-rail">
+                              <span className={statusPillClass(selectedNode.status)}>{selectedNode.status}</span>
+                              {selectedNode.isolated ? <span className="status-pill tone-danger">已隔离</span> : <span className="status-pill tone-good">允许挂载</span>}
+                            </div>
+                          </div>
+                          <div className="fact-list">
+                            <FactRow label="最后在线" value={<code>{formatDate(selectedNode.lastSeenAt)}</code>} />
+                            <FactRow label="当前承载" value={<code>{String(selectedNode.activeTunnels)} 个 tunnel</code>} />
+                            <FactRow label="主机信息" value={<code>{nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} / {nodeMeta(selectedNode, "os")} / {nodeMeta(selectedNode, "arch")}</code>} />
+                          </div>
+                          <div className="actions-row actions-row-strong">
                             <button type="button" className="secondary" disabled={busyAction === 'isolate-node:' + selectedNode.nodeId || selectedNode.isolated} onClick={() => void setNodeIsolation(selectedNode, true)}>隔离节点</button>
                             <button type="button" className="secondary" disabled={busyAction === 'release-node:' + selectedNode.nodeId || !selectedNode.isolated} onClick={() => void setNodeIsolation(selectedNode, false)}>解除隔离</button>
                             <button type="button" className="secondary" onClick={() => void refreshDashboard(true, currentUser, false, auditFilterRef.current, nodeFilterRef.current)} disabled={busyAction === 'refresh'}>刷新当前视图</button>
                           </div>
                         </div>
 
-                        <div className="empty-state">
-                          <strong>运维提示</strong>
-                          <p>{selectedNode.isolated ? '已隔离：禁止新挂载 tunnel。' : '未隔离：允许正常挂载 tunnel。'}</p>
-                          <p>{selectedNode.status !== 'online' ? 'offline：当前不可通信。' : 'online：控制面可通信。'}</p>
-                          <p>{selectedNode.activeTunnels >= 3 ? '高承载：当前 activeTunnels 较多。' : '承载正常：当前 activeTunnels 处于较低水平。'}</p>
+                        <div className="workbench-card workbench-card-aside">
+                          <div className="card-heading-row">
+                            <div>
+                              <span className="card-kicker">运维提示</span>
+                              <strong>优先判断项</strong>
+                            </div>
+                          </div>
+                          <div className="ops-note-list">
+                            <div className={selectedNode.isolated ? "ops-note tone-danger note-strong" : "ops-note tone-good"}>{selectedNode.isolated ? '已隔离：禁止新挂载 tunnel。' : '未隔离：允许正常挂载 tunnel。'}</div>
+                            <div className={selectedNode.status !== 'online' ? "ops-note tone-danger note-strong" : "ops-note tone-info"}>{selectedNode.status !== 'online' ? 'offline：当前不可通信。' : 'online：控制面可通信。'}</div>
+                            <div className={selectedNode.activeTunnels >= 3 ? "ops-note tone-warn" : "ops-note tone-neutral"}>{selectedNode.activeTunnels >= 3 ? '高承载：当前 activeTunnels 较多。' : '承载正常：当前 activeTunnels 处于较低水平。'}</div>
+                          </div>
                         </div>
                       </div>
 
@@ -1469,40 +1488,69 @@ export default function App() {
                   <div className="section-head compact-head">
                     <div>
                       <h3>隧道运维工作台</h3>
-                      <span className="muted-line">右侧固定承载基本信息、创建/编辑表单、probe 结果和运行说明，切换隧道时只更新这里的内容。</span>
+                      <span className="muted-line">右侧固定承载核心状态、入口信息、表单操作、probe 结果和运行说明，切换隧道时只更新这里的内容。</span>
                     </div>
                     <span className={selectedTunnel ? statusPillClass(selectedTunnel.status) : "status-pill tone-neutral"}>{selectedTunnel ? selectedTunnel.status : "新建模式"}</span>
                   </div>
 
                   {selectedTunnel ? (
-                    <div className="workbench-grid workbench-grid-wide tunnel-info-grid">
-                      <div className="empty-state">
-                        <strong>基本信息</strong>
-                        <p>id：<code>{selectedTunnel.id}</code></p>
-                        <p>name：<code>{selectedTunnel.name}</code></p>
-                        <p>type：<code>{tunnelTypeLabel(selectedTunnel.type)}</code></p>
-                        <p>nodeId：<code>{selectedTunnel.nodeId}</code></p>
-                        <p>status：<span className={statusPillClass(selectedTunnel.status)}>{selectedTunnel.status}</span></p>
-                        <p>healthStatus：<span className={tunnelHealthPillClass(selectedTunnel.healthStatus)}>{tunnelHealthLabel(selectedTunnel.healthStatus)}</span></p>
-                        <p>probe freshness：<span className={probeFreshnessPillClass(deriveProbeFreshnessState(selectedTunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(selectedTunnel))}</span></p>
-                        <div className="actions-row">
-                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <button type="button" className="secondary" disabled={busyAction === selectedTunnel.id + ":probe"} onClick={() => void probeTunnel(selectedTunnel)}>{busyAction === selectedTunnel.id + ":probe" ? "探测中..." : "探测"}</button> : null}
-                          <button type="button" disabled={busyAction === selectedTunnel.id + ":active" || selectedTunnel.status === "active"} onClick={() => void updateTunnelStatus(selectedTunnel, "active")}>启用</button>
-                          <button type="button" disabled={busyAction === selectedTunnel.id + ":paused" || selectedTunnel.status === "paused"} onClick={() => void updateTunnelStatus(selectedTunnel, "paused")}>暂停</button>
-                          <button type="button" className="danger" disabled={busyAction === selectedTunnel.id + ":delete"} onClick={() => void deleteTunnel(selectedTunnel)}>删除</button>
+                    <>
+                      <div className="detail-hero workbench-hero tunnel-hero">
+                        <div>
+                          <p className="eyebrow">当前隧道</p>
+                          <strong>{selectedTunnel.name}</strong>
+                          <span className="muted-line">{selectedTunnel.id}</span>
+                        </div>
+                        <div className="hero-status-group hero-status-stack">
+                          <span className={statusPillClass(selectedTunnel.status)}>{selectedTunnel.status}</span>
+                          <span className={tunnelHealthPillClass(selectedTunnel.healthStatus)}>{tunnelHealthLabel(selectedTunnel.healthStatus)}</span>
+                          <span className={probeFreshnessPillClass(deriveProbeFreshnessState(selectedTunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(selectedTunnel))}</span>
                         </div>
                       </div>
 
-                      <div className="empty-state">
-                        <strong>入口与运行条件</strong>
-                        <p>用户入口：<code>{tunnelPublicEntry(selectedTunnel)}</code></p>
-                        <p>入口说明：{tunnelTypeEntryHint(selectedTunnel)}</p>
-                        <p>目标地址：<code>{selectedTunnel.targetHost}:{selectedTunnel.targetPort}</code></p>
-                        <p>运行依赖：{tunnelRequirementSummary(selectedTunnel, nodes)}</p>
-                        {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <p>probePath：<code>{selectedTunnel.probePath || "/"}</code></p> : null}
-                        {selectedTunnel.type === "https" ? <p>publicPort 语义：<code>{selectedTunnel.publicPort}</code> 仅作内部保留字段，不作为标准用户入口。</p> : null}
+                      <div className="workbench-grid workbench-grid-wide tunnel-info-grid workbench-primary-grid">
+                        <div className="workbench-card workbench-card-primary">
+                          <div className="card-heading-row">
+                            <div>
+                              <span className="card-kicker">核心状态</span>
+                              <strong>入口与运行条件</strong>
+                            </div>
+                            <div className="card-status-rail">
+                              <span className={tunnelHealthPillClass(selectedTunnel.healthStatus)}>{tunnelHealthLabel(selectedTunnel.healthStatus)}</span>
+                              <span className={probeFreshnessPillClass(deriveProbeFreshnessState(selectedTunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(selectedTunnel))}</span>
+                            </div>
+                          </div>
+                          <div className="fact-list">
+                            <FactRow label="用户入口" value={<code>{tunnelPublicEntry(selectedTunnel)}</code>} />
+                            <FactRow label="入口类型" value={tunnelTypeEntryHint(selectedTunnel)} />
+                            <FactRow label="目标地址" value={<code>{selectedTunnel.targetHost}:{selectedTunnel.targetPort}</code>} />
+                            <FactRow label="运行依赖" value={tunnelRequirementSummary(selectedTunnel, nodes)} />
+                            {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <FactRow label="probePath" value={<code>{selectedTunnel.probePath || "/"}</code>} /> : null}
+                            {selectedTunnel.type === "https" ? <FactRow label="publicPort" value={<span><code>{selectedTunnel.publicPort}</code> 仅作内部保留字段</span>} /> : null}
+                          </div>
+                          <div className="actions-row actions-row-strong">
+                            {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <button type="button" className="secondary" disabled={busyAction === selectedTunnel.id + ":probe"} onClick={() => void probeTunnel(selectedTunnel)}>{busyAction === selectedTunnel.id + ":probe" ? "探测中..." : "探测"}</button> : null}
+                            <button type="button" disabled={busyAction === selectedTunnel.id + ":active" || selectedTunnel.status === "active"} onClick={() => void updateTunnelStatus(selectedTunnel, "active")}>启用</button>
+                            <button type="button" disabled={busyAction === selectedTunnel.id + ":paused" || selectedTunnel.status === "paused"} onClick={() => void updateTunnelStatus(selectedTunnel, "paused")}>暂停</button>
+                            <button type="button" className="danger" disabled={busyAction === selectedTunnel.id + ":delete"} onClick={() => void deleteTunnel(selectedTunnel)}>删除</button>
+                          </div>
+                        </div>
+
+                        <div className="workbench-card workbench-card-aside">
+                          <div className="card-heading-row">
+                            <div>
+                              <span className="card-kicker">辅助判断</span>
+                              <strong>当前风险提示</strong>
+                            </div>
+                          </div>
+                          <div className="ops-note-list">
+                            <div className={(selectedTunnel.healthStatus || "healthy") !== "healthy" ? "ops-note tone-danger note-strong" : "ops-note tone-good"}>{tunnelAvailabilityText(selectedTunnel)}</div>
+                            <div className={deriveProbeFreshnessState(selectedTunnel) === "recent_failure" ? "ops-note tone-danger note-strong" : deriveProbeFreshnessState(selectedTunnel) === "stale" ? "ops-note tone-warn" : "ops-note tone-info"}>Probe 状态：{probeFreshnessLabel(deriveProbeFreshnessState(selectedTunnel))}</div>
+                            <div className="ops-note tone-neutral">节点：{selectedTunnel.nodeId}</div>
+                          </div>
+                        </div>
                       </div>
-                    </div>
+                    </>
                   ) : <EmptyState title="尚未选择隧道" body="右侧当前保持稳定的新建工作台；在左侧选择隧道后，这里会切换成当前隧道的编辑与排障面板。" />}
 
                   <section className="workbench-section">
@@ -1752,6 +1800,15 @@ function DetailItem({ label, value }: { label: string; value: string }) {
     <div className="detail-item">
       <span>{label}</span>
       <strong>{value || "-"}</strong>
+    </div>
+  );
+}
+
+function FactRow({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="fact-row">
+      <span>{label}</span>
+      <div className="fact-value">{value}</div>
     </div>
   );
 }

@@ -166,42 +166,50 @@ textarea {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 6px 10px;
+  padding: 6px 11px;
   border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .tone-good {
   background: #dff5e6;
   color: #1f6d3e;
+  border-color: rgba(31, 109, 62, 0.12);
 }
 
 .tone-warn {
   background: #fff0d9;
   color: #8a5b0a;
+  border-color: rgba(138, 91, 10, 0.14);
 }
 
 .tone-admin {
   background: #dfe8ff;
   color: #2d4fb0;
+  border-color: rgba(45, 79, 176, 0.12);
 }
 
 .tone-info {
   background: #e3f4ff;
   color: #0d6b8c;
+  border-color: rgba(13, 107, 140, 0.12);
 }
 
 .tone-neutral {
   background: #eceff4;
   color: #516173;
+  border-color: rgba(81, 97, 115, 0.12);
 }
 
 .tone-danger {
   background: #ffe3de;
   color: #983421;
+  border-color: rgba(152, 52, 33, 0.14);
 }
 
 .overview-grid {
@@ -299,11 +307,12 @@ textarea {
 
 .spotlight-card {
   min-width: 0;
-  padding: 16px;
+  padding: 14px 15px;
   border-radius: 18px;
-  background: rgba(15, 33, 56, 0.04);
+  background: rgba(15, 33, 56, 0.035);
+  border: 1px solid rgba(15, 33, 56, 0.05);
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 
 .interactive-card,
@@ -321,13 +330,15 @@ textarea {
 }
 
 .selected-card {
-  background: rgba(26, 70, 136, 0.12);
-  box-shadow: inset 0 0 0 1px rgba(26, 70, 136, 0.18);
+  background: rgba(26, 70, 136, 0.1);
+  border-color: rgba(26, 70, 136, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(26, 70, 136, 0.14), 0 10px 22px rgba(26, 70, 136, 0.08);
 }
 
 .problem-card {
-  background: rgba(165, 60, 40, 0.08);
-  box-shadow: inset 0 0 0 1px rgba(165, 60, 40, 0.14);
+  background: rgba(165, 60, 40, 0.07);
+  border-color: rgba(165, 60, 40, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(165, 60, 40, 0.1);
 }
 
 .selected-row td {
@@ -394,11 +405,167 @@ textarea {
   display: grid;
   gap: 18px;
   align-self: start;
+  padding: 26px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 250, 255, 0.95) 100%);
+  border: 1px solid rgba(15, 33, 56, 0.1);
+  box-shadow:
+    0 24px 60px rgba(15, 33, 56, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
 }
 
 .node-workbench,
 .tunnel-workbench-panel {
   min-height: 100%;
+}
+
+.ops-sidebar > .subpanel {
+  background: rgba(255, 255, 255, 0.74);
+  border-color: rgba(15, 33, 56, 0.06);
+  box-shadow: 0 14px 30px rgba(15, 33, 56, 0.06);
+}
+
+.workbench-hero {
+  margin-bottom: 4px;
+  padding: 20px 22px;
+  border-radius: 22px;
+  background: linear-gradient(135deg, #10233d 0%, #183762 58%, #245188 100%);
+  color: #eef4ff;
+  box-shadow: 0 18px 34px rgba(15, 33, 56, 0.18);
+}
+
+.workbench-hero .eyebrow,
+.workbench-hero .muted-line {
+  color: rgba(238, 244, 255, 0.72);
+}
+
+.workbench-hero strong {
+  color: #fff;
+  font-size: 28px;
+  letter-spacing: -0.02em;
+}
+
+.hero-status-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.hero-status-stack {
+  max-width: 320px;
+}
+
+.workbench-primary-grid {
+  align-items: stretch;
+}
+
+.workbench-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px 18px 20px;
+  border-radius: 20px;
+  border: 1px solid rgba(15, 33, 56, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(244, 247, 252, 0.92) 100%);
+  box-shadow: 0 14px 28px rgba(15, 33, 56, 0.08);
+}
+
+.workbench-card-primary {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(241, 246, 255, 0.96) 100%);
+  border-color: rgba(31, 72, 126, 0.12);
+}
+
+.workbench-card-aside {
+  background: linear-gradient(180deg, rgba(252, 250, 246, 0.96) 0%, rgba(247, 243, 234, 0.94) 100%);
+}
+
+.card-heading-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.card-heading-row strong {
+  display: block;
+  color: #132a44;
+  font-size: 18px;
+}
+
+.card-kicker {
+  display: inline-block;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #72849e;
+}
+
+.card-status-rail {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.fact-list {
+  display: grid;
+  gap: 10px;
+}
+
+.fact-row {
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px 0;
+  border-top: 1px solid rgba(15, 33, 56, 0.08);
+}
+
+.fact-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.fact-row > span {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #7a8aa0;
+}
+
+.fact-value {
+  min-width: 0;
+  color: #20354f;
+  line-height: 1.55;
+}
+
+.fact-value code {
+  font-size: 12px;
+}
+
+.ops-note-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ops-note {
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  line-height: 1.55;
+  font-weight: 600;
+}
+
+.note-strong {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.03);
+}
+
+.actions-row-strong {
+  padding-top: 4px;
 }
 
 .workbench-grid {
@@ -585,11 +752,18 @@ td {
 
 .empty-state,
 .restricted-state {
-  padding: 20px;
+  padding: 18px 20px;
   border-radius: 18px;
   background: rgba(15, 33, 56, 0.04);
+  border: 1px solid rgba(15, 33, 56, 0.05);
   display: grid;
   gap: 8px;
+}
+
+.empty-state strong,
+.restricted-state strong {
+  font-size: 16px;
+  color: #162c46;
 }
 
 .error,
@@ -662,9 +836,10 @@ td {
 .form-note {
   grid-column: 1 / -1;
   margin: 0;
-  padding: 10px 12px;
+  padding: 11px 13px;
   border-radius: 14px;
-  background: rgba(15, 33, 56, 0.05);
+  border-left: 3px solid rgba(26, 70, 136, 0.22);
+  background: rgba(15, 33, 56, 0.045);
   color: #506176;
   font-size: 13px;
   line-height: 1.6;
@@ -672,4 +847,42 @@ td {
 
 .form-note code {
   color: #0f2138;
+}
+
+
+.tunnel-list-panel .section-head,
+.tunnel-filter-panel .section-head,
+.workspace-column .section-head {
+  margin-bottom: 12px;
+}
+
+.tunnel-list-table table,
+.workspace-column table {
+  font-size: 13px;
+}
+
+.tunnel-list-panel .muted-line,
+.workspace-column .muted-line,
+.ops-sidebar .inline-note {
+  color: #7a8b9e;
+}
+
+.tunnel-list-panel .status-pill,
+.workspace-column .status-pill {
+  transform: translateY(-1px);
+}
+
+@media (max-width: 720px) {
+  .ops-workbench {
+    padding: 18px;
+  }
+
+  .workbench-hero strong {
+    font-size: 24px;
+  }
+
+  .fact-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
 }
