@@ -1095,7 +1095,7 @@ export default function App() {
                     <MetricCard label="Active 数" value={String(activeTunnels)} hint="当前处于 active 的 tunnel" />
                     <MetricCard label="HTTP 入口" value={String(httpTunnelCount)} hint="http://IP:端口 发布 Web/API" />
                     <MetricCard label="HTTPS 入口" value={String(httpsTunnelCount)} hint="https://domain 标准 443 入口" />
-                    <MetricCard label="UDP 最小版" value={String(udpTunnelCount)} hint="udp://IP:端口 最小 UDP 数据面 V1" />
+                    <MetricCard label="UDP 最小版" value={String(udpTunnelCount)} hint="udp://IP:端口 最小公网闭环已验证" />
                     <MetricCard label="SOCKS5 入口" value={String(socks5TunnelCount)} hint="socks5://IP:端口 代理入口" />
                     <MetricCard label="TCP 入口" value={String(tcpTunnelCount)} hint="host:port 直连入口" />
                   </div>
@@ -1107,6 +1107,7 @@ export default function App() {
                     <SignalCard label="支持 HTTP 的节点" value={String(httpCapableNodeCount)} />
                     <SignalCard label="支持 HTTPS 的节点" value={String(httpsCapableNodeCount)} />
                     <SignalCard label="支持 UDP 的节点" value={String(udpCapableNodeCount)} />
+                    <SignalCard label="UDP 里程碑" value={udpTunnelCount > 0 ? "公网 echo 已验证" : "待创建 UDP tunnel"} />
                     <SignalCard label="支持 SOCKS5 的节点" value={String(socks5CapableNodeCount)} />
                   </div>
                 </section>
@@ -1319,12 +1320,12 @@ export default function App() {
                         <div className="section-head compact-head">
                           <div>
                             <h3>节点能力矩阵</h3>
-                            <span className="muted-line">直接判断该节点能否挂载 TCP / UDP / HTTP / HTTPS / SOCKS5；其中 UDP 当前仅为预留扩展位。</span>
+                            <span className="muted-line">直接判断该节点能否挂载 TCP / UDP / HTTP / HTTPS / SOCKS5；其中 UDP 当前已达到最小公网数据面 V1。</span>
                           </div>
                         </div>
                         <div className="table-status-stack capability-matrix">
                           <span className={capabilityPillClass(selectedNode.capabilities.tcpRelay)}>TCP relay {capabilityEnabledLabel(selectedNode.capabilities.tcpRelay)}</span>
-                          <span className={capabilityPillClass(selectedNode.capabilities.udpRelay)}>UDP relay V1 {selectedNode.capabilities.udpRelay ? "已预留" : "未启用"}</span>
+                          <span className={capabilityPillClass(selectedNode.capabilities.udpRelay)}>UDP relay V1 {selectedNode.capabilities.udpRelay ? "已就绪" : "未启用"}</span>
                           <span className={capabilityPillClass(selectedNode.capabilities.httpRelay)}>HTTP relay {capabilityEnabledLabel(selectedNode.capabilities.httpRelay)}</span>
                           <span className={capabilityPillClass(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}>HTTPS relay {capabilityEnabledLabel(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}</span>
                           <span className={capabilityPillClass(Boolean(selectedNode.capabilities.socks5Connect))}>SOCKS5 connect {capabilityEnabledLabel(Boolean(selectedNode.capabilities.socks5Connect))}</span>
@@ -1336,7 +1337,7 @@ export default function App() {
                         <div className="section-head compact-head">
                           <div>
                             <h3>节点承载入口</h3>
-                            <span className="muted-line">直接查看该节点当前挂载的 tunnel，判断它到底承载了哪些入口以及哪些入口异常。</span>
+                            <span className="muted-line">直接查看该节点当前挂载的 tunnel，判断它到底承载了哪些入口、哪些 UDP 入口已上线，以及哪些入口异常。</span>
                           </div>
                         </div>
                         <div className="table-wrap compact-table">
@@ -1346,7 +1347,7 @@ export default function App() {
                               {selectedNodeTunnels.length === 0 ? <tr><td colSpan={5}>该节点当前没有挂载 tunnel。</td></tr> : selectedNodeTunnels.map((tunnel) => (
                                 <tr key={tunnel.id} className={(tunnel.healthStatus || 'healthy') !== 'healthy' ? 'problem-row' : undefined}>
                                   <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
-                                  <td>{tunnelTypeLabel(tunnel.type)}</td>
+                                  <td>{tunnelTypeLabel(tunnel.type)}{tunnel.type === "udp" ? <div className="muted">最小公网 echo 已验证</div> : null}</td>
                                   <td><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span></td>
                                   <td><span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span></td>
                                   <td>{tunnelPublicEntry(tunnel)}</td>
@@ -1458,7 +1459,7 @@ export default function App() {
                             <span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span>
                             <span className={probeFreshnessPillClass(deriveProbeFreshnessState(tunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(tunnel))}</span>
                           </div>
-                          <div className="muted-line">类型 {tunnelTypeLabel(tunnel.type)}</div>
+                          <div className="muted-line">类型 {tunnelTypeLabel(tunnel.type)}{tunnel.type === "udp" ? ' / 最小公网 echo 已验证' : ''}</div>
                           <div className="muted-line">目标 {tunnelTargetLabel(tunnel)}</div>
                           <div className="muted-line">运行依赖 {tunnelRequirementSummary(tunnel, nodes)}</div>
                           <div className="muted-line">节点 {tunnel.nodeId}</div>
@@ -1571,7 +1572,7 @@ export default function App() {
                     {editingTunnelID !== null && tunnelEditForm ? (
                       <form className="form-grid" onSubmit={submitTunnelEdit}>
                         <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
-                        {tunnelEditForm.type === "udp" ? <div className="form-note">UDP 当前为最小 V1 能力，若要稳定运行仍需后续补会话管理、超时治理和更完整的数据面能力。</div> : null}
+                        {tunnelEditForm.type === "udp" ? <div className="form-note">UDP 当前为最小数据面 V1，已完成真实公网 echo 验证；当前仍不支持 UDP probe、复杂会话管理、生产级超时治理或 NAT 穿透。</div> : null}
                         <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                         <label><span>{tunnelEditForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
@@ -1621,7 +1622,7 @@ export default function App() {
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>域名</span><input value={tunnelForm.domain} onChange={(event) => setTunnelForm((current) => ({ ...current, domain: event.target.value }))} placeholder="例如 app.example.com" /></label> : null}
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>probePath</span><input value={tunnelForm.probePath} onChange={(event) => setTunnelForm((current) => ({ ...current, probePath: event.target.value }))} placeholder="默认 /" /></label> : null}
                         {tunnelForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelForm.tlsMode} onChange={(event) => setTunnelForm((current) => ({ ...current, tlsMode: event.target.value as "" | "edge_terminate" }))}><option value="edge_terminate">edge_terminate</option></select></label> : null}
-                        {tunnelForm.type === "udp" ? <div className="form-note">UDP（最小 V1）：当前已开放最小真实转发能力，可做 UDP echo/单会话验证，但不支持 probe、复杂会话管理或生产级优化。</div> : null}
+                        {tunnelForm.type === "udp" ? <div className="form-note">UDP（最小 V1）：当前已完成真实公网 echo 验证，可用于最小公网 UDP 单会话验证；仍不支持 UDP probe、复杂会话管理、生产级超时治理或 NAT 穿透。</div> : null}
                         {tunnelForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelForm.publicPort || "<公网端口>"}</code></div> : null}
                         {tunnelForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
                         {tunnelFormNode?.status !== "online" ? <div className="form-note">当前选中节点 offline。按现有语义仍可查看或保留配置，但当前不可通信。</div> : null}
@@ -1887,9 +1888,10 @@ function TunnelRuntimeGuide({
     return (
       <div className="empty-state runtime-guide">
         <strong>UDP relay 最小版说明</strong>
-        <p>UDP 当前已开放最小数据面 V1，可做基础转发验证，但还不是完整通用 UDP 平台。</p>
+        <p>UDP 当前已完成真实公网 echo 验证，系统已具备最小公网 UDP 单会话闭环能力。</p>
         <p>当前入口：<code>{entry}</code></p>
-        <p>当前支持最小 echo/单会话验证，不支持 probe、复杂会话管理或生产级优化。</p>
+        <p>健康语义：当前支持 healthy / node_offline / capability_missing / misconfigured；当前不提供可靠的 UDP target_unreachable 判定，也不提供 UDP probe。</p>
+        <p>当前限制：不支持复杂会话管理、生产级超时治理、NAT 穿透或告警系统。</p>
       </div>
     );
   }
@@ -2098,7 +2100,7 @@ function tunnelTargetLabel(tunnel: TunnelSpec) {
     return "节点侧 SOCKS5 CONNECT";
   }
   if (tunnel.type === "udp") {
-    return "UDP 最小数据面 V1";
+    return "UDP 最小数据面 V1（公网 echo 已验证）";
   }
   if (tunnel.type === "http") {
     return "发布 " + tunnel.targetHost + ":" + tunnel.targetPort + " 的 Web/API 服务";
@@ -2117,7 +2119,7 @@ function tunnelTypeEntryHint(tunnel: TunnelSpec) {
     return "HTTPS 标准入口，依赖 Nginx 443 terminate";
   }
   if (tunnel.type === "udp") {
-    return "UDP 最小数据面入口";
+    return "UDP 最小数据面入口（无 UDP probe）";
   }
   if (tunnel.type === "socks5") {
     return "SOCKS5 CONNECT 代理入口";
@@ -2235,8 +2237,8 @@ function tunnelRequirementSummary(tunnel: TunnelSpec, nodes: NodeSummary[]) {
     requirements.push((node?.capabilities.httpsRelay || node?.capabilities.httpRelay) ? "HTTPS 能力满足" : "HTTPS 能力缺失");
     requirements.push("443 入口依赖 Nginx terminate");
   } else if (tunnel.type === "udp") {
-    requirements.push(node?.capabilities.udpRelay ? "UDP 能力已预留" : "UDP 能力未启用");
-    requirements.push("UDP 最小数据面 V1");
+    requirements.push(node?.capabilities.udpRelay ? "UDP 能力满足" : "UDP 能力缺失");
+    requirements.push("UDP 最小数据面 V1（公网 echo 已验证）");
   } else if (tunnel.type === "socks5") {
     requirements.push(node?.capabilities.socks5Connect ? "SOCKS5 能力满足" : "SOCKS5 能力缺失");
   } else {
