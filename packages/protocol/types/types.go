@@ -108,6 +108,7 @@ type TunnelSpec struct {
 	TLSMode              string             `json:"tlsMode,omitempty"`
 	ProbePath            string             `json:"probePath,omitempty"`
 	Status               string             `json:"status"`
+	UpdatedAt            time.Time          `json:"updatedAt,omitempty"`
 	HealthStatus         TunnelHealthStatus `json:"healthStatus,omitempty"`
 	LastProbeSuccess     bool               `json:"lastProbeSuccess,omitempty"`
 	LastProbeStatusCode  int                `json:"lastProbeStatusCode,omitempty"`
@@ -162,7 +163,9 @@ type NodeOption struct {
 	NodeID         string `json:"nodeId"`
 	NodeName       string `json:"nodeName"`
 	Status         string `json:"status"`
+	SupportsTCP    bool   `json:"supportsTCP"`
 	SupportsHTTP   bool   `json:"supportsHTTP"`
+	SupportsHTTPS  bool   `json:"supportsHTTPS"`
 	SupportsSOCKS5 bool   `json:"supportsSOCKS5"`
 }
 

@@ -302,14 +302,14 @@ func (s *PostgresStore) CreateTunnel(ctx context.Context, spec types.TunnelSpec)
 
 func (s *PostgresStore) GetTunnel(ctx context.Context, id string) (types.TunnelSpec, error) {
 	row := s.pool.QueryRow(ctx, `
-		select id, coalesce(node_id, ''), name, type, transport_policy, status, target_host, target_port, coalesce(public_port, 0), coalesce(domain, ''), coalesce(tls_mode, ''), metadata
+		select id, coalesce(node_id, ''), name, type, transport_policy, status, target_host, target_port, coalesce(public_port, 0), coalesce(domain, ''), coalesce(tls_mode, ''), metadata, updated_at
 		from tunnels
 		where id = $1
 	`, id)
 	var item types.TunnelSpec
 	var nodeID string
 	var metadataJSON []byte
-	if err := row.Scan(&item.ID, &nodeID, &item.Name, &item.Type, &item.TransportPolicy, &item.Status, &item.TargetHost, &item.TargetPort, &item.PublicPort, &item.Domain, &item.TLSMode, &metadataJSON); err != nil {
+	if err := row.Scan(&item.ID, &nodeID, &item.Name, &item.Type, &item.TransportPolicy, &item.Status, &item.TargetHost, &item.TargetPort, &item.PublicPort, &item.Domain, &item.TLSMode, &metadataJSON, &item.UpdatedAt); err != nil {
 		return types.TunnelSpec{}, ErrNotFound
 	}
 	item.NodeID = nodeID
@@ -390,7 +390,7 @@ func (s *PostgresStore) DeleteTunnel(ctx context.Context, id string) error {
 
 func (s *PostgresStore) ListTunnels(ctx context.Context, filter TunnelFilter) ([]types.TunnelSpec, error) {
 	rows, err := s.pool.Query(ctx, `
-		select id, coalesce(node_id, ''), name, type, transport_policy, status, target_host, target_port, coalesce(public_port, 0), coalesce(domain, ''), coalesce(tls_mode, ''), metadata
+		select id, coalesce(node_id, ''), name, type, transport_policy, status, target_host, target_port, coalesce(public_port, 0), coalesce(domain, ''), coalesce(tls_mode, ''), metadata, updated_at
 		from tunnels
 		where ($1 = '' or node_id = $1)
 		  and ($2 = '' or type = $2)
@@ -407,7 +407,7 @@ func (s *PostgresStore) ListTunnels(ctx context.Context, filter TunnelFilter) ([
 		var item types.TunnelSpec
 		var nodeID string
 		var metadataJSON []byte
-		if err := rows.Scan(&item.ID, &nodeID, &item.Name, &item.Type, &item.TransportPolicy, &item.Status, &item.TargetHost, &item.TargetPort, &item.PublicPort, &item.Domain, &item.TLSMode, &metadataJSON); err != nil {
+		if err := rows.Scan(&item.ID, &nodeID, &item.Name, &item.Type, &item.TransportPolicy, &item.Status, &item.TargetHost, &item.TargetPort, &item.PublicPort, &item.Domain, &item.TLSMode, &metadataJSON, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.NodeID = nodeID

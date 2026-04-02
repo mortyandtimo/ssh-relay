@@ -41,6 +41,7 @@ type NodeOption = {
   nodeId: string;
   nodeName: string;
   status: string;
+  supportsTCP?: boolean;
   supportsHTTP?: boolean;
   supportsHTTPS?: boolean;
   supportsSOCKS5?: boolean;
@@ -71,6 +72,11 @@ type NodeEditForm = {
 
 type TunnelHealthStatus = "healthy" | "node_offline" | "capability_missing" | "misconfigured" | "target_unreachable";
 type TunnelHealthFilter = "all" | "healthy" | "unhealthy";
+type TunnelTypeFilter = "all" | "tcp" | "http" | "https" | "socks5";
+type ProbeFreshnessState = "not_probed" | "recent_success" | "recent_failure" | "stale";
+type ProbeStateFilter = "all" | ProbeFreshnessState;
+type TunnelNodeStatusFilter = "all" | "online" | "offline";
+type TunnelSortMode = "ops_priority" | "updated_desc" | "name_asc" | "health_priority" | "probe_desc";
 
 type TunnelSpec = {
   id: string;
@@ -85,6 +91,7 @@ type TunnelSpec = {
   tlsMode?: string;
   probePath?: string;
   status: string;
+  updatedAt?: string;
   healthStatus?: TunnelHealthStatus;
   lastProbeSuccess?: boolean;
   lastProbeStatusCode?: number;
@@ -253,6 +260,10 @@ export default function App() {
   const [probeResults, setProbeResults] = useState<Record<string, TunnelProbeResult>>({});
   const [tunnelForm, setTunnelForm] = useState<TunnelForm>(initialTunnelForm);
   const [tunnelHealthFilter, setTunnelHealthFilter] = useState<TunnelHealthFilter>("all");
+  const [tunnelTypeFilter, setTunnelTypeFilter] = useState<TunnelTypeFilter>("all");
+  const [probeStateFilter, setProbeStateFilter] = useState<ProbeStateFilter>("all");
+  const [tunnelNodeStatusFilter, setTunnelNodeStatusFilter] = useState<TunnelNodeStatusFilter>("all");
+  const [tunnelSortMode, setTunnelSortMode] = useState<TunnelSortMode>("ops_priority");
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [bootstrapForm, setBootstrapForm] = useState({ email: "", displayName: "管理员", password: "", bootstrapSecret: "" });
   const [userForm, setUserForm] = useState({ email: "", displayName: "", password: "", role: "manager" as UserRole });
@@ -765,6 +776,7 @@ export default function App() {
       const result = await requestJSON<TunnelProbeResult>("/api/tunnels/" + tunnel.id + "/probe", { method: "POST" });
       setProbeResults((current) => ({ ...current, [tunnel.id]: result }));
       setMessage(result.success ? "探测完成：入口可访问。" : "探测完成：入口不可访问。");
+      await refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilterRef.current);
     } catch (probeError) {
       setError(probeError instanceof Error ? probeError.message : "探测失败");
     } finally {
@@ -868,9 +880,14 @@ export default function App() {
   const selectedTunnel = editingTunnelID ? tunnels.find((tunnel) => tunnel.id === editingTunnelID) ?? null : null;
   const selectedProbeResult = editingTunnelID ? probeResults[editingTunnelID] ?? null : null;
   const persistedProbeResult = selectedTunnel ? toProbeResult(selectedTunnel) : null;
+  const selectedTunnelVisibleInFilters = selectedTunnel ? matchesTunnelFilters(selectedTunnel, nodes, tunnelHealthFilter, tunnelTypeFilter, probeStateFilter, tunnelNodeStatusFilter) : true;
   const onlineNodes = nodes.filter((node) => node.status === "online").length;
   const activeTunnels = tunnels.filter((tunnel) => tunnel.status === "active").length;
-  const filteredTunnels = tunnels.filter((tunnel) => matchesTunnelHealthFilter(tunnel, tunnelHealthFilter));
+  const filteredTunnels = sortTunnels(
+    tunnels.filter((tunnel) => matchesTunnelFilters(tunnel, nodes, tunnelHealthFilter, tunnelTypeFilter, probeStateFilter, tunnelNodeStatusFilter)),
+    nodes,
+    tunnelSortMode,
+  );
   const unhealthyTunnelCount = tunnels.filter((tunnel) => (tunnel.healthStatus || "healthy") !== "healthy").length;
   const tcpTunnelCount = tunnels.filter((tunnel) => tunnel.type === "tcp").length;
   const httpTunnelCount = tunnels.filter((tunnel) => tunnel.type === "http").length;
@@ -879,6 +896,9 @@ export default function App() {
   const httpCapableNodeCount = allNodes.filter((node) => node.supportsHTTP).length;
   const httpsCapableNodeCount = allNodes.filter((node) => node.supportsHTTPS ?? node.supportsHTTP).length;
   const socks5CapableNodeCount = allNodes.filter((node) => node.supportsSOCKS5).length;
+  const unprobedTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "not_probed").length;
+  const recentFailedTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "recent_failure").length;
+  const staleTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "stale").length;
   const canOperate = activeUser.role !== "user";
   const canManageUsers = activeUser.role === "admin";
   const nodeStart = nodes.length === 0 ? 0 : nodeFilter.offset + 1;
@@ -1012,13 +1032,18 @@ export default function App() {
                     </div>
                   </div>
                   <div className="overview-grid">
-                    <MetricCard label="TCP 入口" value={String(tcpTunnelCount)} hint="host:port 直连入口" />
+                    <MetricCard label="隧道总数" value={String(tunnels.length)} hint="当前全部 tunnel 配置数" />
+                    <MetricCard label="Active 数" value={String(activeTunnels)} hint="当前处于 active 的 tunnel" />
                     <MetricCard label="HTTP 入口" value={String(httpTunnelCount)} hint="http://IP:端口 发布 Web/API" />
                     <MetricCard label="HTTPS 入口" value={String(httpsTunnelCount)} hint="https://domain 标准 443 入口" />
                     <MetricCard label="SOCKS5 入口" value={String(socks5TunnelCount)} hint="socks5://IP:端口 代理入口" />
+                    <MetricCard label="TCP 入口" value={String(tcpTunnelCount)} hint="host:port 直连入口" />
                   </div>
                   <div className="signal-strip">
                     <SignalCard label="异常入口数" value={unhealthyTunnelCount === 0 ? "无" : String(unhealthyTunnelCount)} />
+                    <SignalCard label="未探测" value={unprobedTunnelCount === 0 ? "无" : String(unprobedTunnelCount)} />
+                    <SignalCard label="最近失败" value={recentFailedTunnelCount === 0 ? "无" : String(recentFailedTunnelCount)} />
+                    <SignalCard label="结果较旧" value={staleTunnelCount === 0 ? "无" : String(staleTunnelCount)} />
                     <SignalCard label="支持 HTTP 的节点" value={String(httpCapableNodeCount)} />
                     <SignalCard label="支持 HTTPS 的节点" value={String(httpsCapableNodeCount)} />
                     <SignalCard label="支持 SOCKS5 的节点" value={String(socks5CapableNodeCount)} />
@@ -1199,8 +1224,8 @@ export default function App() {
               <>
                 <div className="section-head compact-head tunnel-filter-bar">
                   <div>
-                    <h3>隧道健康筛选</h3>
-                    <span className="muted-line">区分配置停用与当前异常，不再只看 active / paused。</span>
+                    <h3>隧道运维筛选台</h3>
+                    <span className="muted-line">组合按健康、类型、probe 状态、节点在线性筛选，并按运维优先级或更新时间排序。</span>
                   </div>
                   <div className="inline-switches">
                     <button type="button" className={tunnelHealthFilter === "all" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("all")}>全部</button>
@@ -1208,6 +1233,15 @@ export default function App() {
                     <button type="button" className={tunnelHealthFilter === "unhealthy" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("unhealthy")}>异常</button>
                   </div>
                 </div>
+                <section className="subpanel">
+                  <div className="form-grid">
+                    <label><span>入口类型</span><select value={tunnelTypeFilter} onChange={(event) => setTunnelTypeFilter(event.target.value as TunnelTypeFilter)}><option value="all">全部</option><option value="tcp">TCP</option><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
+                    <label><span>Probe 状态</span><select value={probeStateFilter} onChange={(event) => setProbeStateFilter(event.target.value as ProbeStateFilter)}><option value="all">全部</option><option value="not_probed">未探测</option><option value="recent_success">最近成功</option><option value="recent_failure">最近失败</option><option value="stale">结果较旧</option></select></label>
+                    <label><span>节点状态</span><select value={tunnelNodeStatusFilter} onChange={(event) => setTunnelNodeStatusFilter(event.target.value as TunnelNodeStatusFilter)}><option value="all">全部</option><option value="online">节点在线</option><option value="offline">节点离线</option></select></label>
+                    <label><span>排序</span><select value={tunnelSortMode} onChange={(event) => setTunnelSortMode(event.target.value as TunnelSortMode)}><option value="ops_priority">默认：异常/失败/较旧优先</option><option value="updated_desc">按更新时间</option><option value="name_asc">按名称</option><option value="health_priority">按健康优先级</option><option value="probe_desc">按最近 probe 时间</option></select></label>
+                  </div>
+                </section>
+                {!selectedTunnelVisibleInFilters && selectedTunnel ? <div className="empty-state"><strong>当前选中隧道未命中筛选结果</strong><p>详情仍保留，便于继续排查；如需在列表中重新看到它，请调整筛选条件。</p></div> : null}
                 <div className="split-layout tunnel-workspace">
                   <div className="workspace-column panel-stack">
                     {editingTunnelID === null ? (
@@ -1270,6 +1304,7 @@ export default function App() {
                           <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                           <label><span>{tunnelEditForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
                           {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>域名</span><input value={tunnelEditForm.domain} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, domain: event.target.value } : current)} placeholder="例如 app.example.com" /></label> : null}
+                          {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>probePath</span><input value={tunnelEditForm.probePath} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} placeholder="默认 /" /></label> : null}
                           {tunnelEditForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelEditForm.tlsMode} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, tlsMode: event.target.value } : current)}><option value="edge_terminate">edge_terminate</option></select></label> : null}
                           {tunnelEditForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelEditForm.publicPort || "<公网端口>"}</code></div> : null}
                           {tunnelEditForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelEditForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
@@ -1288,7 +1323,34 @@ export default function App() {
                   </div>
 
                   <section className="subpanel">
-                    <h3>重点隧道</h3>
+                    <div className="section-head compact-head">
+                      <div>
+                        <h3>隧道运维工作区</h3>
+                        <span className="muted-line">当前筛选结果与选中隧道详情共存，方便直接排查和操作。</span>
+                      </div>
+                    </div>
+                    {selectedTunnel ? (
+                      <div className="empty-state">
+                        <strong>当前选中隧道</strong>
+                        <p>id：<code>{selectedTunnel.id}</code></p>
+                        <p>name：<code>{selectedTunnel.name}</code></p>
+                        <p>type：<code>{tunnelTypeLabel(selectedTunnel.type)}</code></p>
+                        <p>nodeId：<code>{selectedTunnel.nodeId}</code></p>
+                        <p>status：<span className={statusPillClass(selectedTunnel.status)}>{selectedTunnel.status}</span></p>
+                        <p>healthStatus：<span className={tunnelHealthPillClass(selectedTunnel.healthStatus)}>{tunnelHealthLabel(selectedTunnel.healthStatus)}</span></p>
+                        <p>probe freshness：<span className={probeFreshnessPillClass(deriveProbeFreshnessState(selectedTunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(selectedTunnel))}</span></p>
+                        <p>用户入口：<code>{tunnelPublicEntry(selectedTunnel)}</code></p>
+                        <p>目标地址：<code>{selectedTunnel.targetHost}:{selectedTunnel.targetPort}</code></p>
+                        <p>运行依赖：{tunnelRequirementSummary(selectedTunnel, nodes)}</p>
+                        {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <p>probePath：<code>{selectedTunnel.probePath || "/"}</code></p> : null}
+                        <div className="actions-row">
+                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <button type="button" className="secondary" disabled={busyAction === selectedTunnel.id + ":probe"} onClick={() => void probeTunnel(selectedTunnel)}>{busyAction === selectedTunnel.id + ":probe" ? "探测中..." : "探测"}</button> : null}
+                          <button type="button" disabled={busyAction === selectedTunnel.id + ":active" || selectedTunnel.status === "active"} onClick={() => void updateTunnelStatus(selectedTunnel, "active")}>启用</button>
+                          <button type="button" disabled={busyAction === selectedTunnel.id + ":paused" || selectedTunnel.status === "paused"} onClick={() => void updateTunnelStatus(selectedTunnel, "paused")}>暂停</button>
+                          <button type="button" className="danger" disabled={busyAction === selectedTunnel.id + ":delete"} onClick={() => void deleteTunnel(selectedTunnel)}>删除</button>
+                        </div>
+                      </div>
+                    ) : null}
                     <div className="spotlight-grid compact-cards">
                       {filteredTunnels.length === 0 ? <EmptyState title="暂无匹配隧道" body="当前筛选条件下没有匹配结果，可以切换到全部查看。" /> : filteredTunnels.map((tunnel) => (
                         <article key={tunnel.id} className={editingTunnelID === tunnel.id ? tunnelCardClass(tunnel, true) : tunnelCardClass(tunnel, false)} onClick={() => {
@@ -1356,6 +1418,7 @@ export default function App() {
                         <p>状态码：<code>{(selectedProbeResult || persistedProbeResult)?.statusCode ? String((selectedProbeResult || persistedProbeResult)?.statusCode) : "-"}</code></p>
                         <p>错误：<code>{(selectedProbeResult || persistedProbeResult)?.error || "-"}</code></p>
                         <p>探测时间：<code>{formatDate((selectedProbeResult || persistedProbeResult)?.probedAt || "")}</code></p>
+                        <p>结果状态：<span className={probeFreshnessPillClass(selectedTunnel ? deriveProbeFreshnessState(selectedTunnel) : "not_probed")}>{probeFreshnessLabel(selectedTunnel ? deriveProbeFreshnessState(selectedTunnel) : "not_probed")}</span></p>
                       </div>
                     ) : null}
 
@@ -1380,14 +1443,15 @@ export default function App() {
 
                 <div className="table-wrap compact-table">
                   <table>
-                    <thead><tr><th>名称</th><th>类型</th><th>节点</th><th>状态/健康</th><th>公网</th><th>目标</th><th>操作</th></tr></thead>
+                    <thead><tr><th>名称</th><th>类型</th><th>节点</th><th>状态/健康</th><th>Probe</th><th>入口</th><th>目标</th><th>操作</th></tr></thead>
                     <tbody>
-                      {filteredTunnels.length === 0 ? <tr><td colSpan={7}>当前筛选条件下暂无隧道。</td></tr> : filteredTunnels.map((tunnel) => (
+                      {filteredTunnels.length === 0 ? <tr><td colSpan={8}>当前筛选条件下暂无隧道。</td></tr> : filteredTunnels.map((tunnel) => (
                         <tr key={tunnel.id} className={editingTunnelID === tunnel.id ? tunnelRowClass(tunnel, true) : tunnelRowClass(tunnel, false)}>
                           <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
                           <td>{tunnelTypeLabel(tunnel.type)}</td>
                           <td>{tunnel.nodeId}</td>
                           <td><div className="table-status-stack"><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span><span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span></div></td>
+                          <td><div className="table-status-stack"><span className={probeFreshnessPillClass(deriveProbeFreshnessState(tunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(tunnel))}</span></div><div className="muted">{tunnel.lastProbedAt ? formatDate(tunnel.lastProbedAt) : "-"}</div></td>
                           <td><div>{tunnelPublicEntry(tunnel)}</div><div className="muted">{tunnelTypeEntryHint(tunnel)}</div></td>
                           <td><div>{tunnelTargetLabel(tunnel)}</div><div className="muted">{tunnelRequirementSummary(tunnel, nodes)}</div></td>
                           <td>
@@ -1558,6 +1622,8 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   );
 }
 
+const PROBE_STALE_MS = 15 * 60 * 1000;
+
 function matchesTunnelHealthFilter(tunnel: TunnelSpec, filter: TunnelHealthFilter) {
   const health = tunnel.healthStatus || "healthy";
   if (filter === "healthy") {
@@ -1567,6 +1633,135 @@ function matchesTunnelHealthFilter(tunnel: TunnelSpec, filter: TunnelHealthFilte
     return health !== "healthy";
   }
   return true;
+}
+
+function deriveProbeFreshnessState(tunnel: TunnelSpec): ProbeFreshnessState {
+  if (!tunnel.lastProbedAt || tunnel.lastProbedAt.startsWith("0001-01-01")) {
+    return "not_probed";
+  }
+  const parsed = new Date(tunnel.lastProbedAt).getTime();
+  if (Number.isNaN(parsed)) {
+    return "stale";
+  }
+  if (Date.now() - parsed > PROBE_STALE_MS) {
+    return "stale";
+  }
+  return tunnel.lastProbeSuccess ? "recent_success" : "recent_failure";
+}
+
+function probeFreshnessLabel(state: ProbeFreshnessState) {
+  switch (state) {
+    case "recent_success":
+      return "最近成功";
+    case "recent_failure":
+      return "最近失败";
+    case "stale":
+      return "结果较旧";
+    default:
+      return "尚未探测";
+  }
+}
+
+function probeFreshnessPillClass(state: ProbeFreshnessState) {
+  switch (state) {
+    case "recent_success":
+      return "status-pill tone-good";
+    case "recent_failure":
+      return "status-pill tone-danger";
+    case "stale":
+      return "status-pill tone-warn";
+    default:
+      return "status-pill tone-neutral";
+  }
+}
+
+function nodeOnlineStatus(nodeId: string, nodes: NodeSummary[]) {
+  const node = nodes.find((item) => item.nodeId === nodeId) ?? null;
+  return node?.status === "online" ? "online" : "offline";
+}
+
+function matchesTunnelFilters(
+  tunnel: TunnelSpec,
+  nodes: NodeSummary[],
+  healthFilter: TunnelHealthFilter,
+  typeFilter: TunnelTypeFilter,
+  probeFilter: ProbeStateFilter,
+  nodeStatusFilter: TunnelNodeStatusFilter,
+) {
+  if (!matchesTunnelHealthFilter(tunnel, healthFilter)) {
+    return false;
+  }
+  if (typeFilter !== "all" && tunnel.type !== typeFilter) {
+    return false;
+  }
+  if (probeFilter !== "all" && deriveProbeFreshnessState(tunnel) !== probeFilter) {
+    return false;
+  }
+  if (nodeStatusFilter !== "all" && nodeOnlineStatus(tunnel.nodeId, nodes) !== nodeStatusFilter) {
+    return false;
+  }
+  return true;
+}
+
+function healthPriority(tunnel: TunnelSpec) {
+  switch (tunnel.healthStatus) {
+    case "target_unreachable":
+      return 0;
+    case "node_offline":
+      return 1;
+    case "capability_missing":
+      return 2;
+    case "misconfigured":
+      return 3;
+    default:
+      return 4;
+  }
+}
+
+function sortTunnels(tunnels: TunnelSpec[], nodes: NodeSummary[], mode: TunnelSortMode) {
+  const items = [...tunnels];
+  items.sort((left, right) => {
+    if (mode === "name_asc") {
+      return left.name.localeCompare(right.name, "zh-CN");
+    }
+    if (mode === "updated_desc") {
+      return (Date.parse(right.updatedAt || "") || 0) - (Date.parse(left.updatedAt || "") || 0);
+    }
+    if (mode === "health_priority") {
+      return healthPriority(left) - healthPriority(right);
+    }
+    if (mode === "probe_desc") {
+      return (Date.parse(right.lastProbedAt || "") || 0) - (Date.parse(left.lastProbedAt || "") || 0);
+    }
+    const leftProbe = deriveProbeFreshnessState(left);
+    const rightProbe = deriveProbeFreshnessState(right);
+    const freshnessRank = (value: ProbeFreshnessState) => {
+      switch (value) {
+        case "recent_failure":
+          return 0;
+        case "stale":
+          return 1;
+        case "not_probed":
+          return 2;
+        default:
+          return 3;
+      }
+    };
+    const probeDelta = freshnessRank(leftProbe) - freshnessRank(rightProbe);
+    if (probeDelta !== 0) {
+      return probeDelta;
+    }
+    const healthDelta = healthPriority(left) - healthPriority(right);
+    if (healthDelta != 0) {
+      return healthDelta;
+    }
+    const nodeDelta = nodeOnlineStatus(left.nodeId, nodes).localeCompare(nodeOnlineStatus(right.nodeId, nodes));
+    if (nodeDelta !== 0) {
+      return nodeDelta;
+    }
+    return left.name.localeCompare(right.name, "zh-CN");
+  });
+  return items;
 }
 
 function tunnelTypeLabel(type: string) {

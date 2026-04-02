@@ -142,6 +142,7 @@ func (s *InMemoryStore) UpdateNode(_ context.Context, params UpdateNodeParams) (
 
 func (s *InMemoryStore) CreateTunnel(_ context.Context, spec types.TunnelSpec) (types.TunnelSpec, error) {
 	tunnel := normalizeTunnel(spec)
+	tunnel.UpdatedAt = time.Now().UTC()
 	if tunnel.NodeID == "" {
 		tunnel.NodeID = tunnel.Metadata["nodeId"]
 	}
@@ -175,6 +176,7 @@ func (s *InMemoryStore) GetTunnel(_ context.Context, id string) (types.TunnelSpe
 
 func (s *InMemoryStore) UpdateTunnel(_ context.Context, spec types.TunnelSpec) (types.TunnelSpec, error) {
 	tunnel := normalizeTunnel(spec)
+	tunnel.UpdatedAt = time.Now().UTC()
 	if tunnel.ID == "" {
 		return types.TunnelSpec{}, ErrNotFound
 	}
@@ -496,6 +498,9 @@ func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {
 	}
 	if tunnel.TransportPolicy == "" {
 		tunnel.TransportPolicy = "relay_only"
+	}
+	if tunnel.UpdatedAt.IsZero() {
+		tunnel.UpdatedAt = time.Now().UTC()
 	}
 	if tunnel.Metadata == nil {
 		tunnel.Metadata = map[string]string{}
