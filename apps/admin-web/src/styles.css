@@ -370,6 +370,72 @@ textarea {
   align-items: center;
 }
 
+.ops-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.35fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.node-ops-layout {
+  grid-template-columns: minmax(340px, 0.95fr) minmax(0, 1.35fr);
+}
+
+.tunnel-ops-layout {
+  grid-template-columns: minmax(340px, 0.92fr) minmax(0, 1.4fr);
+}
+
+.ops-sidebar,
+.ops-workbench {
+  min-width: 0;
+}
+
+.ops-workbench {
+  display: grid;
+  gap: 18px;
+  align-self: start;
+}
+
+.node-workbench,
+.tunnel-workbench-panel {
+  min-height: 100%;
+}
+
+.workbench-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.workbench-grid-wide {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.workbench-section {
+  display: grid;
+  gap: 12px;
+}
+
+.capability-matrix {
+  padding: 4px 0;
+}
+
+.tunnel-card-list {
+  display: grid;
+  gap: 14px;
+}
+
+.tunnel-list-table {
+  margin-top: 6px;
+}
+
+.list-selection-note {
+  margin-bottom: 2px;
+}
+
+.runtime-guide {
+  min-height: 100%;
+}
+
 .split-layout {
   display: grid;
   grid-template-columns: minmax(0, 340px) minmax(0, 1fr);
@@ -567,6 +633,8 @@ td {
   .split-layout,
   .connections-layout,
   .tunnel-workspace,
+  .ops-layout,
+  .workbench-grid-wide,
   .form-grid,
   .detail-grid {
     grid-template-columns: 1fr;

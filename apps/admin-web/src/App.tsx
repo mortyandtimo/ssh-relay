@@ -1134,100 +1134,112 @@ export default function App() {
             </div>
 
             {connectionView === "nodes" ? (
-              <div className="split-layout connections-layout">
-                <section className="subpanel workspace-column">
-                  <h3>节点运维筛选台</h3>
-                  <form className="form-grid" onSubmit={submitNodeFilters}>
-                    <label>
-                      <span>节点状态</span>
-                      <select value={nodeStatusFilter} onChange={(event) => setNodeStatusFilter(event.target.value as NodeStatusFilter)}>
-                        <option value="all">全部</option>
-                        <option value="online">online</option>
-                        <option value="offline">offline</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span>节点角色</span>
-                      <select value={nodeFilter.nodeRole} onChange={(event) => setNodeFilter((current) => ({ ...current, nodeRole: event.target.value as NodeRole, offset: 0 }))}>
-                        <option value="">全部</option>
-                        <option value="cloud">cloud</option>
-                        <option value="local">local</option>
-                        <option value="third_party">third_party</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span>环境</span>
-                      <select value={nodeFilter.environment} onChange={(event) => setNodeFilter((current) => ({ ...current, environment: event.target.value as NodeEnvironment, offset: 0 }))}>
-                        <option value="">全部</option>
-                        <option value="prod">prod</option>
-                        <option value="test">test</option>
-                        <option value="dev">dev</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span>能力</span>
-                      <select value={nodeCapabilityFilter} onChange={(event) => setNodeCapabilityFilter(event.target.value as NodeCapabilityFilter)}>
-                        <option value="all">全部</option>
-                        <option value="tcp">TCP</option>
-                        <option value="http">HTTP</option>
-                        <option value="https">HTTPS</option>
-                        <option value="socks5">SOCKS5</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span>排序</span>
-                      <select value={nodeSortMode} onChange={(event) => setNodeSortMode(event.target.value as NodeSortMode)}>
-                        <option value="ops_priority">默认：离线/高承载优先</option>
-                        <option value="last_seen_desc">按最后在线时间</option>
-                        <option value="active_tunnels_desc">按承载 tunnel 数</option>
-                        <option value="name_asc">按名称</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span>负责人</span>
-                      <input value={nodeFilter.owner} onChange={(event) => setNodeFilter((current) => ({ ...current, owner: event.target.value, offset: 0 }))} />
-                    </label>
-                    <label>
-                      <span>标签</span>
-                      <input value={nodeFilter.tag} onChange={(event) => setNodeFilter((current) => ({ ...current, tag: event.target.value, offset: 0 }))} placeholder="例如 win 或 office" />
-                    </label>
-                    <div className="form-actions">
-                      <button type="submit">应用筛选</button>
-                      <button type="button" className="secondary" onClick={clearNodeFilters}>清空筛选</button>
+              <div className="ops-layout node-ops-layout">
+                <div className="ops-sidebar panel-stack">
+                  <section className="subpanel workspace-column">
+                    <div className="section-head compact-head">
+                      <div>
+                        <h3>节点运维筛选台</h3>
+                        <span className="muted-line">左侧保留筛选与节点列表，右侧固定为节点运维工作区，避免详情继续被压成窄栏。</span>
+                      </div>
                     </div>
-                  </form>
+                    <form className="form-grid" onSubmit={submitNodeFilters}>
+                      <label>
+                        <span>节点状态</span>
+                        <select value={nodeStatusFilter} onChange={(event) => setNodeStatusFilter(event.target.value as NodeStatusFilter)}>
+                          <option value="all">全部</option>
+                          <option value="online">online</option>
+                          <option value="offline">offline</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>节点角色</span>
+                        <select value={nodeFilter.nodeRole} onChange={(event) => setNodeFilter((current) => ({ ...current, nodeRole: event.target.value as NodeRole, offset: 0 }))}>
+                          <option value="">全部</option>
+                          <option value="cloud">cloud</option>
+                          <option value="local">local</option>
+                          <option value="third_party">third_party</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>环境</span>
+                        <select value={nodeFilter.environment} onChange={(event) => setNodeFilter((current) => ({ ...current, environment: event.target.value as NodeEnvironment, offset: 0 }))}>
+                          <option value="">全部</option>
+                          <option value="prod">prod</option>
+                          <option value="test">test</option>
+                          <option value="dev">dev</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>能力</span>
+                        <select value={nodeCapabilityFilter} onChange={(event) => setNodeCapabilityFilter(event.target.value as NodeCapabilityFilter)}>
+                          <option value="all">全部</option>
+                          <option value="tcp">TCP</option>
+                          <option value="http">HTTP</option>
+                          <option value="https">HTTPS</option>
+                          <option value="socks5">SOCKS5</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>排序</span>
+                        <select value={nodeSortMode} onChange={(event) => setNodeSortMode(event.target.value as NodeSortMode)}>
+                          <option value="ops_priority">默认：离线/高承载优先</option>
+                          <option value="last_seen_desc">按最后在线时间</option>
+                          <option value="active_tunnels_desc">按承载 tunnel 数</option>
+                          <option value="name_asc">按名称</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>负责人</span>
+                        <input value={nodeFilter.owner} onChange={(event) => setNodeFilter((current) => ({ ...current, owner: event.target.value, offset: 0 }))} />
+                      </label>
+                      <label>
+                        <span>标签</span>
+                        <input value={nodeFilter.tag} onChange={(event) => setNodeFilter((current) => ({ ...current, tag: event.target.value, offset: 0 }))} placeholder="例如 win 或 office" />
+                      </label>
+                      <div className="form-actions">
+                        <button type="submit">应用筛选</button>
+                        <button type="button" className="secondary" onClick={clearNodeFilters}>清空筛选</button>
+                      </div>
+                    </form>
 
-                  {!selectedNodeVisibleInFilters && selectedNode ? <div className="empty-state"><strong>当前选中节点未命中筛选结果</strong><p>详情仍保留，便于继续排障；如需在左侧列表重新看到它，请调整筛选条件。</p></div> : null}
+                    {!selectedNodeVisibleInFilters && selectedNode ? <div className="empty-state list-selection-note"><strong>当前选中节点未命中筛选结果</strong><p>详情仍保留在右侧工作区，便于继续排障；如需在左侧列表重新看到它，请调整筛选条件。</p></div> : null}
 
+                    <div className="section-head compact-head">
+                      <h3>节点列表</h3>
+                      <span className="muted-line">显示 {filteredNodes.length === 0 ? 0 : 1}-{filteredNodes.length} / {nodes.length}</span>
+                    </div>
+                    <div className="table-wrap compact-table">
+                      <table>
+                        <thead><tr><th>节点</th><th>状态</th><th>角色/环境</th><th>承载</th><th>能力</th><th>标签</th></tr></thead>
+                        <tbody>
+                          {filteredNodes.length === 0 ? <tr><td colSpan={6}>当前筛选条件下暂无节点。</td></tr> : filteredNodes.map((node) => (
+                            <tr key={node.nodeId} className={selectedNodeID === node.nodeId ? "clickable-row selected-row" : "clickable-row"} onClick={() => setSelectedNodeID((current) => current === node.nodeId ? null : node.nodeId)}>
+                              <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div>{node.isolated ? <div><span className="status-pill tone-danger">已隔离</span></div> : null}</td>
+                              <td><span className={statusPillClass(node.status)}>{node.status}</span><div className="muted">{formatDate(node.lastSeenAt)}</div></td>
+                              <td><div>{node.nodeRole ? roleLabel(node.nodeRole) : "-"}</div><div className="muted">{node.environment || "-"} / {node.trustLevel || "-"}</div></td>
+                              <td><div>{node.activeTunnels}</div><div className="muted">负责人 {node.owner || "-"}</div></td>
+                              <td><div className="table-status-stack"><span className={capabilityPillClass(node.capabilities.tcpRelay)}>TCP</span><span className={capabilityPillClass(node.capabilities.httpRelay)}>HTTP</span><span className={capabilityPillClass(node.capabilities.httpsRelay || node.capabilities.httpRelay)}>HTTPS</span><span className={capabilityPillClass(Boolean(node.capabilities.socks5Connect))}>SOCKS5</span></div></td>
+                              <td>{formatTags(node.tags)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="actions-row audit-pager">
+                      <span className="inline-note">当前节点工作区使用前端派生筛选/排序，便于快速运维判断；分页接口仍保留但本视图以当前已加载节点为准。</span>
+                    </div>
+                  </section>
+                </div>
+
+                <section className="subpanel detail-panel ops-workbench node-workbench">
                   <div className="section-head compact-head">
-                    <h3>节点列表</h3>
-                    <span className="muted-line">显示 {filteredNodes.length === 0 ? 0 : 1}-{filteredNodes.length} / {nodes.length}</span>
+                    <div>
+                      <h3>节点运维工作区</h3>
+                      <span className="muted-line">右侧固定承载基础状态、节点属性、能力矩阵与节点承载入口，不再压成一条细长侧栏。</span>
+                    </div>
                   </div>
-                  <div className="table-wrap compact-table">
-                    <table>
-                      <thead><tr><th>节点</th><th>状态</th><th>角色/环境</th><th>承载</th><th>能力</th><th>标签</th></tr></thead>
-                      <tbody>
-                        {filteredNodes.length === 0 ? <tr><td colSpan={6}>当前筛选条件下暂无节点。</td></tr> : filteredNodes.map((node) => (
-                          <tr key={node.nodeId} className={selectedNodeID === node.nodeId ? "clickable-row selected-row" : "clickable-row"} onClick={() => setSelectedNodeID((current) => current === node.nodeId ? null : node.nodeId)}>
-                            <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div>{node.isolated ? <div><span className="status-pill tone-danger">已隔离</span></div> : null}</td>
-                            <td><span className={statusPillClass(node.status)}>{node.status}</span><div className="muted">{formatDate(node.lastSeenAt)}</div></td>
-                            <td><div>{node.nodeRole ? roleLabel(node.nodeRole) : "-"}</div><div className="muted">{node.environment || "-"} / {node.trustLevel || "-"}</div></td>
-                            <td><div>{node.activeTunnels}</div><div className="muted">负责人 {node.owner || "-"}</div></td>
-                            <td><div className="table-status-stack"><span className={capabilityPillClass(node.capabilities.tcpRelay)}>TCP</span><span className={capabilityPillClass(node.capabilities.httpRelay)}>HTTP</span><span className={capabilityPillClass(node.capabilities.httpsRelay || node.capabilities.httpRelay)}>HTTPS</span><span className={capabilityPillClass(Boolean(node.capabilities.socks5Connect))}>SOCKS5</span></div></td>
-                            <td>{formatTags(node.tags)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <div className="actions-row audit-pager">
-                    <span className="inline-note">当前节点工作区使用前端派生筛选/排序，便于快速运维判断；分页接口仍保留但本视图以当前已加载节点为准。</span>
-                  </div>
-                </section>
-
-                <section className="subpanel detail-panel">
-                  <h3>节点运维工作区</h3>
                   {selectedNode && nodeEditForm ? (
                     <>
                       <div className="detail-hero">
@@ -1237,48 +1249,71 @@ export default function App() {
                         </div>
                         <span className={statusPillClass(selectedNode.status)}>{selectedNode.status}</span>
                       </div>
-                      <div className="empty-state">
-                        <strong>基础状态</strong>
-                        <p>nodeId：<code>{selectedNode.nodeId}</code></p>
-                        <p>nodeName：<code>{selectedNode.nodeName}</code></p>
-                        <p>lastSeenAt：<code>{formatDate(selectedNode.lastSeenAt)}</code></p>
-                        <p>activeTunnels：<code>{String(selectedNode.activeTunnels)}</code></p>
-                        <p>hostname / os / arch：<code>{nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} / {nodeMeta(selectedNode, "os")} / {nodeMeta(selectedNode, "arch")}</code></p>
-                        <p>隔离状态：{selectedNode.isolated ? <span className="status-pill tone-danger">已隔离</span> : <span className="status-pill tone-good">未隔离</span>}</p>
-                        <div className="actions-row">
-                          <button type="button" className="secondary" disabled={busyAction === 'isolate-node:' + selectedNode.nodeId || selectedNode.isolated} onClick={() => void setNodeIsolation(selectedNode, true)}>隔离节点</button>
-                          <button type="button" className="secondary" disabled={busyAction === 'release-node:' + selectedNode.nodeId || !selectedNode.isolated} onClick={() => void setNodeIsolation(selectedNode, false)}>解除隔离</button>
-                          <button type="button" className="secondary" onClick={() => void refreshDashboard(true, currentUser, false, auditFilterRef.current, nodeFilterRef.current)} disabled={busyAction === 'refresh'}>刷新当前视图</button>
+
+                      <div className="workbench-grid workbench-grid-wide">
+                        <div className="empty-state">
+                          <strong>基础状态</strong>
+                          <p>nodeId：<code>{selectedNode.nodeId}</code></p>
+                          <p>nodeName：<code>{selectedNode.nodeName}</code></p>
+                          <p>lastSeenAt：<code>{formatDate(selectedNode.lastSeenAt)}</code></p>
+                          <p>activeTunnels：<code>{String(selectedNode.activeTunnels)}</code></p>
+                          <p>hostname / os / arch：<code>{nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} / {nodeMeta(selectedNode, "os")} / {nodeMeta(selectedNode, "arch")}</code></p>
+                          <p>隔离状态：{selectedNode.isolated ? <span className="status-pill tone-danger">已隔离</span> : <span className="status-pill tone-good">未隔离</span>}</p>
+                          <div className="actions-row">
+                            <button type="button" className="secondary" disabled={busyAction === 'isolate-node:' + selectedNode.nodeId || selectedNode.isolated} onClick={() => void setNodeIsolation(selectedNode, true)}>隔离节点</button>
+                            <button type="button" className="secondary" disabled={busyAction === 'release-node:' + selectedNode.nodeId || !selectedNode.isolated} onClick={() => void setNodeIsolation(selectedNode, false)}>解除隔离</button>
+                            <button type="button" className="secondary" onClick={() => void refreshDashboard(true, currentUser, false, auditFilterRef.current, nodeFilterRef.current)} disabled={busyAction === 'refresh'}>刷新当前视图</button>
+                          </div>
+                        </div>
+
+                        <div className="empty-state">
+                          <strong>运维提示</strong>
+                          <p>{selectedNode.isolated ? '已隔离：禁止新挂载 tunnel。' : '未隔离：允许正常挂载 tunnel。'}</p>
+                          <p>{selectedNode.status !== 'online' ? 'offline：当前不可通信。' : 'online：控制面可通信。'}</p>
+                          <p>{selectedNode.activeTunnels >= 3 ? '高承载：当前 activeTunnels 较多。' : '承载正常：当前 activeTunnels 处于较低水平。'}</p>
                         </div>
                       </div>
-                      <div className="detail-grid">
-                        <DetailItem label="role" value={selectedNode.nodeRole ? roleLabel(selectedNode.nodeRole) : "-"} />
-                        <DetailItem label="environment" value={selectedNode.environment || "-"} />
-                        <DetailItem label="trustLevel" value={selectedNode.trustLevel || "-"} />
-                        <DetailItem label="owner" value={selectedNode.owner || "-"} />
-                        <DetailItem label="location" value={selectedNode.location || "-"} />
-                        <DetailItem label="tags" value={formatTags(selectedNode.tags)} />
-                      </div>
-                      <div className="empty-state">
-                        <strong>运维提示</strong>
-                        <p>{selectedNode.isolated ? '已隔离：禁止新挂载 tunnel。' : '未隔离：允许正常挂载 tunnel。'}</p>
-                        <p>{selectedNode.status !== 'online' ? 'offline：当前不可通信。' : 'online：控制面可通信。'}</p>
-                        <p>{selectedNode.activeTunnels >= 3 ? '高承载：当前 activeTunnels 较多。' : '承载正常：当前 activeTunnels 处于较低水平。'}</p>
-                      </div>
-                      <div className="empty-state">
-                        <strong>节点能力矩阵</strong>
-                        <p>直接判断该节点能否挂载 TCP / HTTP / HTTPS / SOCKS5，不再只看原始布尔字段。</p>
-                        <div className="table-status-stack">
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>节点属性</h3>
+                            <span className="muted-line">按排障视角展示角色、环境、信任级别与运维归属信息。</span>
+                          </div>
+                        </div>
+                        <div className="detail-grid">
+                          <DetailItem label="role" value={selectedNode.nodeRole ? roleLabel(selectedNode.nodeRole) : "-"} />
+                          <DetailItem label="environment" value={selectedNode.environment || "-"} />
+                          <DetailItem label="trustLevel" value={selectedNode.trustLevel || "-"} />
+                          <DetailItem label="owner" value={selectedNode.owner || "-"} />
+                          <DetailItem label="location" value={selectedNode.location || "-"} />
+                          <DetailItem label="tags" value={formatTags(selectedNode.tags)} />
+                        </div>
+                      </section>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>节点能力矩阵</h3>
+                            <span className="muted-line">直接判断该节点能否挂载 TCP / HTTP / HTTPS / SOCKS5，不再只看原始布尔字段。</span>
+                          </div>
+                        </div>
+                        <div className="table-status-stack capability-matrix">
                           <span className={capabilityPillClass(selectedNode.capabilities.tcpRelay)}>TCP relay {capabilityEnabledLabel(selectedNode.capabilities.tcpRelay)}</span>
                           <span className={capabilityPillClass(selectedNode.capabilities.httpRelay)}>HTTP relay {capabilityEnabledLabel(selectedNode.capabilities.httpRelay)}</span>
                           <span className={capabilityPillClass(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}>HTTPS relay {capabilityEnabledLabel(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}</span>
                           <span className={capabilityPillClass(Boolean(selectedNode.capabilities.socks5Connect))}>SOCKS5 connect {capabilityEnabledLabel(Boolean(selectedNode.capabilities.socks5Connect))}</span>
                           <span className={capabilityPillClass(selectedNode.capabilities.p2pAssist)}>P2P assist {capabilityEnabledLabel(selectedNode.capabilities.p2pAssist)}</span>
                         </div>
-                      </div>
-                      <div className="empty-state">
-                        <strong>节点承载入口</strong>
-                        <p>直接查看该节点当前挂载的 tunnel，判断它到底承载了哪些入口以及哪些入口异常。</p>
+                      </section>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>节点承载入口</h3>
+                            <span className="muted-line">直接查看该节点当前挂载的 tunnel，判断它到底承载了哪些入口以及哪些入口异常。</span>
+                          </div>
+                        </div>
                         <div className="table-wrap compact-table">
                           <table>
                             <thead><tr><th>隧道</th><th>类型</th><th>状态</th><th>健康</th><th>用户入口</th></tr></thead>
@@ -1295,73 +1330,212 @@ export default function App() {
                             </tbody>
                           </table>
                         </div>
-                      </div>
-                      <form className="form-grid" onSubmit={submitNodeMetadata}>
-                        <label>
-                          <span>节点角色</span>
-                          <select value={nodeEditForm.nodeRole} onChange={(event) => setNodeEditForm((current) => current ? { ...current, nodeRole: event.target.value as NodeRole } : current)}>
-                            <option value="">未设置</option>
-                            <option value="cloud">cloud</option>
-                            <option value="local">local</option>
-                            <option value="third_party">third_party</option>
-                          </select>
-                        </label>
-                        <label>
-                          <span>环境</span>
-                          <select value={nodeEditForm.environment} onChange={(event) => setNodeEditForm((current) => current ? { ...current, environment: event.target.value as NodeEnvironment } : current)}>
-                            <option value="">未设置</option>
-                            <option value="prod">prod</option>
-                            <option value="test">test</option>
-                            <option value="dev">dev</option>
-                          </select>
-                        </label>
-                        <label>
-                          <span>信任级别</span>
-                          <select value={nodeEditForm.trustLevel} onChange={(event) => setNodeEditForm((current) => current ? { ...current, trustLevel: event.target.value as NodeTrustLevel } : current)}>
-                            <option value="">未设置</option>
-                            <option value="trusted">trusted</option>
-                            <option value="limited">limited</option>
-                            <option value="external">external</option>
-                          </select>
-                        </label>
-                        <label><span>负责人</span><input value={nodeEditForm.owner} onChange={(event) => setNodeEditForm((current) => current ? { ...current, owner: event.target.value } : current)} /></label>
-                        <label><span>位置</span><input value={nodeEditForm.location} onChange={(event) => setNodeEditForm((current) => current ? { ...current, location: event.target.value } : current)} /></label>
-                        <label><span>标签</span><input value={nodeEditForm.tags} onChange={(event) => setNodeEditForm((current) => current ? { ...current, tags: event.target.value } : current)} placeholder="逗号分隔" /></label>
-                        <div className="form-actions">
-                          <button type="submit" disabled={busyAction === "update-node:" + selectedNode.nodeId}>{busyAction === "update-node:" + selectedNode.nodeId ? "保存中..." : "保存节点元数据"}</button>
+                      </section>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>节点元数据维护</h3>
+                            <span className="muted-line">右侧工作区直接完成标签、角色、环境等元数据更新，不再来回跳转。</span>
+                          </div>
                         </div>
-                      </form>
+                        <form className="form-grid" onSubmit={submitNodeMetadata}>
+                          <label>
+                            <span>节点角色</span>
+                            <select value={nodeEditForm.nodeRole} onChange={(event) => setNodeEditForm((current) => current ? { ...current, nodeRole: event.target.value as NodeRole } : current)}>
+                              <option value="">未设置</option>
+                              <option value="cloud">cloud</option>
+                              <option value="local">local</option>
+                              <option value="third_party">third_party</option>
+                            </select>
+                          </label>
+                          <label>
+                            <span>环境</span>
+                            <select value={nodeEditForm.environment} onChange={(event) => setNodeEditForm((current) => current ? { ...current, environment: event.target.value as NodeEnvironment } : current)}>
+                              <option value="">未设置</option>
+                              <option value="prod">prod</option>
+                              <option value="test">test</option>
+                              <option value="dev">dev</option>
+                            </select>
+                          </label>
+                          <label>
+                            <span>信任级别</span>
+                            <select value={nodeEditForm.trustLevel} onChange={(event) => setNodeEditForm((current) => current ? { ...current, trustLevel: event.target.value as NodeTrustLevel } : current)}>
+                              <option value="">未设置</option>
+                              <option value="trusted">trusted</option>
+                              <option value="limited">limited</option>
+                              <option value="external">external</option>
+                            </select>
+                          </label>
+                          <label><span>负责人</span><input value={nodeEditForm.owner} onChange={(event) => setNodeEditForm((current) => current ? { ...current, owner: event.target.value } : current)} /></label>
+                          <label><span>位置</span><input value={nodeEditForm.location} onChange={(event) => setNodeEditForm((current) => current ? { ...current, location: event.target.value } : current)} /></label>
+                          <label><span>标签</span><input value={nodeEditForm.tags} onChange={(event) => setNodeEditForm((current) => current ? { ...current, tags: event.target.value } : current)} placeholder="逗号分隔" /></label>
+                          <div className="form-actions">
+                            <button type="submit" disabled={busyAction === "update-node:" + selectedNode.nodeId}>{busyAction === "update-node:" + selectedNode.nodeId ? "保存中..." : "保存节点元数据"}</button>
+                          </div>
+                        </form>
+                      </section>
                     </>
-                  ) : <EmptyState title="未选择节点" body="请先在左侧列表中选中节点。当前界面仅显示当前分页的数据，避免节点过多时页面不断拉长。" />}
+                  ) : <EmptyState title="未选择节点" body="请先在左侧列表中选中节点。右侧工作区会稳定承载节点状态、能力矩阵和承载入口，不再继续挤成一条窄栏。" />}
                 </section>
               </div>
             ) : (
-              <>
-                <div className="section-head compact-head tunnel-filter-bar">
-                  <div>
-                    <h3>隧道运维筛选台</h3>
-                    <span className="muted-line">组合按健康、类型、probe 状态、节点在线性筛选，并按运维优先级或更新时间排序。</span>
-                  </div>
-                  <div className="inline-switches">
-                    <button type="button" className={tunnelHealthFilter === "all" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("all")}>全部</button>
-                    <button type="button" className={tunnelHealthFilter === "healthy" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("healthy")}>正常</button>
-                    <button type="button" className={tunnelHealthFilter === "unhealthy" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("unhealthy")}>异常</button>
-                  </div>
+              <div className="ops-layout tunnel-ops-layout">
+                <div className="ops-sidebar panel-stack">
+                  <section className="subpanel tunnel-filter-panel">
+                    <div className="section-head compact-head tunnel-filter-bar">
+                      <div>
+                        <h3>隧道运维筛选台</h3>
+                        <span className="muted-line">左侧只保留筛选与隧道列表，右侧固定为 tunnel workbench，避免选中后整页上下突兀增高。</span>
+                      </div>
+                      <div className="inline-switches">
+                        <button type="button" className={tunnelHealthFilter === "all" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("all")}>全部</button>
+                        <button type="button" className={tunnelHealthFilter === "healthy" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("healthy")}>正常</button>
+                        <button type="button" className={tunnelHealthFilter === "unhealthy" ? "nav-tab active" : "nav-tab"} onClick={() => setTunnelHealthFilter("unhealthy")}>异常</button>
+                      </div>
+                    </div>
+                    <div className="form-grid">
+                      <label><span>入口类型</span><select value={tunnelTypeFilter} onChange={(event) => setTunnelTypeFilter(event.target.value as TunnelTypeFilter)}><option value="all">全部</option><option value="tcp">TCP</option><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
+                      <label><span>Probe 状态</span><select value={probeStateFilter} onChange={(event) => setProbeStateFilter(event.target.value as ProbeStateFilter)}><option value="all">全部</option><option value="not_probed">未探测</option><option value="recent_success">最近成功</option><option value="recent_failure">最近失败</option><option value="stale">结果较旧</option></select></label>
+                      <label><span>节点状态</span><select value={tunnelNodeStatusFilter} onChange={(event) => setTunnelNodeStatusFilter(event.target.value as TunnelNodeStatusFilter)}><option value="all">全部</option><option value="online">节点在线</option><option value="offline">节点离线</option></select></label>
+                      <label><span>排序</span><select value={tunnelSortMode} onChange={(event) => setTunnelSortMode(event.target.value as TunnelSortMode)}><option value="ops_priority">默认：异常/失败/较旧优先</option><option value="updated_desc">按更新时间</option><option value="name_asc">按名称</option><option value="health_priority">按健康优先级</option><option value="probe_desc">按最近 probe 时间</option></select></label>
+                    </div>
+                  </section>
+
+                  {!selectedTunnelVisibleInFilters && selectedTunnel ? <div className="empty-state list-selection-note"><strong>当前选中隧道未命中筛选结果</strong><p>详情仍保留在右侧工作台，便于继续排查；如需在列表中重新看到它，请调整筛选条件。</p></div> : null}
+
+                  <section className="subpanel tunnel-list-panel">
+                    <div className="section-head compact-head">
+                      <div>
+                        <h3>隧道列表</h3>
+                        <span className="muted-line">点击左侧卡片后，只更新右侧工作台内容，不再在本页中下方追加大块详情。</span>
+                      </div>
+                      <span className="muted-line">显示 {filteredTunnels.length === 0 ? 0 : 1}-{filteredTunnels.length} / {tunnels.length}</span>
+                    </div>
+                    <div className="tunnel-card-list">
+                      {filteredTunnels.length === 0 ? <EmptyState title="暂无匹配隧道" body="当前筛选条件下没有匹配结果，可以切换到全部查看。" /> : filteredTunnels.map((tunnel) => (
+                        <article key={tunnel.id} className={editingTunnelID === tunnel.id ? tunnelCardClass(tunnel, true) : tunnelCardClass(tunnel, false)} onClick={() => {
+                          if (editingTunnelID === tunnel.id) {
+                            clearTunnelEdit();
+                            return;
+                          }
+                          beginTunnelEdit(tunnel);
+                        }}>
+                          <div className="spotlight-head">
+                            <div>
+                              <strong>{tunnel.name}</strong>
+                              <span className="muted-line">{tunnel.id}</span>
+                            </div>
+                            <span className={statusPillClass(tunnel.status)}>{tunnel.status}</span>
+                          </div>
+                          <div className="tunnel-route">{tunnelPublicEntry(tunnel)}</div>
+                          <div className="health-pill-row">
+                            <span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span>
+                            <span className={probeFreshnessPillClass(deriveProbeFreshnessState(tunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(tunnel))}</span>
+                          </div>
+                          <div className="muted-line">类型 {tunnelTypeLabel(tunnel.type)}</div>
+                          <div className="muted-line">目标 {tunnelTargetLabel(tunnel)}</div>
+                          <div className="muted-line">运行依赖 {tunnelRequirementSummary(tunnel, nodes)}</div>
+                          <div className="muted-line">节点 {tunnel.nodeId}</div>
+                        </article>
+                      ))}
+                    </div>
+                    <div className="table-wrap compact-table tunnel-list-table">
+                      <table>
+                        <thead><tr><th>名称</th><th>类型</th><th>状态/健康</th><th>Probe</th><th>入口</th></tr></thead>
+                        <tbody>
+                          {filteredTunnels.length === 0 ? <tr><td colSpan={5}>当前筛选条件下暂无隧道。</td></tr> : filteredTunnels.map((tunnel) => (
+                            <tr key={tunnel.id} className={editingTunnelID === tunnel.id ? tunnelRowClass(tunnel, true) : tunnelRowClass(tunnel, false)} onClick={() => {
+                              if (editingTunnelID === tunnel.id) {
+                                clearTunnelEdit();
+                                return;
+                              }
+                              beginTunnelEdit(tunnel);
+                            }}>
+                              <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
+                              <td>{tunnelTypeLabel(tunnel.type)}</td>
+                              <td><div className="table-status-stack"><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span><span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span></div></td>
+                              <td><div className="table-status-stack"><span className={probeFreshnessPillClass(deriveProbeFreshnessState(tunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(tunnel))}</span></div><div className="muted">{tunnel.lastProbedAt ? formatDate(tunnel.lastProbedAt) : "-"}</div></td>
+                              <td><div>{tunnelPublicEntry(tunnel)}</div><div className="muted">{tunnelTypeEntryHint(tunnel)}</div></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
                 </div>
-                <section className="subpanel">
-                  <div className="form-grid">
-                    <label><span>入口类型</span><select value={tunnelTypeFilter} onChange={(event) => setTunnelTypeFilter(event.target.value as TunnelTypeFilter)}><option value="all">全部</option><option value="tcp">TCP</option><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
-                    <label><span>Probe 状态</span><select value={probeStateFilter} onChange={(event) => setProbeStateFilter(event.target.value as ProbeStateFilter)}><option value="all">全部</option><option value="not_probed">未探测</option><option value="recent_success">最近成功</option><option value="recent_failure">最近失败</option><option value="stale">结果较旧</option></select></label>
-                    <label><span>节点状态</span><select value={tunnelNodeStatusFilter} onChange={(event) => setTunnelNodeStatusFilter(event.target.value as TunnelNodeStatusFilter)}><option value="all">全部</option><option value="online">节点在线</option><option value="offline">节点离线</option></select></label>
-                    <label><span>排序</span><select value={tunnelSortMode} onChange={(event) => setTunnelSortMode(event.target.value as TunnelSortMode)}><option value="ops_priority">默认：异常/失败/较旧优先</option><option value="updated_desc">按更新时间</option><option value="name_asc">按名称</option><option value="health_priority">按健康优先级</option><option value="probe_desc">按最近 probe 时间</option></select></label>
+
+                <section className="subpanel ops-workbench tunnel-workbench-panel">
+                  <div className="section-head compact-head">
+                    <div>
+                      <h3>隧道运维工作台</h3>
+                      <span className="muted-line">右侧固定承载基本信息、创建/编辑表单、probe 结果和运行说明，切换隧道时只更新这里的内容。</span>
+                    </div>
+                    <span className={selectedTunnel ? statusPillClass(selectedTunnel.status) : "status-pill tone-neutral"}>{selectedTunnel ? selectedTunnel.status : "新建模式"}</span>
                   </div>
-                </section>
-                {!selectedTunnelVisibleInFilters && selectedTunnel ? <div className="empty-state"><strong>当前选中隧道未命中筛选结果</strong><p>详情仍保留，便于继续排查；如需在列表中重新看到它，请调整筛选条件。</p></div> : null}
-                <div className="split-layout tunnel-workspace">
-                  <div className="workspace-column panel-stack">
-                    {editingTunnelID === null ? (
-                    <section className="subpanel form-panel">
-                      <h3>创建隧道</h3>
+
+                  {selectedTunnel ? (
+                    <div className="workbench-grid workbench-grid-wide tunnel-info-grid">
+                      <div className="empty-state">
+                        <strong>基本信息</strong>
+                        <p>id：<code>{selectedTunnel.id}</code></p>
+                        <p>name：<code>{selectedTunnel.name}</code></p>
+                        <p>type：<code>{tunnelTypeLabel(selectedTunnel.type)}</code></p>
+                        <p>nodeId：<code>{selectedTunnel.nodeId}</code></p>
+                        <p>status：<span className={statusPillClass(selectedTunnel.status)}>{selectedTunnel.status}</span></p>
+                        <p>healthStatus：<span className={tunnelHealthPillClass(selectedTunnel.healthStatus)}>{tunnelHealthLabel(selectedTunnel.healthStatus)}</span></p>
+                        <p>probe freshness：<span className={probeFreshnessPillClass(deriveProbeFreshnessState(selectedTunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(selectedTunnel))}</span></p>
+                        <div className="actions-row">
+                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <button type="button" className="secondary" disabled={busyAction === selectedTunnel.id + ":probe"} onClick={() => void probeTunnel(selectedTunnel)}>{busyAction === selectedTunnel.id + ":probe" ? "探测中..." : "探测"}</button> : null}
+                          <button type="button" disabled={busyAction === selectedTunnel.id + ":active" || selectedTunnel.status === "active"} onClick={() => void updateTunnelStatus(selectedTunnel, "active")}>启用</button>
+                          <button type="button" disabled={busyAction === selectedTunnel.id + ":paused" || selectedTunnel.status === "paused"} onClick={() => void updateTunnelStatus(selectedTunnel, "paused")}>暂停</button>
+                          <button type="button" className="danger" disabled={busyAction === selectedTunnel.id + ":delete"} onClick={() => void deleteTunnel(selectedTunnel)}>删除</button>
+                        </div>
+                      </div>
+
+                      <div className="empty-state">
+                        <strong>入口与运行条件</strong>
+                        <p>用户入口：<code>{tunnelPublicEntry(selectedTunnel)}</code></p>
+                        <p>入口说明：{tunnelTypeEntryHint(selectedTunnel)}</p>
+                        <p>目标地址：<code>{selectedTunnel.targetHost}:{selectedTunnel.targetPort}</code></p>
+                        <p>运行依赖：{tunnelRequirementSummary(selectedTunnel, nodes)}</p>
+                        {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <p>probePath：<code>{selectedTunnel.probePath || "/"}</code></p> : null}
+                        {selectedTunnel.type === "https" ? <p>publicPort 语义：<code>{selectedTunnel.publicPort}</code> 仅作内部保留字段，不作为标准用户入口。</p> : null}
+                      </div>
+                    </div>
+                  ) : <EmptyState title="尚未选择隧道" body="右侧当前保持稳定的新建工作台；在左侧选择隧道后，这里会切换成当前隧道的编辑与排障面板。" />}
+
+                  <section className="workbench-section">
+                    <div className="section-head compact-head">
+                      <div>
+                        <p className="eyebrow">{editingTunnelID !== null && tunnelEditForm ? "编辑" : "创建"}</p>
+                        <h3>{editingTunnelID !== null && tunnelEditForm ? "编辑当前隧道" : "新建隧道"}</h3>
+                      </div>
+                      <span className="muted-line">{editingTunnelID !== null && tunnelEditForm ? "当前编辑 " + tunnelEditForm.id : "未选中隧道时，这里固定显示新建表单"}</span>
+                    </div>
+
+                    {editingTunnelID !== null && tunnelEditForm ? (
+                      <form className="form-grid" onSubmit={submitTunnelEdit}>
+                        <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
+                        <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
+                        <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
+                        <label><span>{tunnelEditForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
+                        {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>域名</span><input value={tunnelEditForm.domain} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, domain: event.target.value } : current)} placeholder="例如 app.example.com" /></label> : null}
+                        {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>probePath</span><input value={tunnelEditForm.probePath} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} placeholder="默认 /" /></label> : null}
+                        {tunnelEditForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelEditForm.tlsMode} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, tlsMode: event.target.value } : current)}><option value="edge_terminate">edge_terminate</option></select></label> : null}
+                        {tunnelEditForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelEditForm.publicPort || "<公网端口>"}</code></div> : null}
+                        {tunnelEditForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelEditForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
+                        {tunnelEditForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
+                        <div className="detail-grid readonly-grid">
+                          <DetailItem label="nodeId" value={tunnelEditForm.nodeId} />
+                          <DetailItem label="status" value={tunnelEditForm.status} />
+                        </div>
+                        <div className="form-actions">
+                          <button type="submit" disabled={busyAction === "edit-tunnel:" + tunnelEditForm.id}>{busyAction === "edit-tunnel:" + tunnelEditForm.id ? "保存中..." : "保存修改"}</button>
+                          <button type="button" className="secondary" onClick={clearTunnelEdit}>取消编辑</button>
+                        </div>
+                      </form>
+                    ) : (
                       <form className="form-grid" onSubmit={createTunnel}>
                         <label>
                           <span>类型</span>
@@ -1398,138 +1572,19 @@ export default function App() {
                         {tunnelForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
                         <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
                       </form>
-                    </section>
-                    ) : (
-                    <section className="subpanel form-panel">
-                      <h3>新建隧道</h3>
-                      <p className="summary">当前已选中隧道，右侧正在显示其编辑表单。再次点击已选隧道可取消选中，取消后这里会恢复新建表单。</p>
-                    </section>
                     )}
+                  </section>
 
-                    <section className="subpanel form-panel">
-                      <div className="section-head compact-head">
-                        <div>
-                          <p className="eyebrow">编辑</p>
-                          <h3>编辑隧道</h3>
-                        </div>
-                        {tunnelEditForm ? <span className="muted-line">当前编辑 {tunnelEditForm.id}</span> : null}
-                      </div>
-                      {editingTunnelID !== null && tunnelEditForm ? (
-                        <form className="form-grid" onSubmit={submitTunnelEdit}>
-                          <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
-                          <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
-                          <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
-                          <label><span>{tunnelEditForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
-                          {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>域名</span><input value={tunnelEditForm.domain} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, domain: event.target.value } : current)} placeholder="例如 app.example.com" /></label> : null}
-                          {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>probePath</span><input value={tunnelEditForm.probePath} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} placeholder="默认 /" /></label> : null}
-                          {tunnelEditForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelEditForm.tlsMode} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, tlsMode: event.target.value } : current)}><option value="edge_terminate">edge_terminate</option></select></label> : null}
-                          {tunnelEditForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelEditForm.publicPort || "<公网端口>"}</code></div> : null}
-                          {tunnelEditForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelEditForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
-                          {tunnelEditForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
-                          <div className="detail-grid readonly-grid">
-                            <DetailItem label="nodeId" value={tunnelEditForm.nodeId} />
-                            <DetailItem label="status" value={tunnelEditForm.status} />
-                          </div>
-                          <div className="form-actions">
-                            <button type="submit" disabled={busyAction === "edit-tunnel:" + tunnelEditForm.id}>{busyAction === "edit-tunnel:" + tunnelEditForm.id ? "保存中..." : "保存修改"}</button>
-                            <button type="button" className="secondary" onClick={clearTunnelEdit}>取消编辑</button>
-                          </div>
-                        </form>
-                      ) : <EmptyState title="尚未选择隧道" body="点击右侧隧道卡片或表格中的编辑按钮后，在这里修改目标映射。" />}
-                    </section>
-                  </div>
-
-                  <section className="subpanel">
+                  <section className="workbench-section">
                     <div className="section-head compact-head">
                       <div>
-                        <h3>隧道运维工作区</h3>
-                        <span className="muted-line">当前筛选结果与选中隧道详情共存，方便直接排查和操作。</span>
+                        <h3>最近一次 Probe 结果</h3>
+                        <span className="muted-line">当前只对 HTTP / HTTPS tunnel 展示最近一次 probe 的结果，不再把结果块散落在列表下方。</span>
                       </div>
                     </div>
-                    {selectedTunnel ? (
-                      <div className="empty-state">
-                        <strong>当前选中隧道</strong>
-                        <p>id：<code>{selectedTunnel.id}</code></p>
-                        <p>name：<code>{selectedTunnel.name}</code></p>
-                        <p>type：<code>{tunnelTypeLabel(selectedTunnel.type)}</code></p>
-                        <p>nodeId：<code>{selectedTunnel.nodeId}</code></p>
-                        <p>status：<span className={statusPillClass(selectedTunnel.status)}>{selectedTunnel.status}</span></p>
-                        <p>healthStatus：<span className={tunnelHealthPillClass(selectedTunnel.healthStatus)}>{tunnelHealthLabel(selectedTunnel.healthStatus)}</span></p>
-                        <p>probe freshness：<span className={probeFreshnessPillClass(deriveProbeFreshnessState(selectedTunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(selectedTunnel))}</span></p>
-                        <p>用户入口：<code>{tunnelPublicEntry(selectedTunnel)}</code></p>
-                        <p>目标地址：<code>{selectedTunnel.targetHost}:{selectedTunnel.targetPort}</code></p>
-                        <p>运行依赖：{tunnelRequirementSummary(selectedTunnel, nodes)}</p>
-                        {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <p>probePath：<code>{selectedTunnel.probePath || "/"}</code></p> : null}
-                        <div className="actions-row">
-                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <button type="button" className="secondary" disabled={busyAction === selectedTunnel.id + ":probe"} onClick={() => void probeTunnel(selectedTunnel)}>{busyAction === selectedTunnel.id + ":probe" ? "探测中..." : "探测"}</button> : null}
-                          <button type="button" disabled={busyAction === selectedTunnel.id + ":active" || selectedTunnel.status === "active"} onClick={() => void updateTunnelStatus(selectedTunnel, "active")}>启用</button>
-                          <button type="button" disabled={busyAction === selectedTunnel.id + ":paused" || selectedTunnel.status === "paused"} onClick={() => void updateTunnelStatus(selectedTunnel, "paused")}>暂停</button>
-                          <button type="button" className="danger" disabled={busyAction === selectedTunnel.id + ":delete"} onClick={() => void deleteTunnel(selectedTunnel)}>删除</button>
-                        </div>
-                      </div>
-                    ) : null}
-                    <div className="spotlight-grid compact-cards">
-                      {filteredTunnels.length === 0 ? <EmptyState title="暂无匹配隧道" body="当前筛选条件下没有匹配结果，可以切换到全部查看。" /> : filteredTunnels.map((tunnel) => (
-                        <article key={tunnel.id} className={editingTunnelID === tunnel.id ? tunnelCardClass(tunnel, true) : tunnelCardClass(tunnel, false)} onClick={() => {
-                          if (editingTunnelID === tunnel.id) {
-                            clearTunnelEdit();
-                            return;
-                          }
-                          beginTunnelEdit(tunnel);
-                        }}>
-                          <div className="spotlight-head">
-                            <div>
-                              <strong>{tunnel.name}</strong>
-                              <span className="muted-line">{tunnel.id}</span>
-                            </div>
-                            <span className={statusPillClass(tunnel.status)}>{tunnel.status}</span>
-                          </div>
-                          <div className="tunnel-route">{tunnelPublicEntry(tunnel)}</div>
-                          <div className="health-pill-row">
-                            <span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span>
-                            <span className="muted-line">{tunnelAvailabilityText(tunnel)}</span>
-                          </div>
-                          <div className="muted-line">类型 {tunnelTypeLabel(tunnel.type)}</div>
-                          <div className="muted-line">目标 {tunnelTargetLabel(tunnel)}</div>
-                          <div className="muted-line">运行依赖 {tunnelRequirementSummary(tunnel, nodes)}</div>
-                          <div className="muted-line">节点 {tunnel.nodeId}</div>
-                        </article>
-                      ))}
-                    </div>
-
-                    {editingTunnelID !== null && tunnelEditForm?.type === "http" ? (
-                      <div className="empty-state">
-                        <strong>HTTP relay 最小能力说明</strong>
-                        <p>当前 HTTP relay 用于发布节点上的 Web/API 服务，通过公网 HTTP 入口访问本地目标地址。</p>
-                        <p>适用场景：本地开发接口、内部 Web 管理页、轻量 API 发布。</p>
-                        <p>当前不包含 HTTPS、域名绑定、TLS、复杂 header 重写或 ACL。</p>
-                      </div>
-                    ) : null}
-
-                    {editingTunnelID !== null && tunnelEditForm?.type === "http" && editingTunnelID === tunnelEditForm.id ? (
-                      <div className="empty-state">
-                        <strong>最小使用示例</strong>
-                        <p>浏览器/命令行：直接访问 <code>http://82.156.236.104:{tunnelEditForm.publicPort}</code></p>
-                        <p>curl: <code>curl.exe http://82.156.236.104:{tunnelEditForm.publicPort}</code></p>
-                      </div>
-                    ) : null}
-
-                    {editingTunnelID !== null && tunnelEditForm?.type === "https" && editingTunnelID === tunnelEditForm.id ? (
-                      <div className="empty-state">
-                        <strong>HTTPS 隧道详情</strong>
-                        <p>标准入口：<code>https://{tunnelEditForm.domain || "<待绑定域名>"}</code></p>
-                        <p>domain：<code>{tunnelEditForm.domain || "<未设置>"}</code></p>
-                        <p>tlsMode：<code>{tunnelEditForm.tlsMode || "edge_terminate"}</code></p>
-                        <p>目标地址：<code>{tunnelEditForm.targetHost}:{tunnelEditForm.targetPort}</code></p>
-                        <p>健康状态：<span className={tunnelHealthPillClass(tunnels.find((item) => item.id === tunnelEditForm.id)?.healthStatus)}>{tunnelHealthLabel(tunnels.find((item) => item.id === tunnelEditForm.id)?.healthStatus)}</span></p>
-                        <p>运行语义：标准 443 入口由 Nginx 终止 TLS，再转发到 relay-https 后端链路，随后按 domain 命中对应 HTTPS tunnel 并转发到目标 HTTP 服务。</p>
-                      </div>
-                    ) : null}
-
                     {(selectedProbeResult || persistedProbeResult) ? (
                       <div className="empty-state">
-                        <strong>本次探测结果</strong>
-                        <p>入口：<code>{(selectedProbeResult || persistedProbeResult)?.targetEntry}</code></p>
+                        <strong>最近一次探测结果</strong>
                         <p>完整探测地址：<code>{(selectedProbeResult || persistedProbeResult)?.targetEntry}</code></p>
                         <p>结果：<span className={(selectedProbeResult || persistedProbeResult)?.success ? "status-pill tone-good" : "status-pill tone-danger"}>{(selectedProbeResult || persistedProbeResult)?.success ? "成功" : "失败"}</span></p>
                         <p>状态码：<code>{(selectedProbeResult || persistedProbeResult)?.statusCode ? String((selectedProbeResult || persistedProbeResult)?.statusCode) : "-"}</code></p>
@@ -1537,55 +1592,26 @@ export default function App() {
                         <p>探测时间：<code>{formatDate((selectedProbeResult || persistedProbeResult)?.probedAt || "")}</code></p>
                         <p>结果状态：<span className={probeFreshnessPillClass(selectedTunnel ? deriveProbeFreshnessState(selectedTunnel) : "not_probed")}>{probeFreshnessLabel(selectedTunnel ? deriveProbeFreshnessState(selectedTunnel) : "not_probed")}</span></p>
                       </div>
-                    ) : null}
-
-                    {editingTunnelID !== null && tunnelEditForm?.type === "socks5" ? (
-                      <div className="empty-state">
-                        <strong>SOCKS5 最小能力说明</strong>
-                        <p>当前 SOCKS5 入口仅支持 CONNECT，不支持 UDP associate，也不提供高级认证、ACL 或链式代理。</p>
-                        <p>适用场景：临时出口代理、浏览器/命令行经 SOCKS5 发起 TCP 连接。</p>
-                        <p>不适用场景：需要 UDP、需要细粒度访问控制、需要多级代理链。</p>
-                      </div>
-                    ) : null}
-
-                    {editingTunnelID !== null && tunnelEditForm?.type === "socks5" && editingTunnelID === tunnelEditForm.id ? (
-                      <div className="empty-state">
-                        <strong>最小使用示例</strong>
-                        <p>curl: <code>curl.exe --proxy socks5h://82.156.236.104:{tunnelEditForm.publicPort} https://example.com -I</code></p>
-                        <p>PowerShell: 可以直接调用上面的 <code>curl.exe</code> 命令；浏览器可把 SOCKS5 代理指向 <code>82.156.236.104:{tunnelEditForm.publicPort}</code>。</p>
-                      </div>
-                    ) : null}
+                    ) : <EmptyState title="暂无 Probe 结果" body="HTTP / HTTPS tunnel 可在右侧工作台直接点击探测，结果会稳定显示在这里，不再把页面向下撑长。" />}
                   </section>
-                </div>
 
-                <div className="table-wrap compact-table">
-                  <table>
-                    <thead><tr><th>名称</th><th>类型</th><th>节点</th><th>状态/健康</th><th>Probe</th><th>入口</th><th>目标</th><th>操作</th></tr></thead>
-                    <tbody>
-                      {filteredTunnels.length === 0 ? <tr><td colSpan={8}>当前筛选条件下暂无隧道。</td></tr> : filteredTunnels.map((tunnel) => (
-                        <tr key={tunnel.id} className={editingTunnelID === tunnel.id ? tunnelRowClass(tunnel, true) : tunnelRowClass(tunnel, false)}>
-                          <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
-                          <td>{tunnelTypeLabel(tunnel.type)}</td>
-                          <td>{tunnel.nodeId}</td>
-                          <td><div className="table-status-stack"><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span><span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span></div></td>
-                          <td><div className="table-status-stack"><span className={probeFreshnessPillClass(deriveProbeFreshnessState(tunnel))}>{probeFreshnessLabel(deriveProbeFreshnessState(tunnel))}</span></div><div className="muted">{tunnel.lastProbedAt ? formatDate(tunnel.lastProbedAt) : "-"}</div></td>
-                          <td><div>{tunnelPublicEntry(tunnel)}</div><div className="muted">{tunnelTypeEntryHint(tunnel)}</div></td>
-                          <td><div>{tunnelTargetLabel(tunnel)}</div><div className="muted">{tunnelRequirementSummary(tunnel, nodes)}</div></td>
-                          <td>
-                            <div className="actions-row">
-                              <button type="button" className="secondary" onClick={() => beginTunnelEdit(tunnel)}>编辑</button>
-                              {(tunnel.type === "http" || tunnel.type === "https") ? <button type="button" className="secondary" disabled={busyAction === tunnel.id + ":probe"} onClick={() => void probeTunnel(tunnel)}>{busyAction === tunnel.id + ":probe" ? "探测中..." : "探测"}</button> : null}
-                              <button type="button" disabled={busyAction === tunnel.id + ":active" || tunnel.status === "active"} onClick={() => void updateTunnelStatus(tunnel, "active")}>启用</button>
-                              <button type="button" disabled={busyAction === tunnel.id + ":paused" || tunnel.status === "paused"} onClick={() => void updateTunnelStatus(tunnel, "paused")}>暂停</button>
-                              <button type="button" className="danger" disabled={busyAction === tunnel.id + ":delete"} onClick={() => void deleteTunnel(tunnel)}>删除</button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
+                  <section className="workbench-section">
+                    <div className="section-head compact-head">
+                      <div>
+                        <h3>运行说明</h3>
+                        <span className="muted-line">收敛原来按类型堆叠的 empty-state，统一在这里根据当前工作台类型切换说明。</span>
+                      </div>
+                    </div>
+                    <TunnelRuntimeGuide
+                      type={editingTunnelID !== null && tunnelEditForm ? tunnelEditForm.type : tunnelForm.type}
+                      entry={editingTunnelID !== null && tunnelEditForm ? tunnelEntryPreview(tunnelEditForm.type, tunnelEditForm.publicPort, tunnelEditForm.domain) : tunnelEntryPreview(tunnelForm.type, tunnelForm.publicPort, tunnelForm.domain)}
+                      publicPort={editingTunnelID !== null && tunnelEditForm ? tunnelEditForm.publicPort : tunnelForm.publicPort}
+                      domain={editingTunnelID !== null && tunnelEditForm ? tunnelEditForm.domain : tunnelForm.domain}
+                      probePath={editingTunnelID !== null && tunnelEditForm ? tunnelEditForm.probePath : tunnelForm.probePath}
+                    />
+                  </section>
+                </section>
+              </div>
             )}
           </section>
         ) : null}
@@ -1735,6 +1761,68 @@ function EmptyState({ title, body }: { title: string; body: string }) {
     <div className="empty-state">
       <strong>{title}</strong>
       <p>{body}</p>
+    </div>
+  );
+}
+
+function TunnelRuntimeGuide({
+  type,
+  entry,
+  publicPort,
+  domain,
+  probePath,
+}: {
+  type: string;
+  entry: string;
+  publicPort: string;
+  domain: string;
+  probePath: string;
+}) {
+  const normalizedProbePath = normalizeProbePath(probePath);
+
+  if (type === "http") {
+    return (
+      <div className="empty-state runtime-guide">
+        <strong>HTTP relay 说明</strong>
+        <p>HTTP relay 用于发布节点上的 Web/API 服务，通过公网 HTTP 入口访问本地目标地址。</p>
+        <p>访问入口：<code>{entry}</code></p>
+        <p>最小验证：<code>curl.exe {entry}{normalizedProbePath === "/" ? "" : normalizedProbePath}</code></p>
+        <p>当前不包含 HTTPS、域名绑定、TLS、复杂 header 重写或 ACL。</p>
+      </div>
+    );
+  }
+
+  if (type === "https") {
+    return (
+      <div className="empty-state runtime-guide">
+        <strong>HTTPS relay 说明</strong>
+        <p>标准入口：<code>{entry}</code></p>
+        <p>当前标准生产语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端链路，随后按 domain 命中对应 HTTPS tunnel。</p>
+        <p>domain：<code>{domain || "<待绑定域名>"}</code> / tlsMode：<code>edge_terminate</code></p>
+        <p>probePath 验证入口：<code>{entry}{normalizedProbePath === "/" ? "/" : normalizedProbePath}</code></p>
+        <p>publicPort：<code>{publicPort || "<保留字段>"}</code>，仅作内部保留字段，不作为标准用户入口。</p>
+      </div>
+    );
+  }
+
+  if (type === "socks5") {
+    return (
+      <div className="empty-state runtime-guide">
+        <strong>SOCKS5 relay 说明</strong>
+        <p>当前 SOCKS5 入口仅支持 CONNECT，不支持 UDP associate，也不提供高级认证、ACL 或链式代理。</p>
+        <p>访问入口：<code>{entry}</code></p>
+        <p>最小验证：<code>curl.exe --proxy {entry} https://example.com -I</code></p>
+        <p>适用场景：临时出口代理、浏览器或命令行经 SOCKS5 发起 TCP 连接。</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="empty-state runtime-guide">
+      <strong>TCP relay 说明</strong>
+      <p>TCP relay 提供原始端口映射入口，不做 HTTP 协议语义，也不是 SOCKS5 代理。</p>
+      <p>访问入口：<code>{entry}</code></p>
+      <p>适用场景：数据库、RDP、SSH 或其他自定义 TCP 服务映射。</p>
     </div>
   );
 }
@@ -1898,6 +1986,27 @@ function tunnelPublicEntry(tunnel: TunnelSpec) {
     return "socks5://82.156.236.104:" + tunnel.publicPort;
   }
   return "82.156.236.104:" + tunnel.publicPort;
+}
+
+function tunnelEntryPreview(type: string, publicPort: string, domain: string) {
+  if (type === "http") {
+    return "http://82.156.236.104:" + (publicPort || "<公网端口>");
+  }
+  if (type === "https") {
+    return domain ? "https://" + domain : "https://<待绑定域名>";
+  }
+  if (type === "socks5") {
+    return "socks5://82.156.236.104:" + (publicPort || "<公网端口>");
+  }
+  return "82.156.236.104:" + (publicPort || "<公网端口>");
+}
+
+function normalizeProbePath(pathValue?: string) {
+  const value = (pathValue || "/").trim();
+  if (!value) {
+    return "/";
+  }
+  return value.startsWith("/") ? value : "/" + value;
 }
 
 function tunnelTargetLabel(tunnel: TunnelSpec) {
