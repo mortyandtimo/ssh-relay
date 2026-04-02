@@ -1253,6 +1253,18 @@ export default function App() {
                       </div>
                     ) : null}
 
+                    {editingTunnelID !== null && tunnelEditForm?.type === "https" && editingTunnelID === tunnelEditForm.id ? (
+                      <div className="empty-state">
+                        <strong>HTTPS 隧道详情</strong>
+                        <p>标准入口：<code>https://{tunnelEditForm.domain || "<待绑定域名>"}</code></p>
+                        <p>domain：<code>{tunnelEditForm.domain || "<未设置>"}</code></p>
+                        <p>tlsMode：<code>{tunnelEditForm.tlsMode || "edge_terminate"}</code></p>
+                        <p>目标地址：<code>{tunnelEditForm.targetHost}:{tunnelEditForm.targetPort}</code></p>
+                        <p>健康状态：<span className={tunnelHealthPillClass(tunnels.find((item) => item.id === tunnelEditForm.id)?.healthStatus)}>{tunnelHealthLabel(tunnels.find((item) => item.id === tunnelEditForm.id)?.healthStatus)}</span></p>
+                        <p>运行语义：标准 443 入口由 Nginx 终止 TLS，再转发到 relay-https 后端链路，随后按 domain 命中对应 HTTPS tunnel 并转发到目标 HTTP 服务。</p>
+                      </div>
+                    ) : null}
+
                     {editingTunnelID !== null && tunnelEditForm?.type === "socks5" ? (
                       <div className="empty-state">
                         <strong>SOCKS5 最小能力说明</strong>

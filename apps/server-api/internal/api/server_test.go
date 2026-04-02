@@ -1055,6 +1055,119 @@ func TestHTTPSTunnelRequiresUniqueDomainOnUpdate(t *testing.T) {
 		t.Fatalf("expected duplicate update 409, got %d", updateRes.Code)
 	}
 }
+
+func TestHTTPSTunnelDeleteReleasesDomainForRecreate(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "https-delete-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, HTTPRelay: true, HTTPSRelay: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-https-release-a",
+		"nodeId":     registerOut.NodeID,
+		"name":       "https-release-a",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 7710,
+		"publicPort": 11443,
+		"domain":     "release.example.com",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create 201, got %d", createRes.Code)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/tunnels/tunnel-https-release-a", nil)
+	applyCookies(deleteReq, adminCookies)
+	deleteRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deleteRes, deleteReq)
+	if deleteRes.Code != http.StatusOK {
+		t.Fatalf("expected delete 200, got %d", deleteRes.Code)
+	}
+
+	recreateBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-https-release-b",
+		"nodeId":     registerOut.NodeID,
+		"name":       "https-release-b",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 7711,
+		"publicPort": 11444,
+		"domain":     "release.example.com",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+	})
+	recreateReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(recreateBody))
+	applyCookies(recreateReq, adminCookies)
+	recreateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recreateRes, recreateReq)
+	if recreateRes.Code != http.StatusCreated {
+		t.Fatalf("expected recreate 201, got %d", recreateRes.Code)
+	}
+}
+
+func TestHTTPSTunnelUpdateReturnsNormalizedDomainAndTLSMode(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "https-update-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, HTTPRelay: true, HTTPSRelay: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{"id": "tunnel-https-update", "nodeId": registerOut.NodeID, "name": "https-update", "type": "https", "targetHost": "127.0.0.1", "targetPort": 7710, "publicPort": 12443, "domain": "old.example.com", "tlsMode": "edge_terminate", "status": "active"})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create 201, got %d", createRes.Code)
+	}
+
+	updateBody, _ := json.Marshal(map[string]any{"nodeId": registerOut.NodeID, "name": "https-update-renamed", "type": "https", "targetHost": "127.0.0.2", "targetPort": 8800, "publicPort": 12443, "domain": "NEW.EXAMPLE.COM", "tlsMode": "edge_terminate", "status": "active"})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/tunnels/tunnel-https-update", bytes.NewReader(updateBody))
+	applyCookies(updateReq, adminCookies)
+	updateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(updateRes, updateReq)
+	if updateRes.Code != http.StatusOK {
+		t.Fatalf("expected update 200, got %d", updateRes.Code)
+	}
+	var updated types.TunnelSpec
+	if err := json.NewDecoder(updateRes.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Domain != "new.example.com" || updated.TLSMode != "edge_terminate" {
+		t.Fatalf("expected normalized domain/tlsMode, got %+v", updated)
+	}
+	if updated.TargetHost != "127.0.0.2" || updated.TargetPort != 8800 {
+		t.Fatalf("expected updated target, got %+v", updated)
+	}
+}
+
 func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 	runtimeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(types.RelayRuntimeSummary{
