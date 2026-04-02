@@ -194,6 +194,21 @@ type NodeOptionsResponse struct {
 	Items []NodeOption `json:"items"`
 }
 
+type PortRangePlan struct {
+	Type        string `json:"type"`
+	Label       string `json:"label"`
+	RangeStart  int    `json:"rangeStart"`
+	RangeEnd    int    `json:"rangeEnd"`
+	Description string `json:"description"`
+}
+
+type TunnelPortSuggestionResponse struct {
+	Type       string          `json:"type"`
+	Suggested  int             `json:"suggested"`
+	Plan       PortRangePlan   `json:"plan"`
+	Compatible bool            `json:"compatible"`
+}
+
 type ServerMetrics struct {
 	Service            string    `json:"service"`
 	StartedAt          time.Time `json:"startedAt"`

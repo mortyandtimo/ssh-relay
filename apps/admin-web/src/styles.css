@@ -849,6 +849,20 @@ td {
   color: #0f2138;
 }
 
+.port-plan-note {
+  display: grid;
+  gap: 8px;
+}
+
+.port-plan-note strong,
+.port-plan-note p {
+  margin: 0;
+}
+
+.compact-actions {
+  margin-top: 2px;
+}
+
 
 .tunnel-list-panel .section-head,
 .tunnel-filter-panel .section-head,

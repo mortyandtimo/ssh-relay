@@ -142,6 +142,21 @@ type TunnelProbeResult = {
   targetEntry: string;
 };
 
+type PortRangePlan = {
+  type: string;
+  label: string;
+  rangeStart: number;
+  rangeEnd: number;
+  description: string;
+};
+
+type TunnelPortSuggestionResponse = {
+  type: string;
+  suggested: number;
+  plan: PortRangePlan;
+  compatible: boolean;
+};
+
 type TunnelForm = {
   nodeId: string;
   name: string;
@@ -270,6 +285,8 @@ export default function App() {
   const [relayRuntime, setRelayRuntime] = useState<RelayRuntimeSummary | null>(null);
   const [probeResults, setProbeResults] = useState<Record<string, TunnelProbeResult>>({});
   const [tunnelForm, setTunnelForm] = useState<TunnelForm>(initialTunnelForm);
+  const [tunnelPortSuggestion, setTunnelPortSuggestion] = useState<TunnelPortSuggestionResponse | null>(null);
+  const [tunnelEditPortSuggestion, setTunnelEditPortSuggestion] = useState<TunnelPortSuggestionResponse | null>(null);
   const [tunnelHealthFilter, setTunnelHealthFilter] = useState<TunnelHealthFilter>("all");
   const [tunnelTypeFilter, setTunnelTypeFilter] = useState<TunnelTypeFilter>("all");
   const [probeStateFilter, setProbeStateFilter] = useState<ProbeStateFilter>("all");
@@ -390,6 +407,49 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [currentUser, hasInitializedNodeId]);
+
+  useEffect(() => {
+    if (!currentUser || currentUser.role === "user") {
+      return;
+    }
+    let cancelled = false;
+    void requestJSON<TunnelPortSuggestionResponse>("/api/tunnel-port-suggestion?type=" + encodeURIComponent(tunnelForm.type))
+      .then((result) => {
+        if (!cancelled) {
+          setTunnelPortSuggestion(result);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTunnelPortSuggestion(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, tunnelForm.type]);
+
+  useEffect(() => {
+    if (!currentUser || currentUser.role === "user" || !tunnelEditForm) {
+      setTunnelEditPortSuggestion(null);
+      return;
+    }
+    let cancelled = false;
+    void requestJSON<TunnelPortSuggestionResponse>("/api/tunnel-port-suggestion?type=" + encodeURIComponent(tunnelEditForm.type))
+      .then((result) => {
+        if (!cancelled) {
+          setTunnelEditPortSuggestion(result);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTunnelEditPortSuggestion(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, tunnelEditForm]);
 
   async function requestJSON<T>(path: string, init?: RequestInit, allowRefresh = true): Promise<T> {
     const response = await fetch(apiBaseUrl + path, {
@@ -591,6 +651,51 @@ export default function App() {
   function clearTunnelEdit() {
     setEditingTunnelID(null);
     setTunnelEditForm(null);
+  }
+
+  async function suggestCreateTunnelPort() {
+    const actionKey = "suggest-port:create:" + tunnelForm.type;
+    setBusyAction(actionKey);
+    setError("");
+    setMessage("");
+    try {
+      const result = await requestJSON<TunnelPortSuggestionResponse>("/api/tunnel-port-suggestion?type=" + encodeURIComponent(tunnelForm.type));
+      setTunnelPortSuggestion(result);
+      if (!result.suggested) {
+        setError(result.plan.label + " 推荐端口段已无可用端口，请手工调整或清理占用。");
+        return;
+      }
+      setTunnelForm((current) => ({ ...current, publicPort: String(result.suggested) }));
+      setMessage("已填入推荐端口 " + result.suggested + "。旧 tunnel 保持兼容，不要求立即迁移。");
+    } catch (suggestError) {
+      setError(suggestError instanceof Error ? suggestError.message : "推荐端口失败");
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  async function suggestEditTunnelPort() {
+    if (!tunnelEditForm) {
+      return;
+    }
+    const actionKey = "suggest-port:edit:" + tunnelEditForm.id;
+    setBusyAction(actionKey);
+    setError("");
+    setMessage("");
+    try {
+      const result = await requestJSON<TunnelPortSuggestionResponse>("/api/tunnel-port-suggestion?type=" + encodeURIComponent(tunnelEditForm.type));
+      setTunnelEditPortSuggestion(result);
+      if (!result.suggested) {
+        setError(result.plan.label + " 推荐端口段已无可用端口，请手工调整或清理占用。");
+        return;
+      }
+      setTunnelEditForm((current) => current ? { ...current, publicPort: String(result.suggested) } : current);
+      setMessage("已填入推荐端口 " + result.suggested + "。旧 tunnel 保持兼容，不要求立即迁移。");
+    } catch (suggestError) {
+      setError(suggestError instanceof Error ? suggestError.message : "推荐端口失败");
+    } finally {
+      setBusyAction("");
+    }
   }
 
   async function submitBootstrap(event: FormEvent<HTMLFormElement>) {
@@ -1576,6 +1681,14 @@ export default function App() {
                         <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                         <label><span>{tunnelEditForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
+                        <PortPlanHint
+                          type={tunnelEditForm.type}
+                          suggestion={tunnelEditPortSuggestion}
+                          currentPort={tunnelEditForm.publicPort}
+                          actionLabel="推荐可用端口"
+                          actionBusy={busyAction === "suggest-port:edit:" + tunnelEditForm.id}
+                          onSuggest={() => void suggestEditTunnelPort()}
+                        />
                         {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>域名</span><input value={tunnelEditForm.domain} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, domain: event.target.value } : current)} placeholder="例如 app.example.com" /></label> : null}
                         {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>probePath</span><input value={tunnelEditForm.probePath} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} placeholder="默认 /" /></label> : null}
                         {tunnelEditForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelEditForm.tlsMode} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, tlsMode: event.target.value } : current)}><option value="edge_terminate">edge_terminate</option></select></label> : null}
@@ -1619,6 +1732,14 @@ export default function App() {
                         <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
                         <label><span>{tunnelForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
+                        <PortPlanHint
+                          type={tunnelForm.type}
+                          suggestion={tunnelPortSuggestion}
+                          currentPort={tunnelForm.publicPort}
+                          actionLabel="推荐可用端口"
+                          actionBusy={busyAction === "suggest-port:create:" + tunnelForm.type}
+                          onSuggest={() => void suggestCreateTunnelPort()}
+                        />
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>域名</span><input value={tunnelForm.domain} onChange={(event) => setTunnelForm((current) => ({ ...current, domain: event.target.value }))} placeholder="例如 app.example.com" /></label> : null}
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>probePath</span><input value={tunnelForm.probePath} onChange={(event) => setTunnelForm((current) => ({ ...current, probePath: event.target.value }))} placeholder="默认 /" /></label> : null}
                         {tunnelForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelForm.tlsMode} onChange={(event) => setTunnelForm((current) => ({ ...current, tlsMode: event.target.value as "" | "edge_terminate" }))}><option value="edge_terminate">edge_terminate</option></select></label> : null}
@@ -1828,6 +1949,44 @@ function EmptyState({ title, body }: { title: string; body: string }) {
     <div className="empty-state">
       <strong>{title}</strong>
       <p>{body}</p>
+    </div>
+  );
+}
+
+function PortPlanHint({
+  type,
+  suggestion,
+  currentPort,
+  actionLabel,
+  actionBusy,
+  onSuggest,
+}: {
+  type: string;
+  suggestion: TunnelPortSuggestionResponse | null;
+  currentPort: string;
+  actionLabel: string;
+  actionBusy: boolean;
+  onSuggest: () => void;
+}) {
+  const plan = suggestion?.plan || fallbackPortPlan(type);
+  const current = Number(currentPort);
+  const inRange = current > 0 && current >= plan.rangeStart && current <= plan.rangeEnd;
+  return (
+    <div className="form-note port-plan-note">
+      <strong>{plan.label} 推荐端口段</strong>
+      <p>
+        推荐范围：<code>{plan.rangeStart}-{plan.rangeEnd}</code>。{plan.description}
+      </p>
+      <p>
+        当前端口：<code>{currentPort || "<未填写>"}</code>
+        {currentPort ? (inRange ? "，位于推荐范围内。" : "，不在推荐范围内，但旧 tunnel 仍保持兼容，不要求立即迁移。") : "，可直接使用推荐值。"}
+      </p>
+      <div className="form-actions compact-actions">
+        <button type="button" className="secondary" disabled={actionBusy} onClick={onSuggest}>{actionBusy ? "推荐中..." : actionLabel}</button>
+        <span className="inline-note">
+          {suggestion?.suggested ? <>当前建议：<code>{suggestion.suggested}</code>，已避开当前已占用端口。</> : <>当前推荐段暂无空闲端口，需要手工调整或清理占用。</>}
+        </span>
+      </div>
     </div>
   );
 }
@@ -2053,6 +2212,19 @@ function tunnelTypeLabel(type: string) {
   if (type === "https") return "HTTPS";
   if (type === "udp") return "UDP";
   return type === "socks5" ? "SOCKS5" : "TCP";
+}
+
+function fallbackPortPlan(type: string): PortRangePlan {
+  if (type === "udp") {
+    return { type: "udp", label: "UDP", rangeStart: 21000, rangeEnd: 21999, description: "UDP 推荐端口段" };
+  }
+  if (type === "http" || type === "https") {
+    return { type, label: type.toUpperCase(), rangeStart: 22000, rangeEnd: 22999, description: "HTTP/HTTPS 共享推荐端口段" };
+  }
+  if (type === "socks5") {
+    return { type: "socks5", label: "SOCKS5", rangeStart: 23000, rangeEnd: 23999, description: "SOCKS5 推荐端口段" };
+  }
+  return { type: "tcp", label: "TCP", rangeStart: 20000, rangeEnd: 20999, description: "TCP 推荐端口段" };
 }
 
 function tunnelPublicEntry(tunnel: TunnelSpec) {

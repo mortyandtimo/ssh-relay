@@ -104,6 +104,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/node-options", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodeOptions)))
 	s.mux.Handle("/api/nodes/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodeByID)))
 	s.mux.Handle("/api/tunnels", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnels)))
+	s.mux.Handle("/api/tunnel-port-suggestion", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelPortSuggestion)))
 	s.mux.Handle("/api/tunnels/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelByID)))
 	s.mux.Handle("/api/server/metrics", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleServerMetrics)))
 	s.mux.Handle("/api/relay/tcp/runtime", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleRelayTCPRuntime)))
@@ -529,6 +530,89 @@ func (s *Server) handleNodeByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut)
 	}
+}
+
+func portRangePlanForType(tunnelType string) types.PortRangePlan {
+	switch strings.TrimSpace(tunnelType) {
+	case "udp":
+		return types.PortRangePlan{Type: "udp", Label: "UDP", RangeStart: 21000, RangeEnd: 21999, Description: "UDP 推荐端口段"}
+	case "http", "https":
+		return types.PortRangePlan{Type: tunnelType, Label: strings.ToUpper(tunnelType), RangeStart: 22000, RangeEnd: 22999, Description: "HTTP/HTTPS 共享推荐端口段"}
+	case "socks5":
+		return types.PortRangePlan{Type: "socks5", Label: "SOCKS5", RangeStart: 23000, RangeEnd: 23999, Description: "SOCKS5 推荐端口段"}
+	default:
+		return types.PortRangePlan{Type: "tcp", Label: "TCP", RangeStart: 20000, RangeEnd: 20999, Description: "TCP 推荐端口段"}
+	}
+}
+
+func portRangePlanGroupForType(tunnelType string) string {
+	switch strings.TrimSpace(tunnelType) {
+	case "http", "https":
+		return "http_family"
+	case "udp":
+		return "udp"
+	case "socks5":
+		return "socks5"
+	default:
+		return "tcp"
+	}
+}
+
+func portConflictGroupForSuggestedType(tunnelType string) string {
+	switch strings.TrimSpace(tunnelType) {
+	case "https":
+		return ""
+	default:
+		return store.TunnelPortBindingKey(strings.TrimSpace(tunnelType))
+	}
+}
+
+func suggestedPortForType(ctx context.Context, backend store.Store, tunnelType string) (types.TunnelPortSuggestionResponse, error) {
+	plan := portRangePlanForType(tunnelType)
+	items, err := backend.ListTunnels(ctx, store.TunnelFilter{})
+	if err != nil {
+		return types.TunnelPortSuggestionResponse{}, err
+	}
+	rangeUsed := map[int]bool{}
+	conflictUsed := map[int]bool{}
+	planGroup := portRangePlanGroupForType(plan.Type)
+	conflictGroup := portConflictGroupForSuggestedType(plan.Type)
+	for _, item := range items {
+		if item.PublicPort <= 0 {
+			continue
+		}
+		if portRangePlanGroupForType(item.Type) != planGroup {
+		} else {
+			rangeUsed[item.PublicPort] = true
+		}
+		if conflictGroup == "" {
+			continue
+		}
+		if store.TunnelPortBindingKey(item.Type) != conflictGroup {
+			continue
+		}
+		conflictUsed[item.PublicPort] = true
+	}
+	for port := plan.RangeStart; port <= plan.RangeEnd; port++ {
+		if !rangeUsed[port] && !conflictUsed[port] {
+			return types.TunnelPortSuggestionResponse{Type: plan.Type, Suggested: port, Plan: plan, Compatible: true}, nil
+		}
+	}
+	return types.TunnelPortSuggestionResponse{Type: plan.Type, Suggested: 0, Plan: plan, Compatible: true}, nil
+}
+
+func (s *Server) handleTunnelPortSuggestion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	tunnelType := strings.TrimSpace(r.URL.Query().Get("type"))
+	result, err := suggestedPortForType(r.Context(), s.store, tunnelType)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {

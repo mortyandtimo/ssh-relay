@@ -1945,3 +1945,144 @@ func TestLogoutAuditUsesRealActor(t *testing.T) {
 		t.Fatalf("expected basic user audit logs 403, got %d", userAuditRes.Code)
 	}
 }
+
+
+func TestTunnelPortSuggestionFollowsProtocolRanges(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "port-plan-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, UDPRelay: true, HTTPRelay: true, SOCKS5Connect: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, body := range []map[string]any{
+		{"id": "tcp-plan-a", "nodeId": registerOut.NodeID, "name": "tcp-a", "type": "tcp", "targetHost": "127.0.0.1", "targetPort": 8080, "publicPort": 20000, "status": "active"},
+		{"id": "udp-plan-a", "nodeId": registerOut.NodeID, "name": "udp-a", "type": "udp", "targetHost": "127.0.0.1", "targetPort": 19002, "publicPort": 21000, "status": "active"},
+	} {
+		payload, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(payload))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusCreated {
+			t.Fatalf("expected create status 201, got %d", res.Code)
+		}
+	}
+
+	tcpReq := httptest.NewRequest(http.MethodGet, "/api/tunnel-port-suggestion?type=tcp", nil)
+	applyCookies(tcpReq, adminCookies)
+	tcpRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(tcpRes, tcpReq)
+	if tcpRes.Code != http.StatusOK {
+		t.Fatalf("expected tcp suggestion 200, got %d", tcpRes.Code)
+	}
+	var tcpOut types.TunnelPortSuggestionResponse
+	if err := json.NewDecoder(tcpRes.Body).Decode(&tcpOut); err != nil {
+		t.Fatal(err)
+	}
+	if tcpOut.Suggested != 20001 {
+		t.Fatalf("expected tcp suggestion 20001, got %d", tcpOut.Suggested)
+	}
+
+	udpReq := httptest.NewRequest(http.MethodGet, "/api/tunnel-port-suggestion?type=udp", nil)
+	applyCookies(udpReq, adminCookies)
+	udpRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(udpRes, udpReq)
+	if udpRes.Code != http.StatusOK {
+		t.Fatalf("expected udp suggestion 200, got %d", udpRes.Code)
+	}
+	var udpOut types.TunnelPortSuggestionResponse
+	if err := json.NewDecoder(udpRes.Body).Decode(&udpOut); err != nil {
+		t.Fatal(err)
+	}
+	if udpOut.Suggested != 21001 {
+		t.Fatalf("expected udp suggestion 21001, got %d", udpOut.Suggested)
+	}
+}
+
+func TestTunnelPortSuggestionSharesHTTPFamilyRange(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "http-family-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{HTTPRelay: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	httpBody, _ := json.Marshal(map[string]any{"id": "http-plan-a", "nodeId": registerOut.NodeID, "name": "http-a", "type": "http", "targetHost": "127.0.0.1", "targetPort": 8080, "publicPort": 22000, "status": "active"})
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(httpBody))
+	applyCookies(httpReq, adminCookies)
+	httpRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(httpRes, httpReq)
+	if httpRes.Code != http.StatusCreated {
+		t.Fatalf("expected http create 201, got %d", httpRes.Code)
+	}
+
+	httpsReq := httptest.NewRequest(http.MethodGet, "/api/tunnel-port-suggestion?type=https", nil)
+	applyCookies(httpsReq, adminCookies)
+	httpsRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(httpsRes, httpsReq)
+	if httpsRes.Code != http.StatusOK {
+		t.Fatalf("expected https suggestion 200, got %d", httpsRes.Code)
+	}
+	var httpsOut types.TunnelPortSuggestionResponse
+	if err := json.NewDecoder(httpsRes.Body).Decode(&httpsOut); err != nil {
+		t.Fatal(err)
+	}
+	if httpsOut.Suggested != 22001 {
+		t.Fatalf("expected https suggestion 22001, got %d", httpsOut.Suggested)
+	}
+	if httpsOut.Plan.RangeStart != 22000 || httpsOut.Plan.RangeEnd != 22999 {
+		t.Fatalf("unexpected https plan range: %+v", httpsOut.Plan)
+	}
+}
+
+func TestTunnelPortSuggestionAvoidsActualConflictGroup(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "conflict-plan-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, SOCKS5Connect: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	tcpBody, _ := json.Marshal(map[string]any{"id": "tcp-plan-b", "nodeId": registerOut.NodeID, "name": "tcp-b", "type": "tcp", "targetHost": "127.0.0.1", "targetPort": 8081, "publicPort": 23000, "status": "active"})
+	tcpReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(tcpBody))
+	applyCookies(tcpReq, adminCookies)
+	tcpRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(tcpRes, tcpReq)
+	if tcpRes.Code != http.StatusCreated {
+		t.Fatalf("expected tcp create 201, got %d", tcpRes.Code)
+	}
+
+	socksReq := httptest.NewRequest(http.MethodGet, "/api/tunnel-port-suggestion?type=socks5", nil)
+	applyCookies(socksReq, adminCookies)
+	socksRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(socksRes, socksReq)
+	if socksRes.Code != http.StatusOK {
+		t.Fatalf("expected socks5 suggestion 200, got %d", socksRes.Code)
+	}
+	var socksOut types.TunnelPortSuggestionResponse
+	if err := json.NewDecoder(socksRes.Body).Decode(&socksOut); err != nil {
+		t.Fatal(err)
+	}
+	if socksOut.Suggested != 23001 {
+		t.Fatalf("expected socks5 suggestion 23001 to avoid tcp conflict, got %d", socksOut.Suggested)
+	}
+}
