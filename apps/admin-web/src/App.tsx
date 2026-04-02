@@ -61,6 +61,10 @@ type NodeFilterState = {
   offset: number;
 };
 
+type NodeStatusFilter = "all" | "online" | "offline";
+type NodeCapabilityFilter = "all" | "tcp" | "http" | "https" | "socks5";
+type NodeSortMode = "ops_priority" | "last_seen_desc" | "active_tunnels_desc" | "name_asc";
+
 type NodeEditForm = {
   nodeRole: NodeRole;
   environment: NodeEnvironment;
@@ -247,6 +251,9 @@ export default function App() {
   const [allNodes, setAllNodes] = useState<NodeOption[]>([]);
   const [selectedNodeID, setSelectedNodeID] = useState<string | null>(null);
   const [nodeFilter, setNodeFilter] = useState<NodeFilterState>(initialNodeFilter);
+  const [nodeStatusFilter, setNodeStatusFilter] = useState<NodeStatusFilter>("all");
+  const [nodeCapabilityFilter, setNodeCapabilityFilter] = useState<NodeCapabilityFilter>("all");
+  const [nodeSortMode, setNodeSortMode] = useState<NodeSortMode>("ops_priority");
   const [nodeEditForm, setNodeEditForm] = useState<NodeEditForm | null>(null);
   const [tunnels, setTunnels] = useState<TunnelSpec[]>([]);
   const [editingTunnelID, setEditingTunnelID] = useState<string | null>(null);
@@ -339,13 +346,19 @@ export default function App() {
       if (nodes.some((node) => node.nodeId === current)) {
         return current;
       }
-      return null;
+      return current;
     });
   }, [nodes]);
 
   useEffect(() => {
-    const selectedNode = selectedNodeID ? nodes.find((node) => node.nodeId === selectedNodeID) ?? null : null;
-    setNodeEditForm(selectedNode ? toNodeEditForm(selectedNode) : null);
+    if (!selectedNodeID) {
+      setNodeEditForm(null);
+      return;
+    }
+    const selectedNode = nodes.find((node) => node.nodeId === selectedNodeID) ?? null;
+    if (selectedNode) {
+      setNodeEditForm(toNodeEditForm(selectedNode));
+    }
   }, [nodes, selectedNodeID]);
 
   useEffect(() => {
@@ -877,6 +890,9 @@ export default function App() {
       updatedAt: "",
     };
   const selectedNode = selectedNodeID ? nodes.find((node) => node.nodeId === selectedNodeID) ?? null : null;
+  const filteredNodes = sortNodes(nodes.filter((node) => matchesNodeOpsFilters(node, nodeStatusFilter, nodeFilter.nodeRole, nodeFilter.environment, nodeCapabilityFilter, nodeFilter.owner, nodeFilter.tag)), nodeSortMode);
+  const selectedNodeVisibleInFilters = selectedNode ? filteredNodes.some((node) => node.nodeId === selectedNode.nodeId) : true;
+  const selectedNodeTunnels = selectedNode ? sortNodeTunnels(tunnels.filter((tunnel) => tunnel.nodeId === selectedNode.nodeId)) : [];
   const selectedTunnel = editingTunnelID ? tunnels.find((tunnel) => tunnel.id === editingTunnelID) ?? null : null;
   const selectedProbeResult = editingTunnelID ? probeResults[editingTunnelID] ?? null : null;
   const persistedProbeResult = selectedTunnel ? toProbeResult(selectedTunnel) : null;
@@ -896,6 +912,14 @@ export default function App() {
   const httpCapableNodeCount = allNodes.filter((node) => node.supportsHTTP).length;
   const httpsCapableNodeCount = allNodes.filter((node) => node.supportsHTTPS ?? node.supportsHTTP).length;
   const socks5CapableNodeCount = allNodes.filter((node) => node.supportsSOCKS5).length;
+  const offlineNodeCount = nodes.filter((node) => node.status !== "online").length;
+  const cloudNodeCount = nodes.filter((node) => node.nodeRole === "cloud").length;
+  const localNodeCount = nodes.filter((node) => node.nodeRole === "local").length;
+  const thirdPartyNodeCount = nodes.filter((node) => node.nodeRole === "third_party").length;
+  const prodNodeCount = nodes.filter((node) => node.environment === "prod").length;
+  const testNodeCount = nodes.filter((node) => node.environment === "test").length;
+  const devNodeCount = nodes.filter((node) => node.environment === "dev").length;
+  const highestLoadNode = nodes.length ? [...nodes].sort((left, right) => right.activeTunnels - left.activeTunnels)[0] : null;
   const unprobedTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "not_probed").length;
   const recentFailedTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "recent_failure").length;
   const staleTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "stale").length;
@@ -1080,8 +1104,16 @@ export default function App() {
             {connectionView === "nodes" ? (
               <div className="split-layout connections-layout">
                 <section className="subpanel workspace-column">
-                  <h3>节点筛选</h3>
+                  <h3>节点运维筛选台</h3>
                   <form className="form-grid" onSubmit={submitNodeFilters}>
+                    <label>
+                      <span>节点状态</span>
+                      <select value={nodeStatusFilter} onChange={(event) => setNodeStatusFilter(event.target.value as NodeStatusFilter)}>
+                        <option value="all">全部</option>
+                        <option value="online">online</option>
+                        <option value="offline">offline</option>
+                      </select>
+                    </label>
                     <label>
                       <span>节点角色</span>
                       <select value={nodeFilter.nodeRole} onChange={(event) => setNodeFilter((current) => ({ ...current, nodeRole: event.target.value as NodeRole, offset: 0 }))}>
@@ -1101,12 +1133,22 @@ export default function App() {
                       </select>
                     </label>
                     <label>
-                      <span>信任级别</span>
-                      <select value={nodeFilter.trustLevel} onChange={(event) => setNodeFilter((current) => ({ ...current, trustLevel: event.target.value as NodeTrustLevel, offset: 0 }))}>
-                        <option value="">全部</option>
-                        <option value="trusted">trusted</option>
-                        <option value="limited">limited</option>
-                        <option value="external">external</option>
+                      <span>能力</span>
+                      <select value={nodeCapabilityFilter} onChange={(event) => setNodeCapabilityFilter(event.target.value as NodeCapabilityFilter)}>
+                        <option value="all">全部</option>
+                        <option value="tcp">TCP</option>
+                        <option value="http">HTTP</option>
+                        <option value="https">HTTPS</option>
+                        <option value="socks5">SOCKS5</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>排序</span>
+                      <select value={nodeSortMode} onChange={(event) => setNodeSortMode(event.target.value as NodeSortMode)}>
+                        <option value="ops_priority">默认：离线/高承载优先</option>
+                        <option value="last_seen_desc">按最后在线时间</option>
+                        <option value="active_tunnels_desc">按承载 tunnel 数</option>
+                        <option value="name_asc">按名称</option>
                       </select>
                     </label>
                     <label>
@@ -1123,21 +1165,23 @@ export default function App() {
                     </div>
                   </form>
 
+                  {!selectedNodeVisibleInFilters && selectedNode ? <div className="empty-state"><strong>当前选中节点未命中筛选结果</strong><p>详情仍保留，便于继续排障；如需在左侧列表重新看到它，请调整筛选条件。</p></div> : null}
+
                   <div className="section-head compact-head">
                     <h3>节点列表</h3>
-                    <span className="muted-line">显示 {nodeStart === 0 ? 0 : nodeStart}-{nodeEnd} / {nodeTotal}</span>
+                    <span className="muted-line">显示 {filteredNodes.length === 0 ? 0 : 1}-{filteredNodes.length} / {nodes.length}</span>
                   </div>
                   <div className="table-wrap compact-table">
                     <table>
-                      <thead><tr><th>节点</th><th>角色</th><th>环境</th><th>信任级别</th><th>负责人</th><th>标签</th></tr></thead>
+                      <thead><tr><th>节点</th><th>状态</th><th>角色/环境</th><th>承载</th><th>能力</th><th>标签</th></tr></thead>
                       <tbody>
-                        {nodes.length === 0 ? <tr><td colSpan={6}>暂无节点。</td></tr> : nodes.map((node) => (
+                        {filteredNodes.length === 0 ? <tr><td colSpan={6}>当前筛选条件下暂无节点。</td></tr> : filteredNodes.map((node) => (
                           <tr key={node.nodeId} className={selectedNodeID === node.nodeId ? "clickable-row selected-row" : "clickable-row"} onClick={() => setSelectedNodeID((current) => current === node.nodeId ? null : node.nodeId)}>
                             <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div></td>
-                            <td>{node.nodeRole ? roleLabel(node.nodeRole) : "-"}</td>
-                            <td>{node.environment || "-"}</td>
-                            <td>{node.trustLevel || "-"}</td>
-                            <td>{node.owner || "-"}</td>
+                            <td><span className={statusPillClass(node.status)}>{node.status}</span><div className="muted">{formatDate(node.lastSeenAt)}</div></td>
+                            <td><div>{node.nodeRole ? roleLabel(node.nodeRole) : "-"}</div><div className="muted">{node.environment || "-"} / {node.trustLevel || "-"}</div></td>
+                            <td><div>{node.activeTunnels}</div><div className="muted">负责人 {node.owner || "-"}</div></td>
+                            <td><div className="table-status-stack"><span className={capabilityPillClass(node.capabilities.tcpRelay)}>TCP</span><span className={capabilityPillClass(node.capabilities.httpRelay)}>HTTP</span><span className={capabilityPillClass(node.capabilities.httpsRelay || node.capabilities.httpRelay)}>HTTPS</span><span className={capabilityPillClass(Boolean(node.capabilities.socks5Connect))}>SOCKS5</span></div></td>
                             <td>{formatTags(node.tags)}</td>
                           </tr>
                         ))}
@@ -1146,14 +1190,12 @@ export default function App() {
                   </div>
 
                   <div className="actions-row audit-pager">
-                    <button type="button" className="secondary" disabled={nodeFilter.offset === 0} onClick={() => goToNodePage(nodeFilter.offset - nodeFilter.limit)}>上一页</button>
-                    <button type="button" className="secondary" disabled={nodeFilter.offset + nodeFilter.limit >= nodeTotal} onClick={() => goToNodePage(nodeFilter.offset + nodeFilter.limit)}>下一页</button>
-                    <span className="inline-note">limit {nodeFilter.limit} / offset {nodeFilter.offset}</span>
+                    <span className="inline-note">当前节点工作区使用前端派生筛选/排序，便于快速运维判断；分页接口仍保留但本视图以当前已加载节点为准。</span>
                   </div>
                 </section>
 
                 <section className="subpanel detail-panel">
-                  <h3>节点详情</h3>
+                  <h3>节点运维工作区</h3>
                   {selectedNode && nodeEditForm ? (
                     <>
                       <div className="detail-hero">
@@ -1163,12 +1205,21 @@ export default function App() {
                         </div>
                         <span className={statusPillClass(selectedNode.status)}>{selectedNode.status}</span>
                       </div>
+                      <div className="empty-state">
+                        <strong>基础状态</strong>
+                        <p>nodeId：<code>{selectedNode.nodeId}</code></p>
+                        <p>nodeName：<code>{selectedNode.nodeName}</code></p>
+                        <p>lastSeenAt：<code>{formatDate(selectedNode.lastSeenAt)}</code></p>
+                        <p>activeTunnels：<code>{String(selectedNode.activeTunnels)}</code></p>
+                        <p>hostname / os / arch：<code>{nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} / {nodeMeta(selectedNode, "os")} / {nodeMeta(selectedNode, "arch")}</code></p>
+                      </div>
                       <div className="detail-grid">
-                        <DetailItem label="hostname" value={nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} />
-                        <DetailItem label="os" value={nodeMeta(selectedNode, "os")} />
-                        <DetailItem label="arch" value={nodeMeta(selectedNode, "arch")} />
-                        <DetailItem label="lastSeenAt" value={formatDate(selectedNode.lastSeenAt)} />
-                        <DetailItem label="activeTunnels" value={String(selectedNode.activeTunnels)} />
+                        <DetailItem label="role" value={selectedNode.nodeRole ? roleLabel(selectedNode.nodeRole) : "-"} />
+                        <DetailItem label="environment" value={selectedNode.environment || "-"} />
+                        <DetailItem label="trustLevel" value={selectedNode.trustLevel || "-"} />
+                        <DetailItem label="owner" value={selectedNode.owner || "-"} />
+                        <DetailItem label="location" value={selectedNode.location || "-"} />
+                        <DetailItem label="tags" value={formatTags(selectedNode.tags)} />
                       </div>
                       <div className="empty-state">
                         <strong>节点能力矩阵</strong>
@@ -1179,6 +1230,26 @@ export default function App() {
                           <span className={capabilityPillClass(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}>HTTPS relay {capabilityEnabledLabel(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}</span>
                           <span className={capabilityPillClass(Boolean(selectedNode.capabilities.socks5Connect))}>SOCKS5 connect {capabilityEnabledLabel(Boolean(selectedNode.capabilities.socks5Connect))}</span>
                           <span className={capabilityPillClass(selectedNode.capabilities.p2pAssist)}>P2P assist {capabilityEnabledLabel(selectedNode.capabilities.p2pAssist)}</span>
+                        </div>
+                      </div>
+                      <div className="empty-state">
+                        <strong>节点承载入口</strong>
+                        <p>直接查看该节点当前挂载的 tunnel，判断它到底承载了哪些入口以及哪些入口异常。</p>
+                        <div className="table-wrap compact-table">
+                          <table>
+                            <thead><tr><th>隧道</th><th>类型</th><th>状态</th><th>健康</th><th>用户入口</th></tr></thead>
+                            <tbody>
+                              {selectedNodeTunnels.length === 0 ? <tr><td colSpan={5}>该节点当前没有挂载 tunnel。</td></tr> : selectedNodeTunnels.map((tunnel) => (
+                                <tr key={tunnel.id} className={(tunnel.healthStatus || 'healthy') !== 'healthy' ? 'problem-row' : undefined}>
+                                  <td><strong>{tunnel.name}</strong><div className="muted">{tunnel.id}</div></td>
+                                  <td>{tunnelTypeLabel(tunnel.type)}</td>
+                                  <td><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span></td>
+                                  <td><span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span></td>
+                                  <td>{tunnelPublicEntry(tunnel)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
                         </div>
                       </div>
                       <form className="form-grid" onSubmit={submitNodeMetadata}>
@@ -1968,6 +2039,79 @@ function toNodeEditForm(node: NodeSummary): NodeEditForm {
     location: node.location || "",
     tags: (node.tags || []).join(", "),
   };
+}
+
+function matchesNodeOpsFilters(
+  node: NodeSummary,
+  statusFilter: NodeStatusFilter,
+  roleFilter: NodeRole,
+  environmentFilter: NodeEnvironment,
+  capabilityFilter: NodeCapabilityFilter,
+  ownerFilter: string,
+  tagFilter: string,
+) {
+  if (statusFilter !== "all" && (node.status === "online" ? "online" : "offline") !== statusFilter) {
+    return false;
+  }
+  if (roleFilter && node.nodeRole !== roleFilter) {
+    return false;
+  }
+  if (environmentFilter && node.environment !== environmentFilter) {
+    return false;
+  }
+  if (ownerFilter && !(node.owner || "").toLowerCase().includes(ownerFilter.toLowerCase())) {
+    return false;
+  }
+  if (tagFilter && !(node.tags || []).join(",").toLowerCase().includes(tagFilter.toLowerCase())) {
+    return false;
+  }
+  if (capabilityFilter !== "all") {
+    const match =
+      capabilityFilter === "tcp" ? node.capabilities.tcpRelay :
+      capabilityFilter === "http" ? node.capabilities.httpRelay :
+      capabilityFilter === "https" ? (node.capabilities.httpsRelay || node.capabilities.httpRelay) :
+      Boolean(node.capabilities.socks5Connect);
+    if (!match) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sortNodes(nodes: NodeSummary[], mode: NodeSortMode) {
+  const items = [...nodes];
+  items.sort((left, right) => {
+    if (mode === "name_asc") {
+      return left.nodeName.localeCompare(right.nodeName, "zh-CN");
+    }
+    if (mode === "last_seen_desc") {
+      return (Date.parse(right.lastSeenAt || "") || 0) - (Date.parse(left.lastSeenAt || "") || 0);
+    }
+    if (mode === "active_tunnels_desc") {
+      return right.activeTunnels - left.activeTunnels;
+    }
+    const leftOffline = left.status === "online" ? 0 : 1;
+    const rightOffline = right.status === "online" ? 0 : 1;
+    if (leftOffline !== rightOffline) {
+      return rightOffline - leftOffline;
+    }
+    if (left.activeTunnels !== right.activeTunnels) {
+      return right.activeTunnels - left.activeTunnels;
+    }
+    return left.nodeName.localeCompare(right.nodeName, "zh-CN");
+  });
+  return items;
+}
+
+function sortNodeTunnels(items: TunnelSpec[]) {
+  return [...items].sort((left, right) => {
+    const leftProblem = (left.healthStatus || "healthy") === "healthy" ? 1 : 0;
+    const rightProblem = (right.healthStatus || "healthy") === "healthy" ? 1 : 0;
+    if (leftProblem !== rightProblem) {
+      return leftProblem - rightProblem;
+    }
+    return left.name.localeCompare(right.name, "zh-CN");
+  });
 }
 
 function splitTagInput(input: string) {
