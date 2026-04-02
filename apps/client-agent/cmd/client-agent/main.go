@@ -320,7 +320,7 @@ func (m *reverseManager) fetchTunnels(ctx context.Context, nodeID string) ([]typ
 }
 
 func (m *reverseManager) runTunnelWorker(ctx context.Context, tunnel types.TunnelSpec, slot int) {
-	log.Printf("reverse tunnel worker started: tunnel=%s slot=%d publicPort=%d target=%s:%d", tunnel.ID, slot, tunnel.PublicPort, tunnel.TargetHost, tunnel.TargetPort)
+	log.Printf("reverse tunnel worker started: tunnel=%s slot=%d publicPort=%d type=%s target=%s:%d", tunnel.ID, slot, tunnel.PublicPort, tunnel.Type, tunnel.TargetHost, tunnel.TargetPort)
 	for {
 		if ctx.Err() != nil {
 			log.Printf("reverse tunnel worker stopped: tunnel=%s slot=%d", tunnel.ID, slot)
@@ -350,6 +350,9 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 	if tunnel.Type == "udp" {
 		connectURL = m.udpRelayURL
 	}
+	if tunnel.Type == "udp" {
+		log.Printf("udp reverse session dialing: tunnel=%s publicPort=%d relay=%s", tunnel.ID, tunnel.PublicPort, connectURL)
+	}
 	conn, err := dialRelayUpgrade(ctx, connectURL, tunnelUpgradeHello(tunnel))
 	if err != nil {
 		return err
@@ -365,12 +368,16 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 		return err
 	}
 	stopKeepalive()
+	if tunnel.Type == "udp" {
+		log.Printf("udp reverse session ready: tunnel=%s publicPort=%d", tunnel.ID, tunnel.PublicPort)
+		defer log.Printf("udp reverse session closed: tunnel=%s publicPort=%d", tunnel.ID, tunnel.PublicPort)
+	}
 
 	if tunnel.Type == "socks5" {
 		return serveSOCKS5(ctx, conn)
 	}
 	if tunnel.Type == "udp" {
-		return serveUDPRelay(ctx, conn, tunnel.TargetHost, tunnel.TargetPort, m.udpResponseTimeout)
+		return serveUDPRelay(ctx, conn, tunnel.ID, tunnel.PublicPort, tunnel.TargetHost, tunnel.TargetPort, m.udpResponseTimeout)
 	}
 
 	targetConn, err := (&net.Dialer{Timeout: m.connectTimout}).DialContext(ctx, "tcp", net.JoinHostPort(tunnel.TargetHost, fmt.Sprintf("%d", tunnel.TargetPort)))
@@ -710,7 +717,7 @@ func defaultNodeName() string {
 }
 
 
-func serveUDPRelay(ctx context.Context, relayConn net.Conn, targetHost string, targetPort int, responseTimeout time.Duration) error {
+func serveUDPRelay(ctx context.Context, relayConn net.Conn, tunnelID string, publicPort int, targetHost string, targetPort int, responseTimeout time.Duration) error {
 	udpTarget, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP(targetHost), Port: targetPort})
 	if err != nil {
 		resolved, resolveErr := net.ResolveUDPAddr("udp", net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort)))
@@ -732,6 +739,7 @@ func serveUDPRelay(ctx context.Context, relayConn net.Conn, targetHost string, t
 		if err != nil {
 			return err
 		}
+		log.Printf("udp frame received from relay: tunnel=%s publicPort=%d session=%s bytes=%d", tunnelID, publicPort, frame.SessionID, len(frame.Payload))
 		if len(frame.Payload) == 0 {
 			if err := writeUDPFrame(relayConn, types.UDPDatagramFrame{SessionID: frame.SessionID}); err != nil {
 				return err
@@ -755,6 +763,7 @@ func serveUDPRelay(ctx context.Context, relayConn net.Conn, targetHost string, t
 			}
 			continue
 		}
+		log.Printf("udp response from target: tunnel=%s publicPort=%d session=%s bytes=%d", tunnelID, publicPort, frame.SessionID, n)
 		if err := writeUDPFrame(relayConn, types.UDPDatagramFrame{SessionID: frame.SessionID, Payload: append([]byte(nil), respBuf[:n]...)}); err != nil {
 			return err
 		}

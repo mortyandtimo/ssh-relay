@@ -7,6 +7,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/25743/cloud-relay-platform/packages/protocol/types"
 )
 
 func TestServeSOCKS5Connect(t *testing.T) {
@@ -82,5 +84,39 @@ func TestServeSOCKS5RejectsNonConnect(t *testing.T) {
 	}
 	if resp[1] != 0x07 {
 		t.Fatalf("expected command not supported, got %d", resp[1])
+	}
+}
+
+
+func TestServeUDPRelayRoundTrip(t *testing.T) {
+	udpTarget, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpTarget.Close()
+	go func() {
+		buf := make([]byte, 1024)
+		n, addr, err := udpTarget.ReadFrom(buf)
+		if err == nil {
+			_, _ = udpTarget.WriteTo(buf[:n], addr)
+		}
+	}()
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() {
+		_ = serveUDPRelay(ctx, serverConn, "udp-test", 12054, "127.0.0.1", udpTarget.LocalAddr().(*net.UDPAddr).Port, 2*time.Second)
+	}()
+	go func() {
+		_ = writeUDPFrame(clientConn, types.UDPDatagramFrame{SessionID: "s1", Payload: []byte("ping")})
+	}()
+	frame, err := readUDPFrame(clientConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(frame.Payload) != "ping" {
+		t.Fatalf("expected udp echo payload ping, got %q", string(frame.Payload))
 	}
 }

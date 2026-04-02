@@ -107,8 +107,10 @@ func (s *Service) syncRoutes(ctx context.Context) error {
 			if sameRoute(existing, route) {
 				continue
 			}
+			log.Printf("udp route changed: oldTunnel=%s oldPort=%d newTunnel=%s newPort=%d", existing.ID, existing.PublicPort, route.ID, route.PublicPort)
 			staleSessionKeys = append(staleSessionKeys, routeKey(existing))
 		} else {
+			log.Printf("udp route removed: tunnel=%s publicPort=%d", s.routes[port].ID, port)
 			staleSessionKeys = append(staleSessionKeys, routeKey(s.routes[port]))
 		}
 		_ = conn.Close()
@@ -187,7 +189,7 @@ func (s *Service) HandleAgentReverse(w http.ResponseWriter, r *http.Request) {
 	key := routeKey(types.TunnelSpec{ID: hello.TunnelID, NodeID: hello.NodeID, PublicPort: hello.PublicPort, TargetHost: hello.TargetHost, TargetPort: hello.TargetPort})
 	session := &routeSession{tunnel: types.TunnelSpec{ID: hello.TunnelID, NodeID: hello.NodeID, PublicPort: hello.PublicPort, TargetHost: hello.TargetHost, TargetPort: hello.TargetPort, Type: "udp"}, conn: conn, reader: bufio.NewReader(conn)}
 	s.replaceSession(key, session)
-	log.Printf("udp reverse session ready: node=%s tunnel=%s publicPort=%d", hello.NodeID, hello.TunnelID, hello.PublicPort)
+	log.Printf("udp reverse session established: key=%s node=%s tunnel=%s publicPort=%d", key, hello.NodeID, hello.TunnelID, hello.PublicPort)
 }
 
 func (s *Service) serveRoute(conn *net.UDPConn, route types.TunnelSpec) {
@@ -251,7 +253,7 @@ func (s *Service) sessionForRoute(route types.TunnelSpec) (*routeSession, error)
 	defer s.mu.Unlock()
 	session, ok := s.sessions[key]
 	if !ok {
-		return nil, errors.New("udp agent session unavailable")
+		return nil, fmt.Errorf("udp agent session unavailable: key=%s tunnel=%s publicPort=%d", key, route.ID, route.PublicPort)
 	}
 	return session, nil
 }
@@ -262,6 +264,7 @@ func (s *Service) replaceSession(key string, next *routeSession) {
 	s.sessions[key] = next
 	s.mu.Unlock()
 	if previous != nil {
+		log.Printf("udp reverse session replaced: key=%s oldTunnel=%s newTunnel=%s", key, previous.tunnel.ID, next.tunnel.ID)
 		_ = previous.conn.Close()
 	}
 }
@@ -272,6 +275,7 @@ func (s *Service) closeSession(key string) {
 	delete(s.sessions, key)
 	s.mu.Unlock()
 	if session != nil {
+		log.Printf("udp reverse session closed: key=%s tunnel=%s publicPort=%d", key, session.tunnel.ID, session.tunnel.PublicPort)
 		_ = session.conn.Close()
 	}
 }

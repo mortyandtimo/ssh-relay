@@ -201,3 +201,28 @@ func requireEventuallySession(t *testing.T, service *Service, tunnel types.Tunne
 	}
 	t.Fatalf("udp session for tunnel %s did not become ready", tunnel.ID)
 }
+
+
+func TestSyncRoutesKeepsLiveUDPSessionWhenRouteUnchanged(t *testing.T) {
+	tunnel := types.TunnelSpec{ID: "udp-stable", NodeID: "node-stable", Type: "udp", Status: "active", PublicPort: freeUDPPort(t), TargetHost: "127.0.0.1", TargetPort: 19001}
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []types.TunnelSpec{tunnel}})
+	}))
+	defer api.Close()
+	service := NewService(api.URL)
+	if err := service.syncRoutes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	service.replaceSession(routeKey(tunnel), &routeSession{tunnel: tunnel, conn: serverConn, reader: bufio.NewReader(serverConn)})
+	if err := service.syncRoutes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	_, ok := service.sessions[routeKey(tunnel)]
+	service.mu.Unlock()
+	if !ok {
+		t.Fatal("expected unchanged route to keep live udp session")
+	}
+}
