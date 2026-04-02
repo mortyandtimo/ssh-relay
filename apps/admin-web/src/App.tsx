@@ -1569,7 +1569,7 @@ export default function App() {
                         <div className="section-head compact-head">
                           <div>
                             <h3>节点元数据维护</h3>
-                            <span className="muted-line">右侧工作区直接完成标签、角色、环境等元数据更新，不再来回跳转。</span>
+                            <span className="muted-line">下方固定工作区直接完成标签、角色、环境等元数据更新，不再来回跳转。</span>
                           </div>
                         </div>
                         <form className="form-grid" onSubmit={submitNodeMetadata}>
@@ -1609,7 +1609,7 @@ export default function App() {
                         </form>
                       </section>
                     </>
-                  ) : <EmptyState title="未选择节点" body="请先在左侧列表中选中节点。右侧工作区会稳定承载节点状态、能力矩阵和承载入口，不再继续挤成一条窄栏。" />}
+                  ) : <EmptyState title="未选择节点" body="请先在上方节点列表中选中节点。下方固定工作区会稳定承载节点状态、能力矩阵和承载入口。" />}
                 </section>
               </div>
             ) : (
@@ -1777,7 +1777,7 @@ export default function App() {
                         ) : <EmptyState title="暂无归属解释" body="选中 tunnel 后，这里会给出当前节点是否合适以及只读替代建议。" />}
                       </section>
                     </>
-                  ) : <EmptyState title="尚未选择隧道" body="右侧当前保持稳定的新建工作台；在左侧选择隧道后，这里会切换成当前隧道的编辑与排障面板。" />}
+                  ) : <EmptyState title="尚未选择隧道" body="当前模块下方固定区域保持为新建与运维工作区；在上方列表中选择隧道后，这里会切换成当前隧道的编辑与排障面板。" />}
 
                   <section className="workbench-section">
                     <div className="section-head compact-head">
@@ -1885,7 +1885,7 @@ export default function App() {
                         <p>探测时间：<code>{formatDate((selectedProbeResult || persistedProbeResult)?.probedAt || "")}</code></p>
                         <p>结果状态：<span className={probeFreshnessPillClass(selectedTunnel ? deriveProbeFreshnessState(selectedTunnel) : "not_probed")}>{probeFreshnessLabel(selectedTunnel ? deriveProbeFreshnessState(selectedTunnel) : "not_probed")}</span></p>
                       </div>
-                    ) : <EmptyState title="暂无 Probe 结果" body="HTTP / HTTPS tunnel 可在右侧工作台直接点击探测，结果会稳定显示在这里，不再把页面向下撑长。" />}
+                    ) : <EmptyState title="暂无 Probe 结果" body="HTTP / HTTPS tunnel 可在下方固定工作区直接点击探测，结果会稳定显示在这里，不再把页面向下撑长。" />}
                   </section>
 
                   <section className="workbench-section">
