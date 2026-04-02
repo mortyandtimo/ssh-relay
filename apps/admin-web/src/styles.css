@@ -257,6 +257,20 @@ textarea {
   gap: 6px;
 }
 
+.compact-signal-card {
+  min-height: 96px;
+  align-content: space-between;
+}
+
+.load-signal-grid,
+.profile-strip {
+  margin-top: 12px;
+}
+
+.placement-panel {
+  gap: 10px;
+}
+
 .section-head,
 .audit-header-row,
 .detail-hero {

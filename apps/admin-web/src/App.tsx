@@ -1031,7 +1031,9 @@ export default function App() {
   const filteredNodes = sortNodes(nodes.filter((node) => matchesNodeOpsFilters(node, nodeStatusFilter, nodeFilter.nodeRole, nodeFilter.environment, nodeCapabilityFilter, nodeFilter.owner, nodeFilter.tag)), nodeSortMode);
   const selectedNodeVisibleInFilters = selectedNode ? filteredNodes.some((node) => node.nodeId === selectedNode.nodeId) : true;
   const selectedNodeTunnels = selectedNode ? sortNodeTunnels(tunnels.filter((tunnel) => tunnel.nodeId === selectedNode.nodeId)) : [];
+  const selectedNodeProfile = selectedNode ? buildNodeLoadProfile(selectedNode, selectedNodeTunnels) : null;
   const selectedTunnel = editingTunnelID ? tunnels.find((tunnel) => tunnel.id === editingTunnelID) ?? null : null;
+  const selectedTunnelPlacement = selectedTunnel ? explainTunnelPlacement(selectedTunnel, nodes, tunnels) : null;
   const selectedProbeResult = editingTunnelID ? probeResults[editingTunnelID] ?? null : null;
   const persistedProbeResult = selectedTunnel ? toProbeResult(selectedTunnel) : null;
   const selectedTunnelVisibleInFilters = selectedTunnel ? matchesTunnelFilters(selectedTunnel, nodes, tunnelHealthFilter, tunnelTypeFilter, probeStateFilter, tunnelNodeStatusFilter) : true;
@@ -1063,6 +1065,9 @@ export default function App() {
   const unprobedTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "not_probed").length;
   const recentFailedTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "recent_failure").length;
   const staleTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "stale").length;
+  const overloadedNodes = nodes.filter((node) => buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId)).loadState === "high_load");
+  const idleNodes = nodes.filter((node) => buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId)).loadState === "idle");
+  const nodesWithProblemTunnels = nodes.filter((node) => buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId)).problemCount > 0);
   const canOperate = activeUser.role !== "user";
   const canManageUsers = activeUser.role === "admin";
   const nodeStart = nodes.length === 0 ? 0 : nodeFilter.offset + 1;
@@ -1214,6 +1219,33 @@ export default function App() {
                     <SignalCard label="支持 UDP 的节点" value={String(udpCapableNodeCount)} />
                     <SignalCard label="UDP 里程碑" value={udpTunnelCount > 0 ? "公网 echo 已验证" : "待创建 UDP tunnel"} />
                     <SignalCard label="支持 SOCKS5 的节点" value={String(socks5CapableNodeCount)} />
+                  </div>
+                </section>
+                <section className="subpanel">
+                  <div className="section-head compact-head">
+                    <div>
+                      <h3>节点负载与承载信号</h3>
+                      <span className="muted-line">统一观察哪些节点高承载、哪些节点空闲、哪些节点挂了异常入口，为后续人工编排提供依据。</span>
+                    </div>
+                  </div>
+                  <div className="signal-strip">
+                    <SignalCard label="高承载节点" value={overloadedNodes.length === 0 ? "无" : String(overloadedNodes.length)} />
+                    <SignalCard label="空闲节点" value={idleNodes.length === 0 ? "无" : String(idleNodes.length)} />
+                    <SignalCard label="异常节点" value={nodesWithProblemTunnels.length === 0 ? "无" : String(nodesWithProblemTunnels.length)} />
+                    <SignalCard label="最高承载节点" value={highestLoadNode ? highestLoadNode.nodeName + " / " + highestLoadNode.activeTunnels : "-"} />
+                  </div>
+                  <div className="spotlight-grid compact-cards load-signal-grid">
+                    {overloadedNodes.length > 0 ? overloadedNodes.slice(0, 3).map((node) => {
+                      const profile = buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId));
+                      return <article key={node.nodeId} className="spotlight-card compact-signal-card"><strong>{node.nodeName}</strong><span className="muted-line">高承载 / {profile.activeCount} active / {profile.protocolSummary}</span></article>;
+                    }) : <article className="spotlight-card compact-signal-card"><strong>当前无高承载节点</strong><span className="muted-line">暂无节点达到高承载阈值。</span></article>}
+                    {nodesWithProblemTunnels.length > 0 ? nodesWithProblemTunnels.slice(0, 3).map((node) => {
+                      const profile = buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId));
+                      return <article key={node.nodeId + ":problem"} className="spotlight-card compact-signal-card problem-card"><strong>{node.nodeName}</strong><span className="muted-line">异常入口 {profile.problemCount} 个 / {profile.protocolSummary}</span></article>;
+                    }) : <article className="spotlight-card compact-signal-card"><strong>当前无异常承载节点</strong><span className="muted-line">没有节点承载异常 tunnel。</span></article>}
+                    {idleNodes.length > 0 ? idleNodes.slice(0, 3).map((node) => (
+                      <article key={node.nodeId + ":idle"} className="spotlight-card compact-signal-card"><strong>{node.nodeName}</strong><span className="muted-line">空闲 / 暂无 active tunnel</span></article>
+                    )) : <article className="spotlight-card compact-signal-card"><strong>当前无空闲节点</strong><span className="muted-line">所有节点都有一定承载。</span></article>}
                   </div>
                 </section>
                 {relayRuntime?.pools?.length ? (
@@ -1409,6 +1441,35 @@ export default function App() {
                       <section className="workbench-section">
                         <div className="section-head compact-head">
                           <div>
+                            <h3>节点承载画像</h3>
+                            <span className="muted-line">把当前节点的协议分布、异常入口和负载水平收敛成一个可读画像，而不是只看 tunnel 表。</span>
+                          </div>
+                        </div>
+                        {selectedNodeProfile ? (
+                          <>
+                            <div className="signal-strip profile-strip">
+                              <SignalCard label="当前负载" value={nodeLoadStateLabel(selectedNodeProfile.loadState)} />
+                              <SignalCard label="异常入口" value={selectedNodeProfile.problemCount === 0 ? "无" : String(selectedNodeProfile.problemCount)} />
+                              <SignalCard label="协议分布" value={selectedNodeProfile.protocolSummary} />
+                              <SignalCard label="active tunnel" value={String(selectedNodeProfile.activeCount)} />
+                            </div>
+                            <div className="table-status-stack capability-matrix">
+                              <span className={selectedNodeProfile.protocolCounts.tcp > 0 ? "status-pill tone-info" : "status-pill tone-neutral"}>TCP {selectedNodeProfile.protocolCounts.tcp}</span>
+                              <span className={selectedNodeProfile.protocolCounts.http > 0 ? "status-pill tone-info" : "status-pill tone-neutral"}>HTTP {selectedNodeProfile.protocolCounts.http}</span>
+                              <span className={selectedNodeProfile.protocolCounts.https > 0 ? "status-pill tone-info" : "status-pill tone-neutral"}>HTTPS {selectedNodeProfile.protocolCounts.https}</span>
+                              <span className={selectedNodeProfile.protocolCounts.udp > 0 ? "status-pill tone-info" : "status-pill tone-neutral"}>UDP {selectedNodeProfile.protocolCounts.udp}</span>
+                              <span className={selectedNodeProfile.protocolCounts.socks5 > 0 ? "status-pill tone-info" : "status-pill tone-neutral"}>SOCKS5 {selectedNodeProfile.protocolCounts.socks5}</span>
+                            </div>
+                            <div className="ops-note-list">
+                              {selectedNodeProfile.notes.map((note) => <div key={note} className={note.includes("异常") || note.includes("高承载") ? "ops-note tone-warn" : note.includes("空闲") ? "ops-note tone-neutral" : "ops-note tone-info"}>{note}</div>)}
+                            </div>
+                          </>
+                        ) : null}
+                      </section>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
                             <h3>节点属性</h3>
                             <span className="muted-line">按排障视角展示角色、环境、信任级别与运维归属信息。</span>
                           </div>
@@ -1444,7 +1505,7 @@ export default function App() {
                         <div className="section-head compact-head">
                           <div>
                             <h3>节点承载入口</h3>
-                            <span className="muted-line">直接查看该节点当前挂载的 tunnel，判断它到底承载了哪些入口、哪些 UDP 入口已上线，以及哪些入口异常。</span>
+                            <span className="muted-line">直接查看该节点当前挂载的 tunnel，并与上面的承载画像联动判断协议分布、异常入口和是否过载。</span>
                           </div>
                         </div>
                         <div className="table-wrap compact-table">
@@ -1639,6 +1700,7 @@ export default function App() {
                             <FactRow label="入口类型" value={tunnelTypeEntryHint(selectedTunnel)} />
                             <FactRow label="目标地址" value={<code>{selectedTunnel.targetHost}:{selectedTunnel.targetPort}</code>} />
                             <FactRow label="运行依赖" value={tunnelRequirementSummary(selectedTunnel, nodes)} />
+                            <FactRow label="当前归属" value={selectedTunnelPlacement ? selectedTunnelPlacement.summary : "-"} />
                             {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <FactRow label="probePath" value={<code>{selectedTunnel.probePath || "/"}</code>} /> : null}
                             {selectedTunnel.type === "https" ? <FactRow label="publicPort" value={<span><code>{selectedTunnel.publicPort}</code> 仅作内部保留字段</span>} /> : null}
                           </div>
@@ -1661,9 +1723,27 @@ export default function App() {
                             <div className={(selectedTunnel.healthStatus || "healthy") !== "healthy" ? "ops-note tone-danger note-strong" : "ops-note tone-good"}>{tunnelAvailabilityText(selectedTunnel)}</div>
                             <div className={deriveProbeFreshnessState(selectedTunnel) === "recent_failure" ? "ops-note tone-danger note-strong" : deriveProbeFreshnessState(selectedTunnel) === "stale" ? "ops-note tone-warn" : "ops-note tone-info"}>Probe 状态：{probeFreshnessLabel(deriveProbeFreshnessState(selectedTunnel))}</div>
                             <div className="ops-note tone-neutral">节点：{selectedTunnel.nodeId}</div>
+                            {selectedTunnelPlacement ? selectedTunnelPlacement.notes.map((note) => <div key={note} className={note.includes("不合适") || note.includes("离线") || note.includes("缺失") ? "ops-note tone-danger note-strong" : note.includes("高承载") ? "ops-note tone-warn" : "ops-note tone-info"}>{note}</div>) : null}
                           </div>
                         </div>
                       </div>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>归属与替代判断</h3>
+                            <span className="muted-line">解释当前为什么挂在这个节点上、这个节点是否合适，以及有没有更轻载的只读替代节点可供人工判断。</span>
+                          </div>
+                        </div>
+                        {selectedTunnelPlacement ? (
+                          <div className="empty-state placement-panel">
+                            <strong>{selectedTunnelPlacement.summary}</strong>
+                            <p>当前节点判断：<code>{selectedTunnelPlacement.currentNodeAssessment}</code></p>
+                            <p>归属解释：<code>{selectedTunnelPlacement.requirementSummary}</code></p>
+                            <p>只读替代建议：<code>{selectedTunnelPlacement.alternativeSummary}</code></p>
+                          </div>
+                        ) : <EmptyState title="暂无归属解释" body="选中 tunnel 后，这里会给出当前节点是否合适以及只读替代建议。" />}
+                      </section>
                     </>
                   ) : <EmptyState title="尚未选择隧道" body="右侧当前保持稳定的新建工作台；在左侧选择隧道后，这里会切换成当前隧道的编辑与排障面板。" />}
 
@@ -2538,6 +2618,124 @@ function sortNodeTunnels(items: TunnelSpec[]) {
     }
     return left.name.localeCompare(right.name, "zh-CN");
   });
+}
+
+function buildNodeLoadProfile(node: NodeSummary, items: TunnelSpec[]) {
+  const protocolCounts = { tcp: 0, http: 0, https: 0, udp: 0, socks5: 0 };
+  let activeCount = 0;
+  let problemCount = 0;
+  for (const tunnel of items) {
+    if (tunnel.type === "http") protocolCounts.http += 1;
+    else if (tunnel.type === "https") protocolCounts.https += 1;
+    else if (tunnel.type === "udp") protocolCounts.udp += 1;
+    else if (tunnel.type === "socks5") protocolCounts.socks5 += 1;
+    else protocolCounts.tcp += 1;
+    if (tunnel.status === "active") {
+      activeCount += 1;
+    }
+    if ((tunnel.healthStatus || "healthy") !== "healthy") {
+      problemCount += 1;
+    }
+  }
+  const protocolSummary = [
+    protocolCounts.tcp > 0 ? "TCP " + protocolCounts.tcp : "",
+    protocolCounts.http > 0 ? "HTTP " + protocolCounts.http : "",
+    protocolCounts.https > 0 ? "HTTPS " + protocolCounts.https : "",
+    protocolCounts.udp > 0 ? "UDP " + protocolCounts.udp : "",
+    protocolCounts.socks5 > 0 ? "SOCKS5 " + protocolCounts.socks5 : "",
+  ].filter(Boolean).join(" / ") || "暂无入口";
+  let loadState: "idle" | "normal" | "high_load" = "normal";
+  if (activeCount === 0) {
+    loadState = "idle";
+  } else if (activeCount >= 3 || problemCount >= 2) {
+    loadState = "high_load";
+  }
+  const notes = [] as string[];
+  if (loadState === "idle") {
+    notes.push("当前空闲：暂无 active tunnel，可作为后续编排候选节点。");
+  } else if (loadState === "high_load") {
+    notes.push("当前高承载：active tunnel 较多，后续新增入口应谨慎挂载。");
+  } else {
+    notes.push("当前承载处于正常区间。");
+  }
+  if (problemCount > 0) {
+    notes.push("存在异常入口：" + problemCount + " 个 tunnel 当前健康异常。");
+  }
+  if (node.status !== "online") {
+    notes.push("节点当前 offline，承载画像仅供排查，不适合作为新增挂载目标。");
+  }
+  return { node, protocolCounts, protocolSummary, activeCount, problemCount, loadState, notes };
+}
+
+function nodeLoadStateLabel(state: "idle" | "normal" | "high_load") {
+  switch (state) {
+    case "idle":
+      return "空闲";
+    case "high_load":
+      return "高承载";
+    default:
+      return "承载正常";
+  }
+}
+
+function supportsTunnelType(node: NodeSummary, tunnelType: string) {
+  if (tunnelType === "udp") return node.capabilities.udpRelay;
+  if (tunnelType === "http") return node.capabilities.httpRelay;
+  if (tunnelType === "https") return node.capabilities.httpsRelay || node.capabilities.httpRelay;
+  if (tunnelType === "socks5") return Boolean(node.capabilities.socks5Connect);
+  return node.capabilities.tcpRelay;
+}
+
+function explainTunnelPlacement(tunnel: TunnelSpec, nodes: NodeSummary[], allTunnels: TunnelSpec[]) {
+  const currentNode = nodes.find((node) => node.nodeId === tunnel.nodeId) ?? null;
+  const currentProfile = currentNode ? buildNodeLoadProfile(currentNode, allTunnels.filter((item) => item.nodeId === currentNode.nodeId)) : null;
+  const notes = [] as string[];
+  if (!currentNode) {
+    notes.push("当前绑定节点不存在或未加载，归属不合适。");
+  } else {
+    if (currentNode.status !== "online") {
+      notes.push("当前绑定节点离线，归属不合适。");
+    }
+    if (!supportsTunnelType(currentNode, tunnel.type)) {
+      notes.push("当前绑定节点 capability 缺失，归属不合适。");
+    }
+    if (currentProfile?.loadState === "high_load") {
+      notes.push("当前绑定节点高承载，后续可考虑人工分散。");
+    }
+    if ((tunnel.healthStatus || "healthy") !== "healthy") {
+      notes.push("当前 tunnel 自身存在异常，需要结合节点状态一起判断。");
+    }
+  }
+  if (notes.length === 0) {
+    notes.push("当前节点满足 capability 且状态正常，归属基本合理。");
+  }
+
+  const alternatives = nodes
+    .filter((node) => node.nodeId !== tunnel.nodeId)
+    .filter((node) => node.status === "online")
+    .filter((node) => supportsTunnelType(node, tunnel.type))
+    .map((node) => ({ node, profile: buildNodeLoadProfile(node, allTunnels.filter((item) => item.nodeId === node.nodeId)) }))
+    .sort((left, right) => {
+      const rank = (state: "idle" | "normal" | "high_load") => state === "idle" ? 0 : state === "normal" ? 1 : 2;
+      const loadDelta = rank(left.profile.loadState) - rank(right.profile.loadState);
+      if (loadDelta !== 0) {
+        return loadDelta;
+      }
+      return left.profile.activeCount - right.profile.activeCount;
+    });
+
+  const bestAlternative = alternatives[0] || null;
+  const currentNodeAssessment = currentNode
+    ? nodeAgentDeploymentLabel(currentNode) + " / " + nodeLoadStateLabel(currentProfile?.loadState || "normal") + " / " + (supportsTunnelType(currentNode, tunnel.type) ? "capability 满足" : "capability 不匹配")
+    : "未找到当前节点";
+  const requirementSummary = tunnelRequirementSummary(tunnel, nodes);
+  const alternativeSummary = bestAlternative
+    ? bestAlternative.node.nodeName + "（" + bestAlternative.node.nodeId + "，" + nodeLoadStateLabel(bestAlternative.profile.loadState) + "，" + bestAlternative.profile.protocolSummary + "）"
+    : "暂无更合适的在线替代节点";
+  const summary = currentNode
+    ? tunnel.name + " 当前绑定在 " + currentNode.nodeName + "（" + currentNode.nodeId + "）"
+    : tunnel.name + " 当前绑定节点不可用";
+  return { summary, currentNodeAssessment, requirementSummary, alternativeSummary, notes };
 }
 
 function splitTagInput(input: string) {
