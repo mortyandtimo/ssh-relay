@@ -728,6 +728,24 @@ func (s *Server) handleTunnelProbe(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	updatedTunnel := tunnel
+	if updatedTunnel.Metadata == nil {
+		updatedTunnel.Metadata = map[string]string{}
+	}
+	updatedTunnel.LastProbeSuccess = result.Success
+	updatedTunnel.LastProbeStatusCode = result.StatusCode
+	updatedTunnel.LastProbeError = result.Error
+	updatedTunnel.LastProbedAt = result.ProbedAt
+	updatedTunnel.LastProbeTargetEntry = result.TargetEntry
+	updatedTunnel.Metadata["lastProbeSuccess"] = fmt.Sprintf("%t", result.Success)
+	updatedTunnel.Metadata["lastProbeStatusCode"] = fmt.Sprintf("%d", result.StatusCode)
+	updatedTunnel.Metadata["lastProbeError"] = result.Error
+	updatedTunnel.Metadata["lastProbedAt"] = result.ProbedAt.Format(time.RFC3339Nano)
+	updatedTunnel.Metadata["lastProbeTargetEntry"] = result.TargetEntry
+	if _, err := s.store.UpdateTunnel(r.Context(), updatedTunnel); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 

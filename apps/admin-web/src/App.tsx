@@ -86,6 +86,11 @@ type TunnelSpec = {
   probePath?: string;
   status: string;
   healthStatus?: TunnelHealthStatus;
+  lastProbeSuccess?: boolean;
+  lastProbeStatusCode?: number;
+  lastProbeError?: string;
+  lastProbedAt?: string;
+  lastProbeTargetEntry?: string;
 };
 
 type ServerMetrics = {
@@ -860,7 +865,9 @@ export default function App() {
       updatedAt: "",
     };
   const selectedNode = selectedNodeID ? nodes.find((node) => node.nodeId === selectedNodeID) ?? null : null;
+  const selectedTunnel = editingTunnelID ? tunnels.find((tunnel) => tunnel.id === editingTunnelID) ?? null : null;
   const selectedProbeResult = editingTunnelID ? probeResults[editingTunnelID] ?? null : null;
+  const persistedProbeResult = selectedTunnel ? toProbeResult(selectedTunnel) : null;
   const onlineNodes = nodes.filter((node) => node.status === "online").length;
   const activeTunnels = tunnels.filter((tunnel) => tunnel.status === "active").length;
   const filteredTunnels = tunnels.filter((tunnel) => matchesTunnelHealthFilter(tunnel, tunnelHealthFilter));
@@ -1340,15 +1347,15 @@ export default function App() {
                       </div>
                     ) : null}
 
-                    {selectedProbeResult ? (
+                    {(selectedProbeResult || persistedProbeResult) ? (
                       <div className="empty-state">
                         <strong>本次探测结果</strong>
-                        <p>入口：<code>{selectedProbeResult.targetEntry}</code></p>
-                        <p>完整探测地址：<code>{selectedProbeResult.targetEntry}</code></p>
-                        <p>结果：<span className={selectedProbeResult.success ? "status-pill tone-good" : "status-pill tone-danger"}>{selectedProbeResult.success ? "成功" : "失败"}</span></p>
-                        <p>状态码：<code>{selectedProbeResult.statusCode ? String(selectedProbeResult.statusCode) : "-"}</code></p>
-                        <p>错误：<code>{selectedProbeResult.error || "-"}</code></p>
-                        <p>探测时间：<code>{formatDate(selectedProbeResult.probedAt)}</code></p>
+                        <p>入口：<code>{(selectedProbeResult || persistedProbeResult)?.targetEntry}</code></p>
+                        <p>完整探测地址：<code>{(selectedProbeResult || persistedProbeResult)?.targetEntry}</code></p>
+                        <p>结果：<span className={(selectedProbeResult || persistedProbeResult)?.success ? "status-pill tone-good" : "status-pill tone-danger"}>{(selectedProbeResult || persistedProbeResult)?.success ? "成功" : "失败"}</span></p>
+                        <p>状态码：<code>{(selectedProbeResult || persistedProbeResult)?.statusCode ? String((selectedProbeResult || persistedProbeResult)?.statusCode) : "-"}</code></p>
+                        <p>错误：<code>{(selectedProbeResult || persistedProbeResult)?.error || "-"}</code></p>
+                        <p>探测时间：<code>{formatDate((selectedProbeResult || persistedProbeResult)?.probedAt || "")}</code></p>
                       </div>
                     ) : null}
 
@@ -1691,6 +1698,20 @@ function capabilityEnabledLabel(enabled: boolean) {
 
 function capabilityPillClass(enabled: boolean) {
   return enabled ? "status-pill tone-good" : "status-pill tone-neutral";
+}
+
+function toProbeResult(tunnel: TunnelSpec): TunnelProbeResult | null {
+  if (!tunnel.lastProbedAt) {
+    return null;
+  }
+  return {
+    tunnelId: tunnel.id,
+    success: Boolean(tunnel.lastProbeSuccess),
+    statusCode: tunnel.lastProbeStatusCode,
+    error: tunnel.lastProbeError,
+    probedAt: tunnel.lastProbedAt,
+    targetEntry: tunnel.lastProbeTargetEntry || "",
+  };
 }
 
 function tunnelRequirementSummary(tunnel: TunnelSpec, nodes: NodeSummary[]) {

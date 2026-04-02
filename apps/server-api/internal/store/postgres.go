@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -324,6 +325,7 @@ func (s *PostgresStore) GetTunnel(ctx context.Context, id string) (types.TunnelS
 		item.Metadata["nodeId"] = nodeID
 	}
 	item.ProbePath = item.Metadata["probePath"]
+	hydrateLastProbeFields(&item)
 	return item, nil
 }
 
@@ -420,6 +422,7 @@ func (s *PostgresStore) ListTunnels(ctx context.Context, filter TunnelFilter) ([
 			item.Metadata["nodeId"] = nodeID
 		}
 		item.ProbePath = item.Metadata["probePath"]
+		hydrateLastProbeFields(&item)
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -441,6 +444,27 @@ func (s *PostgresStore) Counts(ctx context.Context) (Counts, error) {
 func (s *PostgresStore) Close() error {
 	s.pool.Close()
 	return nil
+}
+
+func hydrateLastProbeFields(item *types.TunnelSpec) {
+	if item == nil {
+		return
+	}
+	if item.Metadata["lastProbeSuccess"] == "true" {
+		item.LastProbeSuccess = true
+	}
+	if value := item.Metadata["lastProbeStatusCode"]; value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			item.LastProbeStatusCode = parsed
+		}
+	}
+	item.LastProbeError = item.Metadata["lastProbeError"]
+	item.LastProbeTargetEntry = item.Metadata["lastProbeTargetEntry"]
+	if value := item.Metadata["lastProbedAt"]; value != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			item.LastProbedAt = parsed
+		}
+	}
 }
 
 func marshalMap(input map[string]string) ([]byte, error) {

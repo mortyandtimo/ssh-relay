@@ -351,6 +351,20 @@ func TestTunnelProbeSupportsHTTPAndHTTPS(t *testing.T) {
 	if httpOut.TargetEntry != fmt.Sprintf("http://82.156.236.104:%d/", httpPort) {
 		t.Fatalf("expected default probePath / in http targetEntry, got %q", httpOut.TargetEntry)
 	}
+	httpGetReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/probe-http", nil)
+	applyCookies(httpGetReq, adminCookies)
+	httpGetRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(httpGetRes, httpGetReq)
+	if httpGetRes.Code != http.StatusOK {
+		t.Fatalf("expected http tunnel get 200, got %d", httpGetRes.Code)
+	}
+	var httpTunnelOut types.TunnelSpec
+	if err := json.NewDecoder(httpGetRes.Body).Decode(&httpTunnelOut); err != nil {
+		t.Fatal(err)
+	}
+	if !httpTunnelOut.LastProbeSuccess || httpTunnelOut.LastProbeStatusCode != http.StatusOK || httpTunnelOut.LastProbeTargetEntry != httpOut.TargetEntry {
+		t.Fatalf("unexpected persisted http last probe result: %+v", httpTunnelOut)
+	}
 
 	httpsProbeReq := httptest.NewRequest(http.MethodPost, "/api/tunnels/probe-https/probe", nil)
 	applyCookies(httpsProbeReq, adminCookies)
@@ -368,6 +382,20 @@ func TestTunnelProbeSupportsHTTPAndHTTPS(t *testing.T) {
 	}
 	if !strings.HasSuffix(httpsOut.TargetEntry, "/admin/") {
 		t.Fatalf("expected https probe targetEntry to include /admin/, got %q", httpsOut.TargetEntry)
+	}
+	httpsGetReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/probe-https", nil)
+	applyCookies(httpsGetReq, adminCookies)
+	httpsGetRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(httpsGetRes, httpsGetReq)
+	if httpsGetRes.Code != http.StatusOK {
+		t.Fatalf("expected https tunnel get 200, got %d", httpsGetRes.Code)
+	}
+	var httpsTunnelOut types.TunnelSpec
+	if err := json.NewDecoder(httpsGetRes.Body).Decode(&httpsTunnelOut); err != nil {
+		t.Fatal(err)
+	}
+	if !httpsTunnelOut.LastProbeSuccess || httpsTunnelOut.LastProbeStatusCode != http.StatusOK || httpsTunnelOut.LastProbeTargetEntry != httpsOut.TargetEntry {
+		t.Fatalf("unexpected persisted https last probe result: %+v", httpsTunnelOut)
 	}
 }
 

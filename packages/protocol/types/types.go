@@ -96,20 +96,25 @@ type TunnelProbeResult struct {
 }
 
 type TunnelSpec struct {
-	ID              string             `json:"id"`
-	Name            string             `json:"name"`
-	Type            string             `json:"type"`
-	TransportPolicy string             `json:"transportPolicy"`
-	NodeID          string             `json:"nodeId,omitempty"`
-	TargetHost      string             `json:"targetHost"`
-	TargetPort      int                `json:"targetPort"`
-	PublicPort      int                `json:"publicPort,omitempty"`
-	Domain          string             `json:"domain,omitempty"`
-	TLSMode         string             `json:"tlsMode,omitempty"`
-	ProbePath       string             `json:"probePath,omitempty"`
-	Status          string             `json:"status"`
-	HealthStatus    TunnelHealthStatus `json:"healthStatus,omitempty"`
-	Metadata        map[string]string  `json:"metadata,omitempty"`
+	ID                   string             `json:"id"`
+	Name                 string             `json:"name"`
+	Type                 string             `json:"type"`
+	TransportPolicy      string             `json:"transportPolicy"`
+	NodeID               string             `json:"nodeId,omitempty"`
+	TargetHost           string             `json:"targetHost"`
+	TargetPort           int                `json:"targetPort"`
+	PublicPort           int                `json:"publicPort,omitempty"`
+	Domain               string             `json:"domain,omitempty"`
+	TLSMode              string             `json:"tlsMode,omitempty"`
+	ProbePath            string             `json:"probePath,omitempty"`
+	Status               string             `json:"status"`
+	HealthStatus         TunnelHealthStatus `json:"healthStatus,omitempty"`
+	LastProbeSuccess     bool               `json:"lastProbeSuccess,omitempty"`
+	LastProbeStatusCode  int                `json:"lastProbeStatusCode,omitempty"`
+	LastProbeError       string             `json:"lastProbeError,omitempty"`
+	LastProbedAt         time.Time          `json:"lastProbedAt,omitempty"`
+	LastProbeTargetEntry string             `json:"lastProbeTargetEntry,omitempty"`
+	Metadata             map[string]string  `json:"metadata,omitempty"`
 }
 
 type AgentRelayHello struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -503,6 +504,21 @@ func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {
 		tunnel.ProbePath = tunnel.Metadata["probePath"]
 	} else {
 		tunnel.Metadata["probePath"] = tunnel.ProbePath
+	}
+	if tunnel.Metadata["lastProbeSuccess"] == "true" {
+		tunnel.LastProbeSuccess = true
+	}
+	if value := tunnel.Metadata["lastProbeStatusCode"]; value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			tunnel.LastProbeStatusCode = parsed
+		}
+	}
+	tunnel.LastProbeError = tunnel.Metadata["lastProbeError"]
+	tunnel.LastProbeTargetEntry = tunnel.Metadata["lastProbeTargetEntry"]
+	if value := tunnel.Metadata["lastProbedAt"]; value != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			tunnel.LastProbedAt = parsed
+		}
 	}
 	return tunnel
 }
