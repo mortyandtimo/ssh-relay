@@ -468,7 +468,7 @@ func (s *Server) handleNodeOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	options := make([]types.NodeOption, 0, len(items))
 	for _, item := range items {
-		options = append(options, types.NodeOption{NodeID: item.NodeID, NodeName: item.NodeName, Status: item.Status, SupportsTCP: item.Capabilities.TCPRelay, SupportsHTTP: item.Capabilities.HTTPRelay, SupportsHTTPS: item.Capabilities.HTTPSRelay || item.Capabilities.HTTPRelay, SupportsSOCKS5: item.Capabilities.SOCKS5Connect})
+		options = append(options, types.NodeOption{NodeID: item.NodeID, NodeName: item.NodeName, Status: item.Status, SupportsTCP: item.Capabilities.TCPRelay, SupportsHTTP: item.Capabilities.HTTPRelay, SupportsHTTPS: item.Capabilities.HTTPSRelay || item.Capabilities.HTTPRelay, SupportsSOCKS5: item.Capabilities.SOCKS5Connect, Isolated: item.Isolated})
 	}
 	writeJSON(w, http.StatusOK, types.NodeOptionsResponse{Items: options})
 }
@@ -505,6 +505,7 @@ func (s *Server) handleNodeByID(w http.ResponseWriter, r *http.Request) {
 			Owner:       req.Owner,
 			Location:    req.Location,
 			Tags:        req.Tags,
+			Isolated:    req.Isolated,
 		})
 		if err != nil {
 			status := http.StatusInternalServerError
@@ -521,6 +522,7 @@ func (s *Server) handleNodeByID(w http.ResponseWriter, r *http.Request) {
 			"owner":       node.Owner,
 			"location":    node.Location,
 			"tags":        strings.Join(node.Tags, ","),
+			"isolated":    fmt.Sprintf("%t", node.Isolated),
 		})
 		writeJSON(w, http.StatusOK, node)
 	default:
@@ -1363,12 +1365,12 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 }
 
 func (s *Server) ensureTunnelNodeCapability(ctx context.Context, nodeID, tunnelType string) error {
-	if tunnelType != "socks5" && tunnelType != "http" && tunnelType != "https" {
-		return nil
-	}
 	node, err := s.store.GetNode(ctx, nodeID)
 	if err != nil {
 		return err
+	}
+	if node.Isolated {
+		return errors.New("selected node is isolated and cannot accept new tunnels")
 	}
 	if tunnelType == "socks5" && !node.Capabilities.SOCKS5Connect {
 		return errors.New("selected node does not support socks5 connect")

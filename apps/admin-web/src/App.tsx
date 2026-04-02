@@ -28,6 +28,7 @@ type NodeSummary = {
   owner?: string;
   location?: string;
   tags?: string[];
+  isolated?: boolean;
 };
 
 type NodeListResponse = {
@@ -45,6 +46,7 @@ type NodeOption = {
   supportsHTTP?: boolean;
   supportsHTTPS?: boolean;
   supportsSOCKS5?: boolean;
+  isolated?: boolean;
 };
 
 type NodeOptionsResponse = {
@@ -72,6 +74,7 @@ type NodeEditForm = {
   owner: string;
   location: string;
   tags: string;
+  isolated: boolean;
 };
 
 type TunnelHealthStatus = "healthy" | "node_offline" | "capability_missing" | "misconfigured" | "target_unreachable";
@@ -671,12 +674,40 @@ export default function App() {
           owner: nodeEditForm.owner,
           location: nodeEditForm.location,
           tags: splitTagInput(nodeEditForm.tags),
+          isolated: nodeEditForm.isolated,
         }),
       });
       setMessage("节点元数据已更新。");
       await refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilterRef.current);
     } catch (updateError) {
       setError(updateError instanceof Error ? updateError.message : "更新节点元数据失败");
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  async function setNodeIsolation(node: NodeSummary, isolated: boolean) {
+    const actionKey = (isolated ? "isolate-node:" : "release-node:") + node.nodeId;
+    setBusyAction(actionKey);
+    setError("");
+    setMessage("");
+    try {
+      await requestJSON<NodeSummary>("/api/nodes/" + node.nodeId, {
+        method: "PUT",
+        body: JSON.stringify({
+          nodeRole: node.nodeRole || "",
+          environment: node.environment || "",
+          trustLevel: node.trustLevel || "",
+          owner: node.owner || "",
+          location: node.location || "",
+          tags: node.tags || [],
+          isolated,
+        }),
+      });
+      setMessage(isolated ? "节点已隔离。" : "节点已解除隔离。");
+      await refreshDashboard(false, currentUser, false, auditFilterRef.current, nodeFilterRef.current);
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "更新节点隔离状态失败");
     } finally {
       setBusyAction("");
     }
@@ -890,6 +921,7 @@ export default function App() {
       updatedAt: "",
     };
   const selectedNode = selectedNodeID ? nodes.find((node) => node.nodeId === selectedNodeID) ?? null : null;
+  const tunnelFormNode = allNodes.find((node) => node.nodeId === tunnelForm.nodeId) ?? null;
   const filteredNodes = sortNodes(nodes.filter((node) => matchesNodeOpsFilters(node, nodeStatusFilter, nodeFilter.nodeRole, nodeFilter.environment, nodeCapabilityFilter, nodeFilter.owner, nodeFilter.tag)), nodeSortMode);
   const selectedNodeVisibleInFilters = selectedNode ? filteredNodes.some((node) => node.nodeId === selectedNode.nodeId) : true;
   const selectedNodeTunnels = selectedNode ? sortNodeTunnels(tunnels.filter((tunnel) => tunnel.nodeId === selectedNode.nodeId)) : [];
@@ -1177,7 +1209,7 @@ export default function App() {
                       <tbody>
                         {filteredNodes.length === 0 ? <tr><td colSpan={6}>当前筛选条件下暂无节点。</td></tr> : filteredNodes.map((node) => (
                           <tr key={node.nodeId} className={selectedNodeID === node.nodeId ? "clickable-row selected-row" : "clickable-row"} onClick={() => setSelectedNodeID((current) => current === node.nodeId ? null : node.nodeId)}>
-                            <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div></td>
+                            <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div>{node.isolated ? <div><span className="status-pill tone-danger">已隔离</span></div> : null}</td>
                             <td><span className={statusPillClass(node.status)}>{node.status}</span><div className="muted">{formatDate(node.lastSeenAt)}</div></td>
                             <td><div>{node.nodeRole ? roleLabel(node.nodeRole) : "-"}</div><div className="muted">{node.environment || "-"} / {node.trustLevel || "-"}</div></td>
                             <td><div>{node.activeTunnels}</div><div className="muted">负责人 {node.owner || "-"}</div></td>
@@ -1212,6 +1244,12 @@ export default function App() {
                         <p>lastSeenAt：<code>{formatDate(selectedNode.lastSeenAt)}</code></p>
                         <p>activeTunnels：<code>{String(selectedNode.activeTunnels)}</code></p>
                         <p>hostname / os / arch：<code>{nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} / {nodeMeta(selectedNode, "os")} / {nodeMeta(selectedNode, "arch")}</code></p>
+                        <p>隔离状态：{selectedNode.isolated ? <span className="status-pill tone-danger">已隔离</span> : <span className="status-pill tone-good">未隔离</span>}</p>
+                        <div className="actions-row">
+                          <button type="button" className="secondary" disabled={busyAction === 'isolate-node:' + selectedNode.nodeId || selectedNode.isolated} onClick={() => void setNodeIsolation(selectedNode, true)}>隔离节点</button>
+                          <button type="button" className="secondary" disabled={busyAction === 'release-node:' + selectedNode.nodeId || !selectedNode.isolated} onClick={() => void setNodeIsolation(selectedNode, false)}>解除隔离</button>
+                          <button type="button" className="secondary" onClick={() => void refreshDashboard(true, currentUser, false, auditFilterRef.current, nodeFilterRef.current)} disabled={busyAction === 'refresh'}>刷新当前视图</button>
+                        </div>
                       </div>
                       <div className="detail-grid">
                         <DetailItem label="role" value={selectedNode.nodeRole ? roleLabel(selectedNode.nodeRole) : "-"} />
@@ -1220,6 +1258,12 @@ export default function App() {
                         <DetailItem label="owner" value={selectedNode.owner || "-"} />
                         <DetailItem label="location" value={selectedNode.location || "-"} />
                         <DetailItem label="tags" value={formatTags(selectedNode.tags)} />
+                      </div>
+                      <div className="empty-state">
+                        <strong>运维提示</strong>
+                        <p>{selectedNode.isolated ? '已隔离：禁止新挂载 tunnel。' : '未隔离：允许正常挂载 tunnel。'}</p>
+                        <p>{selectedNode.status !== 'online' ? 'offline：当前不可通信。' : 'online：控制面可通信。'}</p>
+                        <p>{selectedNode.activeTunnels >= 3 ? '高承载：当前 activeTunnels 较多。' : '承载正常：当前 activeTunnels 处于较低水平。'}</p>
                       </div>
                       <div className="empty-state">
                         <strong>节点能力矩阵</strong>
@@ -1337,7 +1381,7 @@ export default function App() {
                               if (tunnelForm.type === "http") return node.supportsHTTP;
                               if (tunnelForm.type === "https") return node.supportsHTTPS ?? node.supportsHTTP;
                               return true;
-                            }).map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId})</option>)}
+                            }).map((node) => <option key={node.nodeId} value={node.nodeId}>{node.nodeName} ({node.nodeId}){node.status !== "online" ? " / offline" : ""}</option>)}
                           </select>
                         </label>
                         <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
@@ -1349,6 +1393,8 @@ export default function App() {
                         {tunnelForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelForm.tlsMode} onChange={(event) => setTunnelForm((current) => ({ ...current, tlsMode: event.target.value as "" | "edge_terminate" }))}><option value="edge_terminate">edge_terminate</option></select></label> : null}
                         {tunnelForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelForm.publicPort || "<公网端口>"}</code></div> : null}
                         {tunnelForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
+                        {tunnelFormNode?.status !== "online" ? <div className="form-note">当前选中节点 offline。按现有语义仍可查看或保留配置，但当前不可通信。</div> : null}
+                        {tunnelFormNode?.isolated ? <div className="form-note">当前选中节点已隔离，后端会拒绝新建 tunnel。</div> : null}
                         {tunnelForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
                         <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
                       </form>
@@ -2038,6 +2084,7 @@ function toNodeEditForm(node: NodeSummary): NodeEditForm {
     owner: node.owner || "",
     location: node.location || "",
     tags: (node.tags || []).join(", "),
+    isolated: Boolean(node.isolated),
   };
 }
 

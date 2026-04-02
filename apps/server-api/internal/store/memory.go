@@ -537,6 +537,7 @@ func hydrateNodeSummary(summary types.NodeSummary) types.NodeSummary {
 	summary.Owner = meta.Owner
 	summary.Location = meta.Location
 	summary.Tags = meta.Tags
+	summary.Isolated = meta.Isolated
 	return summary
 }
 
@@ -555,6 +556,7 @@ func parseNodeMetadata(input map[string]string) types.NodeMetadata {
 	meta.Owner = strings.TrimSpace(extra["owner"])
 	meta.Location = strings.TrimSpace(extra["location"])
 	meta.Tags = splitTags(extra["tags"])
+	meta.Isolated = strings.TrimSpace(extra["isolated"]) == "true"
 	return meta
 }
 
@@ -569,6 +571,7 @@ func mergeNodeMetadata(existing map[string]string, params UpdateNodeParams) map[
 	merged["owner"] = strings.TrimSpace(params.Owner)
 	merged["location"] = strings.TrimSpace(params.Location)
 	merged["tags"] = strings.Join(normalizeTags(params.Tags), ",")
+	merged["isolated"] = fmt.Sprintf("%t", params.Isolated)
 	return merged
 }
 

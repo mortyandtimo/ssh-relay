@@ -52,6 +52,7 @@ type NodeMetadata struct {
 	Owner       string            `json:"owner,omitempty"`
 	Location    string            `json:"location,omitempty"`
 	Tags        []string          `json:"tags,omitempty"`
+	Isolated    bool              `json:"isolated,omitempty"`
 	Extra       map[string]string `json:"-"`
 }
 
@@ -141,6 +142,7 @@ type NodeSummary struct {
 	Owner         string            `json:"owner,omitempty"`
 	Location      string            `json:"location,omitempty"`
 	Tags          []string          `json:"tags,omitempty"`
+	Isolated      bool              `json:"isolated,omitempty"`
 }
 
 type UpdateNodeRequest struct {
@@ -150,6 +152,7 @@ type UpdateNodeRequest struct {
 	Owner       string          `json:"owner,omitempty"`
 	Location    string          `json:"location,omitempty"`
 	Tags        []string        `json:"tags,omitempty"`
+	Isolated    bool            `json:"isolated,omitempty"`
 }
 
 type NodeListResponse struct {
@@ -167,6 +170,7 @@ type NodeOption struct {
 	SupportsHTTP   bool   `json:"supportsHTTP"`
 	SupportsHTTPS  bool   `json:"supportsHTTPS"`
 	SupportsSOCKS5 bool   `json:"supportsSOCKS5"`
+	Isolated       bool   `json:"isolated"`
 }
 
 type NodeOptionsResponse struct {

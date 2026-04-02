@@ -602,6 +602,55 @@ func TestTunnelHealthStatusDerivedFromNodeAndConfig(t *testing.T) {
 	}
 }
 
+func TestIsolatedNodeRejectsTunnelCreationUntilReleased(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-isolated", NodeName: "node-isolated", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, HTTPRelay: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+
+	isolateBody, _ := json.Marshal(types.UpdateNodeRequest{Isolated: true})
+	isolateReq := httptest.NewRequest(http.MethodPut, "/api/nodes/node-isolated", bytes.NewReader(isolateBody))
+	applyCookies(isolateReq, adminCookies)
+	isolateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(isolateRes, isolateReq)
+	if isolateRes.Code != http.StatusOK {
+		t.Fatalf("expected isolate 200, got %d", isolateRes.Code)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{"nodeId": "node-isolated", "name": "blocked-tunnel", "type": "tcp", "targetHost": "127.0.0.1", "targetPort": 8080, "publicPort": 18090, "status": "active"})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusBadRequest {
+		t.Fatalf("expected isolated create reject 400, got %d", createRes.Code)
+	}
+
+	releaseBody, _ := json.Marshal(types.UpdateNodeRequest{Isolated: false})
+	releaseReq := httptest.NewRequest(http.MethodPut, "/api/nodes/node-isolated", bytes.NewReader(releaseBody))
+	applyCookies(releaseReq, adminCookies)
+	releaseRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(releaseRes, releaseReq)
+	if releaseRes.Code != http.StatusOK {
+		t.Fatalf("expected release 200, got %d", releaseRes.Code)
+	}
+
+	retryReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(retryReq, adminCookies)
+	retryRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(retryRes, retryReq)
+	if retryRes.Code != http.StatusCreated {
+		t.Fatalf("expected create after release 201, got %d", retryRes.Code)
+	}
+}
+
 func TestNodeMetadataFilterAndUpdate(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"

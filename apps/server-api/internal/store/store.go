@@ -38,6 +38,7 @@ type UpdateNodeParams struct {
 	Owner       string
 	Location    string
 	Tags        []string
+	Isolated    bool
 }
 
 type Counts struct {
