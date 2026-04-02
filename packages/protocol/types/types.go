@@ -86,6 +86,15 @@ const (
 	TunnelHealthTargetUnreachable TunnelHealthStatus = "target_unreachable"
 )
 
+type TunnelProbeResult struct {
+	TunnelID    string    `json:"tunnelId"`
+	Success     bool      `json:"success"`
+	StatusCode  int       `json:"statusCode,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	ProbedAt    time.Time `json:"probedAt"`
+	TargetEntry string    `json:"targetEntry"`
+}
+
 type TunnelSpec struct {
 	ID              string             `json:"id"`
 	Name            string             `json:"name"`

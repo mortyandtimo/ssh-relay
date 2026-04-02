@@ -596,9 +596,23 @@ func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/tunnels/"))
+	pathValue := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/tunnels/"))
+	if pathValue == "" {
+		writeError(w, http.StatusBadRequest, "tunnel id is required")
+		return
+	}
+	parts := strings.Split(strings.Trim(pathValue, "/"), "/")
+	id := strings.TrimSpace(parts[0])
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "tunnel id is required")
+		return
+	}
+	if len(parts) == 2 && parts[1] == "probe" {
+		s.handleTunnelProbe(w, r, id)
+		return
+	}
+	if len(parts) > 1 {
+		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	switch r.Method {
@@ -692,6 +706,67 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut+", "+http.MethodDelete)
+	}
+}
+
+func (s *Server) handleTunnelProbe(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	tunnel, err := s.store.GetTunnel(r.Context(), id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	result, err := s.probeTunnel(r.Context(), tunnel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) probeTunnel(ctx context.Context, tunnel types.TunnelSpec) (types.TunnelProbeResult, error) {
+	entry, err := probeTunnelEntry(tunnel)
+	if err != nil {
+		return types.TunnelProbeResult{}, err
+	}
+	result := types.TunnelProbeResult{TunnelID: tunnel.ID, ProbedAt: time.Now().UTC(), TargetEntry: entry}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, entry, nil)
+	if err != nil {
+		result.Error = err.Error()
+		return result, nil
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		result.Error = err.Error()
+		return result, nil
+	}
+	defer resp.Body.Close()
+	result.StatusCode = resp.StatusCode
+	result.Success = resp.StatusCode >= 200 && resp.StatusCode < 400
+	if !result.Success {
+		result.Error = resp.Status
+	}
+	return result, nil
+}
+
+func probeTunnelEntry(tunnel types.TunnelSpec) (string, error) {
+	switch tunnel.Type {
+	case "http":
+		return fmt.Sprintf("http://82.156.236.104:%d", tunnel.PublicPort), nil
+	case "https":
+		if strings.TrimSpace(tunnel.Domain) == "" {
+			return "", errors.New("https tunnel requires domain for probe")
+		}
+		return "https://" + strings.TrimSpace(tunnel.Domain), nil
+	default:
+		return "", errors.New("probe only supports http and https tunnels")
 	}
 }
 

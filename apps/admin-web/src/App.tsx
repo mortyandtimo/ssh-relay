@@ -112,6 +112,15 @@ type RelayRuntimeSummary = {
   pools: RelayPoolSummary[];
 };
 
+type TunnelProbeResult = {
+  tunnelId: string;
+  success: boolean;
+  statusCode?: number;
+  error?: string;
+  probedAt: string;
+  targetEntry: string;
+};
+
 type TunnelForm = {
   nodeId: string;
   name: string;
@@ -232,6 +241,7 @@ export default function App() {
   const [expandedAuditID, setExpandedAuditID] = useState<number | null>(null);
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null);
   const [relayRuntime, setRelayRuntime] = useState<RelayRuntimeSummary | null>(null);
+  const [probeResults, setProbeResults] = useState<Record<string, TunnelProbeResult>>({});
   const [tunnelForm, setTunnelForm] = useState<TunnelForm>(initialTunnelForm);
   const [tunnelHealthFilter, setTunnelHealthFilter] = useState<TunnelHealthFilter>("all");
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
@@ -531,6 +541,7 @@ export default function App() {
     setAuditTotal(0);
     setMetrics(null);
     setRelayRuntime(null);
+    setProbeResults({});
     setTunnelForm(initialTunnelForm);
     setHasInitializedNodeId(false);
   }
@@ -733,6 +744,22 @@ export default function App() {
     }
   }
 
+  async function probeTunnel(tunnel: TunnelSpec) {
+    const actionKey = tunnel.id + ":probe";
+    setBusyAction(actionKey);
+    setError("");
+    setMessage("");
+    try {
+      const result = await requestJSON<TunnelProbeResult>("/api/tunnels/" + tunnel.id + "/probe", { method: "POST" });
+      setProbeResults((current) => ({ ...current, [tunnel.id]: result }));
+      setMessage(result.success ? "探测完成：入口可访问。" : "探测完成：入口不可访问。");
+    } catch (probeError) {
+      setError(probeError instanceof Error ? probeError.message : "探测失败");
+    } finally {
+      setBusyAction("");
+    }
+  }
+
   async function deleteTunnel(tunnel: TunnelSpec) {
     const actionKey = tunnel.id + ":delete";
     setBusyAction(actionKey);
@@ -826,6 +853,7 @@ export default function App() {
       updatedAt: "",
     };
   const selectedNode = selectedNodeID ? nodes.find((node) => node.nodeId === selectedNodeID) ?? null : null;
+  const selectedProbeResult = editingTunnelID ? probeResults[editingTunnelID] ?? null : null;
   const onlineNodes = nodes.filter((node) => node.status === "online").length;
   const activeTunnels = tunnels.filter((tunnel) => tunnel.status === "active").length;
   const filteredTunnels = tunnels.filter((tunnel) => matchesTunnelHealthFilter(tunnel, tunnelHealthFilter));
@@ -1304,6 +1332,17 @@ export default function App() {
                       </div>
                     ) : null}
 
+                    {selectedProbeResult ? (
+                      <div className="empty-state">
+                        <strong>本次探测结果</strong>
+                        <p>入口：<code>{selectedProbeResult.targetEntry}</code></p>
+                        <p>结果：<span className={selectedProbeResult.success ? "status-pill tone-good" : "status-pill tone-danger"}>{selectedProbeResult.success ? "成功" : "失败"}</span></p>
+                        <p>状态码：<code>{selectedProbeResult.statusCode ? String(selectedProbeResult.statusCode) : "-"}</code></p>
+                        <p>错误：<code>{selectedProbeResult.error || "-"}</code></p>
+                        <p>探测时间：<code>{formatDate(selectedProbeResult.probedAt)}</code></p>
+                      </div>
+                    ) : null}
+
                     {editingTunnelID !== null && tunnelEditForm?.type === "socks5" ? (
                       <div className="empty-state">
                         <strong>SOCKS5 最小能力说明</strong>
@@ -1338,6 +1377,7 @@ export default function App() {
                           <td>
                             <div className="actions-row">
                               <button type="button" className="secondary" onClick={() => beginTunnelEdit(tunnel)}>编辑</button>
+                              {(tunnel.type === "http" || tunnel.type === "https") ? <button type="button" className="secondary" disabled={busyAction === tunnel.id + ":probe"} onClick={() => void probeTunnel(tunnel)}>{busyAction === tunnel.id + ":probe" ? "探测中..." : "探测"}</button> : null}
                               <button type="button" disabled={busyAction === tunnel.id + ":active" || tunnel.status === "active"} onClick={() => void updateTunnelStatus(tunnel, "active")}>启用</button>
                               <button type="button" disabled={busyAction === tunnel.id + ":paused" || tunnel.status === "paused"} onClick={() => void updateTunnelStatus(tunnel, "paused")}>暂停</button>
                               <button type="button" className="danger" disabled={busyAction === tunnel.id + ":delete"} onClick={() => void deleteTunnel(tunnel)}>删除</button>

@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,6 +280,118 @@ func TestTunnelCRUDAndConflictHandling(t *testing.T) {
 	if missingRes.Code != http.StatusNotFound {
 		t.Fatalf("expected missing status 404, got %d", missingRes.Code)
 	}
+}
+
+func TestTunnelProbeSupportsHTTPAndHTTPS(t *testing.T) {
+	httpUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("http-ok"))
+	}))
+	defer httpUpstream.Close()
+	httpsUpstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer httpsUpstream.Close()
+
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	server.httpClient = &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: httpsUpstream.Client().Transport.(*http.Transport).TLSClientConfig}}
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	httpURL, _ := url.Parse(httpUpstream.URL)
+	httpsURL, _ := url.Parse(httpsUpstream.URL)
+	httpPort, _ := strconv.Atoi(strings.Split(httpURL.Host, ":")[1])
+	httpsPort, _ := strconv.Atoi(strings.Split(httpsURL.Host, ":")[1])
+
+	httpTunnel := types.TunnelSpec{ID: "probe-http", NodeID: "node-a", Name: "probe-http", Type: "http", Status: "active", PublicPort: httpPort, TargetHost: "127.0.0.1", TargetPort: 80}
+	httpsTunnel := types.TunnelSpec{ID: "probe-https", NodeID: "node-a", Name: "probe-https", Type: "https", Status: "active", Domain: httpsURL.Hostname(), TLSMode: "edge_terminate", PublicPort: httpsPort, TargetHost: "127.0.0.1", TargetPort: 443}
+	if _, err := server.store.CreateTunnel(context.Background(), httpTunnel); err != nil {
+		_ = err
+	}
+	if _, err := server.store.CreateTunnel(context.Background(), httpsTunnel); err != nil {
+		_ = err
+	}
+
+	httpEntry, err := probeTunnelEntry(httpTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpsEntry, err := probeTunnelEntry(httpsTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.httpClient = &http.Client{Timeout: 5 * time.Second, Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() == httpEntry {
+			return httpUpstream.Client().Transport.RoundTrip(mustCloneRequest(req, httpUpstream.URL))
+		}
+		if req.URL.String() == httpsEntry {
+			return httpsUpstream.Client().Transport.RoundTrip(mustCloneRequest(req, httpsUpstream.URL))
+		}
+		return nil, fmt.Errorf("unexpected probe target %s", req.URL.String())
+	})}
+
+	httpProbeReq := httptest.NewRequest(http.MethodPost, "/api/tunnels/probe-http/probe", nil)
+	applyCookies(httpProbeReq, adminCookies)
+	httpProbeRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(httpProbeRes, httpProbeReq)
+	if httpProbeRes.Code != http.StatusOK {
+		t.Fatalf("expected http probe 200, got %d", httpProbeRes.Code)
+	}
+	var httpOut types.TunnelProbeResult
+	if err := json.NewDecoder(httpProbeRes.Body).Decode(&httpOut); err != nil {
+		t.Fatal(err)
+	}
+	if !httpOut.Success || httpOut.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected http probe result: %+v", httpOut)
+	}
+
+	httpsProbeReq := httptest.NewRequest(http.MethodPost, "/api/tunnels/probe-https/probe", nil)
+	applyCookies(httpsProbeReq, adminCookies)
+	httpsProbeRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(httpsProbeRes, httpsProbeReq)
+	if httpsProbeRes.Code != http.StatusOK {
+		t.Fatalf("expected https probe 200, got %d", httpsProbeRes.Code)
+	}
+	var httpsOut types.TunnelProbeResult
+	if err := json.NewDecoder(httpsProbeRes.Body).Decode(&httpsOut); err != nil {
+		t.Fatal(err)
+	}
+	if !httpsOut.Success || httpsOut.StatusCode != http.StatusFound {
+		t.Fatalf("unexpected https probe result: %+v", httpsOut)
+	}
+}
+
+func TestTunnelProbeRejectsUnsupportedType(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+	if _, err := server.store.CreateTunnel(context.Background(), types.TunnelSpec{ID: "probe-tcp", NodeID: "node-a", Name: "probe-tcp", Type: "tcp", Status: "active", PublicPort: 10086, TargetHost: "127.0.0.1", TargetPort: 22}); err != nil {
+		_ = err
+	}
+	probeReq := httptest.NewRequest(http.MethodPost, "/api/tunnels/probe-tcp/probe", nil)
+	applyCookies(probeReq, adminCookies)
+	probeRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(probeRes, probeReq)
+	if probeRes.Code != http.StatusBadRequest {
+		t.Fatalf("expected tcp probe reject 400, got %d", probeRes.Code)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func mustCloneRequest(req *http.Request, target string) *http.Request {
+	clone := req.Clone(req.Context())
+	parsed, err := url.Parse(target)
+	if err != nil {
+		panic(err)
+	}
+	clone.URL = parsed
+	clone.Host = parsed.Host
+	return clone
 }
 
 func TestTunnelHealthStatusDerivedFromNodeAndConfig(t *testing.T) {
