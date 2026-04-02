@@ -1028,7 +1028,7 @@ export default function App() {
     };
   const selectedNode = selectedNodeID ? nodes.find((node) => node.nodeId === selectedNodeID) ?? null : null;
   const tunnelFormNode = allNodes.find((node) => node.nodeId === tunnelForm.nodeId) ?? null;
-  const filteredNodes = sortNodes(nodes.filter((node) => matchesNodeOpsFilters(node, nodeStatusFilter, nodeFilter.nodeRole, nodeFilter.environment, nodeCapabilityFilter, nodeFilter.owner, nodeFilter.tag)), nodeSortMode);
+  const filteredNodes = sortNodes(nodes.filter((node) => matchesNodeOpsFilters(node, nodeStatusFilter, nodeFilter.nodeRole, nodeFilter.environment, nodeCapabilityFilter, nodeFilter.owner, nodeFilter.tag)), tunnels, nodeSortMode);
   const selectedNodeVisibleInFilters = selectedNode ? filteredNodes.some((node) => node.nodeId === selectedNode.nodeId) : true;
   const selectedNodeTunnels = selectedNode ? sortNodeTunnels(tunnels.filter((tunnel) => tunnel.nodeId === selectedNode.nodeId)) : [];
   const selectedNodeProfile = selectedNode ? buildNodeLoadProfile(selectedNode, selectedNodeTunnels) : null;
@@ -2616,7 +2616,7 @@ function matchesNodeOpsFilters(
   return true;
 }
 
-function sortNodes(nodes: NodeSummary[], mode: NodeSortMode) {
+function sortNodes(nodes: NodeSummary[], tunnels: TunnelSpec[], mode: NodeSortMode) {
   const items = [...nodes];
   items.sort((left, right) => {
     if (mode === "name_asc") {
@@ -2632,6 +2632,29 @@ function sortNodes(nodes: NodeSummary[], mode: NodeSortMode) {
     const rightOffline = right.status === "online" ? 0 : 1;
     if (leftOffline !== rightOffline) {
       return rightOffline - leftOffline;
+    }
+    const leftIsolated = left.isolated ? 1 : 0;
+    const rightIsolated = right.isolated ? 1 : 0;
+    if (leftIsolated !== rightIsolated) {
+      return rightIsolated - leftIsolated;
+    }
+    const leftProfile = buildNodeLoadProfile(left, tunnels.filter((tunnel) => tunnel.nodeId === left.nodeId));
+    const rightProfile = buildNodeLoadProfile(right, tunnels.filter((tunnel) => tunnel.nodeId === right.nodeId));
+    const loadRank = (profile: ReturnType<typeof buildNodeLoadProfile>) => {
+      if (profile.loadState === "high_load") {
+        return 0;
+      }
+      return 1;
+    };
+    const leftLoadRank = loadRank(leftProfile);
+    const rightLoadRank = loadRank(rightProfile);
+    if (leftLoadRank !== rightLoadRank) {
+      return leftLoadRank - rightLoadRank;
+    }
+    const leftProblemCount = leftProfile.problemCount;
+    const rightProblemCount = rightProfile.problemCount;
+    if (leftProblemCount !== rightProblemCount) {
+      return rightProblemCount - leftProblemCount;
     }
     if (left.activeTunnels !== right.activeTunnels) {
       return right.activeTunnels - left.activeTunnels;
