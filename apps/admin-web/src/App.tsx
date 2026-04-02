@@ -1326,7 +1326,7 @@ export default function App() {
                         <tbody>
                           {filteredNodes.length === 0 ? <tr><td colSpan={6}>当前筛选条件下暂无节点。</td></tr> : filteredNodes.map((node) => (
                             <tr key={node.nodeId} className={selectedNodeID === node.nodeId ? "clickable-row selected-row" : "clickable-row"} onClick={() => setSelectedNodeID((current) => current === node.nodeId ? null : node.nodeId)}>
-                              <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div>{node.isolated ? <div><span className="status-pill tone-danger">已隔离</span></div> : null}</td>
+                              <td><strong>{node.nodeName}</strong><div className="muted">{node.nodeId}</div><div className="muted">{nodeAgentDeploymentLabel(node)}</div>{node.isolated ? <div><span className="status-pill tone-danger">已隔离</span></div> : null}</td>
                               <td><span className={statusPillClass(node.status)}>{node.status}</span><div className="muted">{formatDate(node.lastSeenAt)}</div></td>
                               <td><div>{node.nodeRole ? roleLabel(node.nodeRole) : "-"}</div><div className="muted">{node.environment || "-"} / {node.trustLevel || "-"}</div></td>
                               <td><div>{node.activeTunnels}</div><div className="muted">负责人 {node.owner || "-"}</div></td>
@@ -1381,6 +1381,8 @@ export default function App() {
                             <FactRow label="最后在线" value={<code>{formatDate(selectedNode.lastSeenAt)}</code>} />
                             <FactRow label="当前承载" value={<code>{String(selectedNode.activeTunnels)} 个 tunnel</code>} />
                             <FactRow label="主机信息" value={<code>{nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} / {nodeMeta(selectedNode, "os")} / {nodeMeta(selectedNode, "arch")}</code>} />
+                            <FactRow label="agent 部署" value={<code>{nodeAgentDeploymentLabel(selectedNode)}</code>} />
+                            <FactRow label="service unit" value={<code>{nodeMeta(selectedNode, "serviceUnit")}</code>} />
                           </div>
                           <div className="actions-row actions-row-strong">
                             <button type="button" className="secondary" disabled={busyAction === 'isolate-node:' + selectedNode.nodeId || selectedNode.isolated} onClick={() => void setNodeIsolation(selectedNode, true)}>隔离节点</button>
@@ -2578,6 +2580,15 @@ function roleLabel(role: string) {
 function nodeMeta(node: NodeSummary, key: string, fallback = "-") {
   const value = node.metadata?.[key];
   return value && value.trim() ? value : fallback;
+}
+
+function nodeAgentDeploymentLabel(node: NodeSummary) {
+  const mode = nodeMeta(node, "deploymentMode", "manual");
+  const unit = nodeMeta(node, "serviceUnit", "-");
+  if (mode === "managed") {
+    return unit !== "-" ? "systemd 常驻: " + unit : "systemd 常驻";
+  }
+  return "手工/临时 agent";
 }
 
 function formatDate(value: string) {

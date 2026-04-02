@@ -62,6 +62,9 @@ func main() {
 	udpRelayURL := config.GetEnv("RELAY_UDP_CONNECT_URL", deriveUDPRelayURL(baseURL))
 	nodeName := config.GetEnv("CLIENT_NODE_NAME", defaultNodeName())
 	nodeID := config.GetEnv("CLIENT_NODE_ID", "")
+	deploymentMode := config.GetEnv("CLIENT_DEPLOYMENT_MODE", "managed")
+	serviceUnit := config.GetEnv("CLIENT_SERVICE_UNIT", "")
+	instanceProfile := config.GetEnv("CLIENT_INSTANCE_PROFILE", "")
 	heartbeatEvery := config.GetDurationEnvSeconds("AGENT_HEARTBEAT_INTERVAL", 30)
 	reversePoolSize := config.GetIntEnv("AGENT_REVERSE_POOL_SIZE", defaultReversePoolSize)
 	if reversePoolSize < 1 {
@@ -69,7 +72,7 @@ func main() {
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	registeredID, err := register(client, baseURL, nodeID, nodeName)
+	registeredID, err := register(client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -123,7 +126,7 @@ func main() {
 	}
 }
 
-func register(client *http.Client, baseURL, nodeID, nodeName string) (string, error) {
+func register(client *http.Client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile string) (string, error) {
 	payload := types.NodeRegisterRequest{
 		NodeID:       nodeID,
 		NodeName:     nodeName,
@@ -136,9 +139,13 @@ func register(client *http.Client, baseURL, nodeID, nodeName string) (string, er
 			SOCKS5Connect: true,
 		},
 		Metadata: map[string]string{
-			"hostname": defaultNodeName(),
-			"os":       runtime.GOOS,
-			"arch":     runtime.GOARCH,
+			"hostname":         defaultNodeName(),
+			"os":               runtime.GOOS,
+			"arch":             runtime.GOARCH,
+			"deploymentMode":   strings.TrimSpace(deploymentMode),
+			"serviceUnit":      strings.TrimSpace(serviceUnit),
+			"instanceProfile":  strings.TrimSpace(instanceProfile),
+			"instanceManaged":  fmt.Sprintf("%t", strings.TrimSpace(serviceUnit) != ""),
 		},
 	}
 	body, err := json.Marshal(payload)

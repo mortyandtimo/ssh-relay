@@ -1,14 +1,14 @@
 [Unit]
-Description=Cloud Relay Platform Client Agent (default compatibility wrapper)
+Description=Cloud Relay Platform Client Agent (%i)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/cloud-relay-platform
-EnvironmentFile=/etc/cloud-relay-platform/client-agent.env
-Environment=CLIENT_SERVICE_UNIT=cloud-relay-client-agent.service
-Environment=CLIENT_INSTANCE_PROFILE=default
+EnvironmentFile=/etc/cloud-relay-platform/client-agent/%i.env
+Environment=CLIENT_SERVICE_UNIT=cloud-relay-client-agent@%i.service
+Environment=CLIENT_INSTANCE_PROFILE=%i
 Environment=CLIENT_DEPLOYMENT_MODE=managed
 ExecStart=/opt/cloud-relay-platform/bin/client-agent
 Restart=always
