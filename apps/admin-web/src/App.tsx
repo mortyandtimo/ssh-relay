@@ -1224,28 +1224,28 @@ export default function App() {
                 <section className="subpanel">
                   <div className="section-head compact-head">
                     <div>
-                      <h3>节点负载与承载信号</h3>
-                      <span className="muted-line">统一观察哪些节点高承载、哪些节点空闲、哪些节点挂了异常入口，为后续人工编排提供依据。</span>
+                      <h3>当前已加载节点的负载与承载信号</h3>
+                      <span className="muted-line">本区块只基于当前已加载的节点数据派生，不代表全局全部节点态势；用于当前视图下的人工编排判断。</span>
                     </div>
                   </div>
                   <div className="signal-strip">
-                    <SignalCard label="高承载节点" value={overloadedNodes.length === 0 ? "无" : String(overloadedNodes.length)} />
-                    <SignalCard label="空闲节点" value={idleNodes.length === 0 ? "无" : String(idleNodes.length)} />
-                    <SignalCard label="异常节点" value={nodesWithProblemTunnels.length === 0 ? "无" : String(nodesWithProblemTunnels.length)} />
-                    <SignalCard label="最高承载节点" value={highestLoadNode ? highestLoadNode.nodeName + " / " + highestLoadNode.activeTunnels : "-"} />
+                    <SignalCard label="已加载高承载节点" value={overloadedNodes.length === 0 ? "无" : String(overloadedNodes.length)} />
+                    <SignalCard label="已加载空闲节点" value={idleNodes.length === 0 ? "无" : String(idleNodes.length)} />
+                    <SignalCard label="已加载异常节点" value={nodesWithProblemTunnels.length === 0 ? "无" : String(nodesWithProblemTunnels.length)} />
+                    <SignalCard label="已加载范围内最高承载节点" value={highestLoadNode ? highestLoadNode.nodeName + " / " + highestLoadNode.activeTunnels : "-"} />
                   </div>
                   <div className="spotlight-grid compact-cards load-signal-grid">
                     {overloadedNodes.length > 0 ? overloadedNodes.slice(0, 3).map((node) => {
                       const profile = buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId));
-                      return <article key={node.nodeId} className="spotlight-card compact-signal-card"><strong>{node.nodeName}</strong><span className="muted-line">高承载 / {profile.activeCount} active / {profile.protocolSummary}</span></article>;
-                    }) : <article className="spotlight-card compact-signal-card"><strong>当前无高承载节点</strong><span className="muted-line">暂无节点达到高承载阈值。</span></article>}
+                      return <article key={node.nodeId} className="spotlight-card compact-signal-card"><strong>{node.nodeName}</strong><span className="muted-line">已加载范围内高承载 / {profile.activeCount} active / {profile.protocolSummary}</span></article>;
+                    }) : <article className="spotlight-card compact-signal-card"><strong>当前已加载范围内无高承载节点</strong><span className="muted-line">在当前已加载节点里，暂无节点达到高承载阈值。</span></article>}
                     {nodesWithProblemTunnels.length > 0 ? nodesWithProblemTunnels.slice(0, 3).map((node) => {
                       const profile = buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId));
-                      return <article key={node.nodeId + ":problem"} className="spotlight-card compact-signal-card problem-card"><strong>{node.nodeName}</strong><span className="muted-line">异常入口 {profile.problemCount} 个 / {profile.protocolSummary}</span></article>;
-                    }) : <article className="spotlight-card compact-signal-card"><strong>当前无异常承载节点</strong><span className="muted-line">没有节点承载异常 tunnel。</span></article>}
+                      return <article key={node.nodeId + ":problem"} className="spotlight-card compact-signal-card problem-card"><strong>{node.nodeName}</strong><span className="muted-line">已加载范围内异常入口 {profile.problemCount} 个 / {profile.protocolSummary}</span></article>;
+                    }) : <article className="spotlight-card compact-signal-card"><strong>当前已加载范围内无异常承载节点</strong><span className="muted-line">在当前已加载节点里，没有节点承载异常 tunnel。</span></article>}
                     {idleNodes.length > 0 ? idleNodes.slice(0, 3).map((node) => (
-                      <article key={node.nodeId + ":idle"} className="spotlight-card compact-signal-card"><strong>{node.nodeName}</strong><span className="muted-line">空闲 / 暂无 active tunnel</span></article>
-                    )) : <article className="spotlight-card compact-signal-card"><strong>当前无空闲节点</strong><span className="muted-line">所有节点都有一定承载。</span></article>}
+                      <article key={node.nodeId + ":idle"} className="spotlight-card compact-signal-card"><strong>{node.nodeName}</strong><span className="muted-line">已加载范围内空闲 / 暂无 active tunnel</span></article>
+                    )) : <article className="spotlight-card compact-signal-card"><strong>当前已加载范围内无空闲节点</strong><span className="muted-line">在当前已加载节点里，所有节点都有一定承载。</span></article>}
                   </div>
                 </section>
                 {relayRuntime?.pools?.length ? (
@@ -2696,6 +2696,9 @@ function explainTunnelPlacement(tunnel: TunnelSpec, nodes: NodeSummary[], allTun
     if (currentNode.status !== "online") {
       notes.push("当前绑定节点离线，归属不合适。");
     }
+    if (currentNode.isolated) {
+      notes.push("当前绑定节点已隔离，不适合作为后续新增挂载归属。");
+    }
     if (!supportsTunnelType(currentNode, tunnel.type)) {
       notes.push("当前绑定节点 capability 缺失，归属不合适。");
     }
@@ -2713,6 +2716,7 @@ function explainTunnelPlacement(tunnel: TunnelSpec, nodes: NodeSummary[], allTun
   const alternatives = nodes
     .filter((node) => node.nodeId !== tunnel.nodeId)
     .filter((node) => node.status === "online")
+    .filter((node) => !node.isolated)
     .filter((node) => supportsTunnelType(node, tunnel.type))
     .map((node) => ({ node, profile: buildNodeLoadProfile(node, allTunnels.filter((item) => item.nodeId === node.nodeId)) }))
     .sort((left, right) => {
@@ -2726,12 +2730,12 @@ function explainTunnelPlacement(tunnel: TunnelSpec, nodes: NodeSummary[], allTun
 
   const bestAlternative = alternatives[0] || null;
   const currentNodeAssessment = currentNode
-    ? nodeAgentDeploymentLabel(currentNode) + " / " + nodeLoadStateLabel(currentProfile?.loadState || "normal") + " / " + (supportsTunnelType(currentNode, tunnel.type) ? "capability 满足" : "capability 不匹配")
+    ? nodeAgentDeploymentLabel(currentNode) + " / " + (currentNode.isolated ? "已隔离" : "未隔离") + " / " + nodeLoadStateLabel(currentProfile?.loadState || "normal") + " / " + (supportsTunnelType(currentNode, tunnel.type) ? "capability 满足" : "capability 不匹配")
     : "未找到当前节点";
   const requirementSummary = tunnelRequirementSummary(tunnel, nodes);
   const alternativeSummary = bestAlternative
     ? bestAlternative.node.nodeName + "（" + bestAlternative.node.nodeId + "，" + nodeLoadStateLabel(bestAlternative.profile.loadState) + "，" + bestAlternative.profile.protocolSummary + "）"
-    : "暂无更合适的在线替代节点";
+    : "暂无更合适的在线且未隔离且能力满足的替代节点";
   const summary = currentNode
     ? tunnel.name + " 当前绑定在 " + currentNode.nodeName + "（" + currentNode.nodeId + "）"
     : tunnel.name + " 当前绑定节点不可用";
