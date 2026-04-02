@@ -924,6 +924,137 @@ func TestNodeOptionsExposeSOCKS5Capability(t *testing.T) {
 	}
 }
 
+func TestHTTPSTunnelRequiresUniqueDomainOnCreate(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "https-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, HTTPRelay: true, HTTPSRelay: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-https-a",
+		"nodeId":     registerOut.NodeID,
+		"name":       "https-a",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 7710,
+		"publicPort": 10443,
+		"domain":     "WWW.EXAMPLE.COM",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create 201, got %d", createRes.Code)
+	}
+	var created types.TunnelSpec
+	if err := json.NewDecoder(createRes.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Domain != "www.example.com" {
+		t.Fatalf("expected normalized lowercase domain, got %q", created.Domain)
+	}
+
+	duplicateBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-https-b",
+		"nodeId":     registerOut.NodeID,
+		"name":       "https-b",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 7711,
+		"publicPort": 10444,
+		"domain":     "www.example.com",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+	})
+	duplicateReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(duplicateBody))
+	applyCookies(duplicateReq, adminCookies)
+	duplicateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(duplicateRes, duplicateReq)
+	if duplicateRes.Code != http.StatusConflict {
+		t.Fatalf("expected duplicate create 409, got %d", duplicateRes.Code)
+	}
+}
+
+func TestHTTPSTunnelRequiresUniqueDomainOnUpdate(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "https-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, HTTPRelay: true, HTTPSRelay: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, item := range []struct {
+		id         string
+		name       string
+		domain     string
+		publicPort int
+	}{
+		{id: "tunnel-https-a", name: "https-a", domain: "alpha.example.com", publicPort: 10443},
+		{id: "tunnel-https-b", name: "https-b", domain: "beta.example.com", publicPort: 10444},
+	} {
+		body, _ := json.Marshal(map[string]any{
+			"id":         item.id,
+			"nodeId":     registerOut.NodeID,
+			"name":       item.name,
+			"type":       "https",
+			"targetHost": "127.0.0.1",
+			"targetPort": 7710,
+			"publicPort": item.publicPort,
+			"domain":     item.domain,
+			"tlsMode":    "edge_terminate",
+			"status":     "active",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusCreated {
+			t.Fatalf("expected create 201, got %d", res.Code)
+		}
+	}
+
+	updateBody, _ := json.Marshal(map[string]any{
+		"nodeId":     registerOut.NodeID,
+		"name":       "https-b",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 7710,
+		"publicPort": 10444,
+		"domain":     "alpha.example.com",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+	})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/tunnels/tunnel-https-b", bytes.NewReader(updateBody))
+	applyCookies(updateReq, adminCookies)
+	updateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(updateRes, updateReq)
+	if updateRes.Code != http.StatusConflict {
+		t.Fatalf("expected duplicate update 409, got %d", updateRes.Code)
+	}
+}
 func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 	runtimeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(types.RelayRuntimeSummary{

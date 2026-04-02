@@ -718,6 +718,8 @@ export default function App() {
           targetHost: tunnel.targetHost,
           targetPort: tunnel.targetPort,
           publicPort: tunnel.publicPort,
+          domain: tunnel.domain || undefined,
+          tlsMode: tunnel.type === "https" ? (tunnel.tlsMode || "edge_terminate") : undefined,
           status,
         }),
       });
@@ -1156,11 +1158,11 @@ export default function App() {
                         <label><span>名称</span><input value={tunnelForm.name} onChange={(event) => setTunnelForm((current) => ({ ...current, name: event.target.value }))} required /></label>
                         <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
-                        <label><span>公网端口</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
+                        <label><span>{tunnelForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>域名</span><input value={tunnelForm.domain} onChange={(event) => setTunnelForm((current) => ({ ...current, domain: event.target.value }))} placeholder="例如 app.example.com" /></label> : null}
                         {tunnelForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelForm.tlsMode} onChange={(event) => setTunnelForm((current) => ({ ...current, tlsMode: event.target.value as "" | "edge_terminate" }))}><option value="edge_terminate">edge_terminate</option></select></label> : null}
                         {tunnelForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelForm.publicPort || "<公网端口>"}</code></div> : null}
-                        {tunnelForm.type === "https" ? <div className="form-note">HTTPS 最小版使用单域名 + 边缘 TLS 终止。若已接好证书与 443 入口，访问方式为 <code>https://{tunnelForm.domain || "<你的域名>"}</code></div> : null}
+                        {tunnelForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
                         {tunnelForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
                         <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
                       </form>
@@ -1185,11 +1187,11 @@ export default function App() {
                           <label><span>名称</span><input value={tunnelEditForm.name} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, name: event.target.value } : current)} required /></label>
                           <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                           <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
-                          <label><span>公网端口</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
+                          <label><span>{tunnelEditForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
                           {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>域名</span><input value={tunnelEditForm.domain} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, domain: event.target.value } : current)} placeholder="例如 app.example.com" /></label> : null}
                           {tunnelEditForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelEditForm.tlsMode} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, tlsMode: event.target.value } : current)}><option value="edge_terminate">edge_terminate</option></select></label> : null}
                           {tunnelEditForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelEditForm.publicPort || "<公网端口>"}</code></div> : null}
-                          {tunnelEditForm.type === "https" ? <div className="form-note">HTTPS 最小版使用单域名 + 边缘 TLS 终止。若已接好证书与 443 入口，访问方式为 <code>https://{tunnelEditForm.domain || "<你的域名>"}</code></div> : null}
+                          {tunnelEditForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelEditForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
                           {tunnelEditForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
                           <div className="detail-grid readonly-grid">
                             <DetailItem label="nodeId" value={tunnelEditForm.nodeId} />
@@ -1487,7 +1489,7 @@ function tunnelTargetLabel(tunnel: TunnelSpec) {
     return "发布 " + tunnel.targetHost + ":" + tunnel.targetPort + " 的 Web/API 服务";
   }
   if (tunnel.type === "https") {
-    return "TLS 终止后转发到 " + tunnel.targetHost + ":" + tunnel.targetPort + (tunnel.domain ? "（域名 " + tunnel.domain + "）" : "（待绑定域名）");
+    return "标准 443 入口由 Nginx 终止 TLS，再转发到 relay-https，最终到达 " + tunnel.targetHost + ":" + tunnel.targetPort + (tunnel.domain ? "（域名 " + tunnel.domain + "）" : "（待绑定域名）");
   }
   return tunnel.targetHost + ":" + tunnel.targetPort;
 }

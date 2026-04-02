@@ -566,6 +566,14 @@ func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
+		if err := s.ensureHTTPSDomainUnique(r.Context(), spec, ""); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, store.ErrConflict) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err.Error())
+			return
+		}
 		if spec.Metadata == nil {
 			spec.Metadata = map[string]string{}
 		}
@@ -631,6 +639,14 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 			status := http.StatusBadRequest
 			if errors.Is(err, store.ErrNotFound) {
 				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		if err := s.ensureHTTPSDomainUnique(r.Context(), spec, id); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, store.ErrConflict) {
+				status = http.StatusConflict
 			}
 			writeError(w, status, err.Error())
 			return
@@ -856,10 +872,10 @@ func (s *Server) deriveTunnelHealth(ctx context.Context, tunnel types.TunnelSpec
 	if tunnel.Type == "socks5" && !node.summary.Capabilities.SOCKS5Connect {
 		return types.TunnelHealthCapabilityMissing
 	}
-	if tunnel.Type == "http" && !node.summary.Capabilities.HTTPRelay {
+	if (tunnel.Type == "http" || tunnel.Type == "https") && !node.summary.Capabilities.HTTPRelay {
 		return types.TunnelHealthCapabilityMissing
 	}
-	if tunnel.Type == "http" {
+	if tunnel.Type == "http" || tunnel.Type == "https" {
 		if status, ok := reachability[httpReachabilityMetricKey(tunnel.NodeID, tunnel.PublicPort)]; ok && status == types.TunnelHealthTargetUnreachable {
 			return types.TunnelHealthTargetUnreachable
 		}
@@ -874,6 +890,8 @@ func isTunnelMisconfigured(tunnel types.TunnelSpec) bool {
 	switch tunnel.Type {
 	case "", "tcp", "http":
 		return strings.TrimSpace(tunnel.TargetHost) == "" || tunnel.TargetPort <= 0
+	case "https":
+		return strings.TrimSpace(tunnel.TargetHost) == "" || tunnel.TargetPort <= 0 || strings.TrimSpace(tunnel.Domain) == "" || strings.TrimSpace(tunnel.TLSMode) != "edge_terminate"
 	case "socks5":
 		return strings.TrimSpace(tunnel.TargetHost) != "socks5" || tunnel.TargetPort != 1080
 	default:
@@ -1220,6 +1238,7 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 		if spec.Domain == "" {
 			return types.TunnelSpec{}, errors.New("https tunnel requires domain")
 		}
+		spec.Domain = strings.ToLower(spec.Domain)
 		spec.TLSMode = strings.TrimSpace(spec.TLSMode)
 		if spec.TLSMode == "" {
 			spec.TLSMode = "edge_terminate"
@@ -1249,6 +1268,29 @@ func (s *Server) ensureTunnelNodeCapability(ctx context.Context, nodeID, tunnelT
 	}
 	if (tunnelType == "http" || tunnelType == "https") && !node.Capabilities.HTTPRelay {
 		return errors.New("selected node does not support http relay")
+	}
+	return nil
+}
+
+func (s *Server) ensureHTTPSDomainUnique(ctx context.Context, spec types.TunnelSpec, excludeID string) error {
+	if spec.Type != "https" {
+		return nil
+	}
+	domain := strings.ToLower(strings.TrimSpace(spec.Domain))
+	if domain == "" {
+		return errors.New("https tunnel requires domain")
+	}
+	items, err := s.store.ListTunnels(ctx, store.TunnelFilter{Type: "https"})
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if item.ID == excludeID {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(item.Domain), domain) {
+			return fmt.Errorf("%w: https domain %s is already used by tunnel %s", store.ErrConflict, domain, item.ID)
+		}
 	}
 	return nil
 }
