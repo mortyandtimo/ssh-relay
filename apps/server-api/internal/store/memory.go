@@ -499,6 +499,11 @@ func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {
 	if tunnel.Metadata == nil {
 		tunnel.Metadata = map[string]string{}
 	}
+	if tunnel.ProbePath == "" {
+		tunnel.ProbePath = tunnel.Metadata["probePath"]
+	} else {
+		tunnel.Metadata["probePath"] = tunnel.ProbePath
+	}
 	return tunnel
 }
 

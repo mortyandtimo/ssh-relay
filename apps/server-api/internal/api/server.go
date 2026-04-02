@@ -757,17 +757,29 @@ func (s *Server) probeTunnel(ctx context.Context, tunnel types.TunnelSpec) (type
 }
 
 func probeTunnelEntry(tunnel types.TunnelSpec) (string, error) {
+	probePath := normalizeProbePath(tunnel.ProbePath)
 	switch tunnel.Type {
 	case "http":
-		return fmt.Sprintf("http://82.156.236.104:%d", tunnel.PublicPort), nil
+		return fmt.Sprintf("http://82.156.236.104:%d%s", tunnel.PublicPort, probePath), nil
 	case "https":
 		if strings.TrimSpace(tunnel.Domain) == "" {
 			return "", errors.New("https tunnel requires domain for probe")
 		}
-		return "https://" + strings.TrimSpace(tunnel.Domain), nil
+		return "https://" + strings.TrimSpace(tunnel.Domain) + probePath, nil
 	default:
 		return "", errors.New("probe only supports http and https tunnels")
 	}
+}
+
+func normalizeProbePath(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	return value
 }
 
 func (s *Server) handleServerMetrics(w http.ResponseWriter, r *http.Request) {
@@ -1305,6 +1317,7 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 		}
 		spec.Domain = strings.TrimSpace(spec.Domain)
 		spec.TLSMode = ""
+		spec.ProbePath = normalizeProbePath(spec.ProbePath)
 	case "https":
 		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {
 			return types.TunnelSpec{}, errors.New("https tunnel requires targetHost and targetPort")
@@ -1321,6 +1334,7 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 		if spec.TLSMode != "edge_terminate" {
 			return types.TunnelSpec{}, errors.New("unsupported https tlsMode")
 		}
+		spec.ProbePath = normalizeProbePath(spec.ProbePath)
 	case "socks5":
 		spec.TargetHost = "socks5"
 		spec.TargetPort = 1080

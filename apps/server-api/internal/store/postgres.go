@@ -323,6 +323,7 @@ func (s *PostgresStore) GetTunnel(ctx context.Context, id string) (types.TunnelS
 	if nodeID != "" {
 		item.Metadata["nodeId"] = nodeID
 	}
+	item.ProbePath = item.Metadata["probePath"]
 	return item, nil
 }
 
@@ -418,6 +419,7 @@ func (s *PostgresStore) ListTunnels(ctx context.Context, filter TunnelFilter) ([
 		if nodeID != "" {
 			item.Metadata["nodeId"] = nodeID
 		}
+		item.ProbePath = item.Metadata["probePath"]
 		items = append(items, item)
 	}
 	return items, rows.Err()

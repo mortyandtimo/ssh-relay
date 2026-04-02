@@ -83,6 +83,7 @@ type TunnelSpec = {
   publicPort: number;
   domain?: string;
   tlsMode?: string;
+  probePath?: string;
   status: string;
   healthStatus?: TunnelHealthStatus;
 };
@@ -130,6 +131,7 @@ type TunnelForm = {
   publicPort: string;
   domain: string;
   tlsMode: "" | "edge_terminate";
+  probePath: string;
 };
 
 type TunnelEditForm = {
@@ -141,6 +143,7 @@ type TunnelEditForm = {
   publicPort: string;
   domain: string;
   tlsMode: string;
+  probePath: string;
   status: string;
   type: string;
   transportPolicy: string;
@@ -200,6 +203,7 @@ const initialTunnelForm: TunnelForm = {
   publicPort: "",
   domain: "",
   tlsMode: "",
+  probePath: "/",
 };
 
 const initialAuditFilter: AuditFilterState = {
@@ -667,6 +671,7 @@ export default function App() {
           publicPort: Number(tunnelForm.publicPort),
           domain: tunnelForm.domain || undefined,
           tlsMode: tunnelForm.type === "https" ? (tunnelForm.tlsMode || "edge_terminate") : undefined,
+          probePath: tunnelForm.type === "http" || tunnelForm.type === "https" ? tunnelForm.probePath : undefined,
           status: "active",
         }),
       });
@@ -702,6 +707,7 @@ export default function App() {
           publicPort: Number(tunnelEditForm.publicPort),
           domain: tunnelEditForm.domain || undefined,
           tlsMode: tunnelEditForm.type === "https" ? (tunnelEditForm.tlsMode || "edge_terminate") : undefined,
+          probePath: tunnelEditForm.type === "http" || tunnelEditForm.type === "https" ? tunnelEditForm.probePath : undefined,
           status: tunnelEditForm.status,
         }),
       });
@@ -732,6 +738,7 @@ export default function App() {
           publicPort: tunnel.publicPort,
           domain: tunnel.domain || undefined,
           tlsMode: tunnel.type === "https" ? (tunnel.tlsMode || "edge_terminate") : undefined,
+          probePath: tunnel.type === "http" || tunnel.type === "https" ? tunnel.probePath || "/" : undefined,
           status,
         }),
       });
@@ -1226,6 +1233,7 @@ export default function App() {
                         <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
                         <label><span>{tunnelForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>域名</span><input value={tunnelForm.domain} onChange={(event) => setTunnelForm((current) => ({ ...current, domain: event.target.value }))} placeholder="例如 app.example.com" /></label> : null}
+                        {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>probePath</span><input value={tunnelForm.probePath} onChange={(event) => setTunnelForm((current) => ({ ...current, probePath: event.target.value }))} placeholder="默认 /" /></label> : null}
                         {tunnelForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelForm.tlsMode} onChange={(event) => setTunnelForm((current) => ({ ...current, tlsMode: event.target.value as "" | "edge_terminate" }))}><option value="edge_terminate">edge_terminate</option></select></label> : null}
                         {tunnelForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelForm.publicPort || "<公网端口>"}</code></div> : null}
                         {tunnelForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
@@ -1336,6 +1344,7 @@ export default function App() {
                       <div className="empty-state">
                         <strong>本次探测结果</strong>
                         <p>入口：<code>{selectedProbeResult.targetEntry}</code></p>
+                        <p>完整探测地址：<code>{selectedProbeResult.targetEntry}</code></p>
                         <p>结果：<span className={selectedProbeResult.success ? "status-pill tone-good" : "status-pill tone-danger"}>{selectedProbeResult.success ? "成功" : "失败"}</span></p>
                         <p>状态码：<code>{selectedProbeResult.statusCode ? String(selectedProbeResult.statusCode) : "-"}</code></p>
                         <p>错误：<code>{selectedProbeResult.error || "-"}</code></p>
@@ -1727,6 +1736,7 @@ function toTunnelEditForm(tunnel: TunnelSpec): TunnelEditForm {
     publicPort: String(tunnel.publicPort),
     domain: tunnel.domain || "",
     tlsMode: tunnel.tlsMode || "",
+    probePath: tunnel.probePath || "/",
     status: tunnel.status,
     type: tunnel.type,
     transportPolicy: tunnel.transportPolicy,

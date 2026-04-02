@@ -106,6 +106,7 @@ type TunnelSpec struct {
 	PublicPort      int                `json:"publicPort,omitempty"`
 	Domain          string             `json:"domain,omitempty"`
 	TLSMode         string             `json:"tlsMode,omitempty"`
+	ProbePath       string             `json:"probePath,omitempty"`
 	Status          string             `json:"status"`
 	HealthStatus    TunnelHealthStatus `json:"healthStatus,omitempty"`
 	Metadata        map[string]string  `json:"metadata,omitempty"`

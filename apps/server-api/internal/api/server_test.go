@@ -289,7 +289,11 @@ func TestTunnelProbeSupportsHTTPAndHTTPS(t *testing.T) {
 	}))
 	defer httpUpstream.Close()
 	httpsUpstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusFound)
+		if r.URL.Path != "/admin/" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer httpsUpstream.Close()
 
@@ -303,8 +307,8 @@ func TestTunnelProbeSupportsHTTPAndHTTPS(t *testing.T) {
 	httpPort, _ := strconv.Atoi(strings.Split(httpURL.Host, ":")[1])
 	httpsPort, _ := strconv.Atoi(strings.Split(httpsURL.Host, ":")[1])
 
-	httpTunnel := types.TunnelSpec{ID: "probe-http", NodeID: "node-a", Name: "probe-http", Type: "http", Status: "active", PublicPort: httpPort, TargetHost: "127.0.0.1", TargetPort: 80}
-	httpsTunnel := types.TunnelSpec{ID: "probe-https", NodeID: "node-a", Name: "probe-https", Type: "https", Status: "active", Domain: httpsURL.Hostname(), TLSMode: "edge_terminate", PublicPort: httpsPort, TargetHost: "127.0.0.1", TargetPort: 443}
+	httpTunnel := types.TunnelSpec{ID: "probe-http", NodeID: "node-a", Name: "probe-http", Type: "http", Status: "active", PublicPort: httpPort, ProbePath: "", TargetHost: "127.0.0.1", TargetPort: 80}
+	httpsTunnel := types.TunnelSpec{ID: "probe-https", NodeID: "node-a", Name: "probe-https", Type: "https", Status: "active", Domain: httpsURL.Hostname(), TLSMode: "edge_terminate", ProbePath: "/admin/", PublicPort: httpsPort, TargetHost: "127.0.0.1", TargetPort: 443}
 	if _, err := server.store.CreateTunnel(context.Background(), httpTunnel); err != nil {
 		_ = err
 	}
@@ -344,6 +348,9 @@ func TestTunnelProbeSupportsHTTPAndHTTPS(t *testing.T) {
 	if !httpOut.Success || httpOut.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected http probe result: %+v", httpOut)
 	}
+	if httpOut.TargetEntry != fmt.Sprintf("http://82.156.236.104:%d/", httpPort) {
+		t.Fatalf("expected default probePath / in http targetEntry, got %q", httpOut.TargetEntry)
+	}
 
 	httpsProbeReq := httptest.NewRequest(http.MethodPost, "/api/tunnels/probe-https/probe", nil)
 	applyCookies(httpsProbeReq, adminCookies)
@@ -356,8 +363,11 @@ func TestTunnelProbeSupportsHTTPAndHTTPS(t *testing.T) {
 	if err := json.NewDecoder(httpsProbeRes.Body).Decode(&httpsOut); err != nil {
 		t.Fatal(err)
 	}
-	if !httpsOut.Success || httpsOut.StatusCode != http.StatusFound {
+	if !httpsOut.Success || httpsOut.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected https probe result: %+v", httpsOut)
+	}
+	if !strings.HasSuffix(httpsOut.TargetEntry, "/admin/") {
+		t.Fatalf("expected https probe targetEntry to include /admin/, got %q", httpsOut.TargetEntry)
 	}
 }
 
@@ -389,7 +399,8 @@ func mustCloneRequest(req *http.Request, target string) *http.Request {
 	if err != nil {
 		panic(err)
 	}
-	clone.URL = parsed
+	clone.URL.Scheme = parsed.Scheme
+	clone.URL.Host = parsed.Host
 	clone.Host = parsed.Host
 	return clone
 }
