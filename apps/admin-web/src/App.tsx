@@ -6,6 +6,7 @@ type NodeCapabilities = {
   httpsRelay: boolean;
   udpRelay: boolean;
   p2pAssist: boolean;
+  socks5Connect?: boolean;
 };
 
 type NodeRole = "cloud" | "local" | "third_party" | "";
@@ -829,6 +830,13 @@ export default function App() {
   const activeTunnels = tunnels.filter((tunnel) => tunnel.status === "active").length;
   const filteredTunnels = tunnels.filter((tunnel) => matchesTunnelHealthFilter(tunnel, tunnelHealthFilter));
   const unhealthyTunnelCount = tunnels.filter((tunnel) => (tunnel.healthStatus || "healthy") !== "healthy").length;
+  const tcpTunnelCount = tunnels.filter((tunnel) => tunnel.type === "tcp").length;
+  const httpTunnelCount = tunnels.filter((tunnel) => tunnel.type === "http").length;
+  const httpsTunnelCount = tunnels.filter((tunnel) => tunnel.type === "https").length;
+  const socks5TunnelCount = tunnels.filter((tunnel) => tunnel.type === "socks5").length;
+  const httpCapableNodeCount = allNodes.filter((node) => node.supportsHTTP).length;
+  const httpsCapableNodeCount = allNodes.filter((node) => node.supportsHTTPS ?? node.supportsHTTP).length;
+  const socks5CapableNodeCount = allNodes.filter((node) => node.supportsSOCKS5).length;
   const canOperate = activeUser.role !== "user";
   const canManageUsers = activeUser.role === "admin";
   const nodeStart = nodes.length === 0 ? 0 : nodeFilter.offset + 1;
@@ -944,16 +952,36 @@ export default function App() {
                 <div className="overview-grid">
                   <MetricCard label="注册节点" value={String(metrics?.registeredNodes ?? nodes.length)} hint="控制平面已注册" />
                   <MetricCard label="在线节点" value={String(metrics?.onlineNodes ?? onlineNodes)} hint="当前可通信节点" />
-                  <MetricCard label="隧道数量" value={String(metrics?.configuredTunnels ?? tunnels.length)} hint="公网入口配置数" />
+                  <MetricCard label="活跃隧道" value={String(activeTunnels)} hint="当前为 active 的入口配置" />
                   <MetricCard label="待命连接" value={String(relayRuntime?.totalStandby ?? 0)} hint="反向 TCP 待命池" />
                 </div>
                 <div className="signal-strip">
                   <SignalCard label="服务" value={metrics?.service ?? "server-api"} />
                   <SignalCard label="启动时间" value={metrics ? formatDate(metrics.startedAt) : "-"} />
-                  <SignalCard label="隧道异常" value={unhealthyTunnelCount === 0 ? "无" : String(unhealthyTunnelCount)} />
+                  <SignalCard label="异常隧道" value={unhealthyTunnelCount === 0 ? "无" : String(unhealthyTunnelCount)} />
                   <SignalCard label="审计窗口" value={auditTotal === 0 ? "暂无" : auditStart + "-" + auditEnd + " / " + auditTotal} />
                   <SignalCard label="最新动作" value={auditLogs[0]?.action ?? "-"} />
                 </div>
+                <section className="subpanel">
+                  <div className="section-head compact-head">
+                    <div>
+                      <h3>能力与入口总览</h3>
+                      <span className="muted-line">区分当前有哪些入口类型、多少异常入口，以及哪些节点具备对应挂载能力。</span>
+                    </div>
+                  </div>
+                  <div className="overview-grid">
+                    <MetricCard label="TCP 入口" value={String(tcpTunnelCount)} hint="host:port 直连入口" />
+                    <MetricCard label="HTTP 入口" value={String(httpTunnelCount)} hint="http://IP:端口 发布 Web/API" />
+                    <MetricCard label="HTTPS 入口" value={String(httpsTunnelCount)} hint="https://domain 标准 443 入口" />
+                    <MetricCard label="SOCKS5 入口" value={String(socks5TunnelCount)} hint="socks5://IP:端口 代理入口" />
+                  </div>
+                  <div className="signal-strip">
+                    <SignalCard label="异常入口数" value={unhealthyTunnelCount === 0 ? "无" : String(unhealthyTunnelCount)} />
+                    <SignalCard label="支持 HTTP 的节点" value={String(httpCapableNodeCount)} />
+                    <SignalCard label="支持 HTTPS 的节点" value={String(httpsCapableNodeCount)} />
+                    <SignalCard label="支持 SOCKS5 的节点" value={String(socks5CapableNodeCount)} />
+                  </div>
+                </section>
                 {relayRuntime?.pools?.length ? (
                   <div className="pool-band">
                     {relayRuntime.pools.map((pool) => (
@@ -1072,9 +1100,19 @@ export default function App() {
                         <DetailItem label="hostname" value={nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} />
                         <DetailItem label="os" value={nodeMeta(selectedNode, "os")} />
                         <DetailItem label="arch" value={nodeMeta(selectedNode, "arch")} />
-                        <DetailItem label="capabilities" value={capabilitySummary(selectedNode.capabilities)} />
                         <DetailItem label="lastSeenAt" value={formatDate(selectedNode.lastSeenAt)} />
                         <DetailItem label="activeTunnels" value={String(selectedNode.activeTunnels)} />
+                      </div>
+                      <div className="empty-state">
+                        <strong>节点能力矩阵</strong>
+                        <p>直接判断该节点能否挂载 TCP / HTTP / HTTPS / SOCKS5，不再只看原始布尔字段。</p>
+                        <div className="table-status-stack">
+                          <span className={capabilityPillClass(selectedNode.capabilities.tcpRelay)}>TCP relay {capabilityEnabledLabel(selectedNode.capabilities.tcpRelay)}</span>
+                          <span className={capabilityPillClass(selectedNode.capabilities.httpRelay)}>HTTP relay {capabilityEnabledLabel(selectedNode.capabilities.httpRelay)}</span>
+                          <span className={capabilityPillClass(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}>HTTPS relay {capabilityEnabledLabel(selectedNode.capabilities.httpsRelay || selectedNode.capabilities.httpRelay)}</span>
+                          <span className={capabilityPillClass(Boolean(selectedNode.capabilities.socks5Connect))}>SOCKS5 connect {capabilityEnabledLabel(Boolean(selectedNode.capabilities.socks5Connect))}</span>
+                          <span className={capabilityPillClass(selectedNode.capabilities.p2pAssist)}>P2P assist {capabilityEnabledLabel(selectedNode.capabilities.p2pAssist)}</span>
+                        </div>
                       </div>
                       <form className="form-grid" onSubmit={submitNodeMetadata}>
                         <label>
@@ -1231,6 +1269,7 @@ export default function App() {
                           </div>
                           <div className="muted-line">类型 {tunnelTypeLabel(tunnel.type)}</div>
                           <div className="muted-line">目标 {tunnelTargetLabel(tunnel)}</div>
+                          <div className="muted-line">运行依赖 {tunnelRequirementSummary(tunnel, nodes)}</div>
                           <div className="muted-line">节点 {tunnel.nodeId}</div>
                         </article>
                       ))}
@@ -1294,8 +1333,8 @@ export default function App() {
                           <td>{tunnelTypeLabel(tunnel.type)}</td>
                           <td>{tunnel.nodeId}</td>
                           <td><div className="table-status-stack"><span className={statusPillClass(tunnel.status)}>{tunnel.status}</span><span className={tunnelHealthPillClass(tunnel.healthStatus)}>{tunnelHealthLabel(tunnel.healthStatus)}</span></div></td>
-                          <td>{tunnelPublicEntry(tunnel)}</td>
-                          <td>{tunnelTargetLabel(tunnel)}</td>
+                          <td><div>{tunnelPublicEntry(tunnel)}</div><div className="muted">{tunnelTypeEntryHint(tunnel)}</div></td>
+                          <td><div>{tunnelTargetLabel(tunnel)}</div><div className="muted">{tunnelRequirementSummary(tunnel, nodes)}</div></td>
                           <td>
                             <div className="actions-row">
                               <button type="button" className="secondary" onClick={() => beginTunnelEdit(tunnel)}>编辑</button>
@@ -1506,6 +1545,19 @@ function tunnelTargetLabel(tunnel: TunnelSpec) {
   return tunnel.targetHost + ":" + tunnel.targetPort;
 }
 
+function tunnelTypeEntryHint(tunnel: TunnelSpec) {
+  if (tunnel.type === "http") {
+    return "HTTP 入口，直接发布 Web/API";
+  }
+  if (tunnel.type === "https") {
+    return "HTTPS 标准入口，依赖 Nginx 443 terminate";
+  }
+  if (tunnel.type === "socks5") {
+    return "SOCKS5 CONNECT 代理入口";
+  }
+  return "TCP 端口直连入口";
+}
+
 function tunnelHealthLabel(status?: TunnelHealthStatus) {
   switch (status) {
     case "node_offline":
@@ -1577,10 +1629,37 @@ function capabilitySummary(capabilities: NodeCapabilities) {
   const active = [] as string[];
   if (capabilities.tcpRelay) active.push("TCP");
   if (capabilities.httpRelay) active.push("HTTP");
-  if (capabilities.httpsRelay) active.push("HTTPS");
+  if (capabilities.httpsRelay || capabilities.httpRelay) active.push("HTTPS");
+  if (capabilities.socks5Connect) active.push("SOCKS5");
   if (capabilities.udpRelay) active.push("UDP");
   if (capabilities.p2pAssist) active.push("P2P");
   return active.length > 0 ? active.join(" / ") : "无";
+}
+
+function capabilityEnabledLabel(enabled: boolean) {
+  return enabled ? "可用" : "不可用";
+}
+
+function capabilityPillClass(enabled: boolean) {
+  return enabled ? "status-pill tone-good" : "status-pill tone-neutral";
+}
+
+function tunnelRequirementSummary(tunnel: TunnelSpec, nodes: NodeSummary[]) {
+  const node = nodes.find((item) => item.nodeId === tunnel.nodeId) ?? null;
+  const requirements = [] as string[];
+  requirements.push(node && node.status === "online" ? "节点在线" : "节点离线");
+  if (tunnel.type === "http") {
+    requirements.push(node?.capabilities.httpRelay ? "HTTP 能力满足" : "HTTP 能力缺失");
+  } else if (tunnel.type === "https") {
+    requirements.push((node?.capabilities.httpsRelay || node?.capabilities.httpRelay) ? "HTTPS 能力满足" : "HTTPS 能力缺失");
+    requirements.push("443 入口依赖 Nginx terminate");
+  } else if (tunnel.type === "socks5") {
+    requirements.push(node?.capabilities.socks5Connect ? "SOCKS5 能力满足" : "SOCKS5 能力缺失");
+  } else {
+    requirements.push(node?.capabilities.tcpRelay ? "TCP 能力满足" : "TCP 能力缺失");
+  }
+  requirements.push((tunnel.healthStatus || "healthy") === "healthy" ? "当前健康" : "当前异常");
+  return requirements.join(" / ");
 }
 
 function statusPillClass(status: string) {
