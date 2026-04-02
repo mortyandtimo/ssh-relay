@@ -1,0 +1,18 @@
+[Unit]
+Description=Cloud Relay Platform UDP Relay
+After=network-online.target cloud-relay-server-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cloud-relay-platform
+EnvironmentFile=/etc/cloud-relay-platform/relay-udp.env
+ExecStart=/opt/cloud-relay-platform/bin/relay-udp
+Restart=always
+RestartSec=5
+User=relay
+Group=relay
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

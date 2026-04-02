@@ -36,6 +36,19 @@ services:
     depends_on:
       - server-api
 
+  relay-udp:
+    build:
+      context: ../..
+      dockerfile: apps/relay-udp/Dockerfile
+    environment:
+      RELAY_UDP_ADDR: ":9093"
+      RELAY_UDP_API_BASE_URL: http://server-api:8080
+    ports:
+      - "9093:9093"
+      - "20000-20010:20000-20010/udp"
+    depends_on:
+      - server-api
+
   relay-http:
     build:
       context: ../..

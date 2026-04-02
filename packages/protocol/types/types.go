@@ -3,10 +3,12 @@ package types
 import "time"
 
 const (
-	AgentRelayConnectPath   = "/agent/reverse-tcp"
-	AgentRelayUpgrade       = "cloud-relay-tcp"
-	AgentRelayKeepaliveByte = byte(0x00)
-	AgentRelayStartByte     = byte(0x01)
+	AgentRelayConnectPath    = "/agent/reverse-tcp"
+	AgentRelayUpgrade        = "cloud-relay-tcp"
+	AgentRelayKeepaliveByte  = byte(0x00)
+	AgentRelayStartByte      = byte(0x01)
+	AgentUDPRelayConnectPath = "/agent/reverse-udp"
+	AgentUDPRelayUpgrade     = "cloud-relay-udp"
 )
 
 type NodeCapabilities struct {
@@ -125,6 +127,20 @@ type AgentRelayHello struct {
 	PublicPort int    `json:"publicPort"`
 	TargetHost string `json:"targetHost"`
 	TargetPort int    `json:"targetPort"`
+}
+
+type AgentUDPRelayHello struct {
+	NodeID     string `json:"nodeId"`
+	TunnelID   string `json:"tunnelId"`
+	PublicPort int    `json:"publicPort"`
+	TargetHost string `json:"targetHost"`
+	TargetPort int    `json:"targetPort"`
+}
+
+type UDPDatagramFrame struct {
+	SessionID string `json:"sessionId"`
+	Payload   []byte `json:"payload,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type NodeSummary struct {

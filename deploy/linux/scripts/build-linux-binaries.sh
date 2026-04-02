@@ -12,6 +12,7 @@ export GOARCH=amd64
 
 go build -o "${OUT_DIR}/server-api" ./apps/server-api/cmd/server-api
 go build -o "${OUT_DIR}/relay-tcp" ./apps/relay-tcp/cmd/relay-tcp
+go build -o "${OUT_DIR}/relay-udp" ./apps/relay-udp/cmd/relay-udp
 go build -o "${OUT_DIR}/relay-http" ./apps/relay-http/cmd/relay-http
 go build -o "${OUT_DIR}/relay-https" ./apps/relay-https/cmd/relay-https
 go build -o "${OUT_DIR}/client-agent" ./apps/client-agent/cmd/client-agent

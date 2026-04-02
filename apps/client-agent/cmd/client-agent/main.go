@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -32,11 +33,13 @@ const (
 )
 
 type reverseManager struct {
-	baseURL       string
-	relayURL      string
-	httpClient    *http.Client
-	poolSize      int
-	connectTimout time.Duration
+	baseURL            string
+	relayURL           string
+	udpRelayURL        string
+	httpClient         *http.Client
+	poolSize           int
+	connectTimout      time.Duration
+	udpResponseTimeout time.Duration
 
 	mu               sync.Mutex
 	workers          map[string]managedTunnel
@@ -56,6 +59,7 @@ func main() {
 
 	baseURL := config.GetEnv("CLOUD_RELAY_API_URL", "http://localhost:8080")
 	relayURL := config.GetEnv("RELAY_TCP_CONNECT_URL", deriveRelayURL(baseURL))
+	udpRelayURL := config.GetEnv("RELAY_UDP_CONNECT_URL", deriveUDPRelayURL(baseURL))
 	nodeName := config.GetEnv("CLIENT_NODE_NAME", defaultNodeName())
 	nodeID := config.GetEnv("CLIENT_NODE_ID", "")
 	heartbeatEvery := config.GetDurationEnvSeconds("AGENT_HEARTBEAT_INTERVAL", 30)
@@ -81,11 +85,13 @@ func main() {
 	manager := &reverseManager{
 		baseURL:          baseURL,
 		relayURL:         relayURL,
+		udpRelayURL:      udpRelayURL,
 		httpClient:       client,
 		poolSize:         reversePoolSize,
 		connectTimout:    defaultRelayTimeout,
-		workers:          make(map[string]managedTunnel),
-		httpProbeMetrics: make(map[string]string),
+		workers:            make(map[string]managedTunnel),
+		httpProbeMetrics:   make(map[string]string),
+		udpResponseTimeout: 3 * time.Second,
 	}
 
 	if err := manager.syncTunnels(context.Background(), registeredID); err != nil {
@@ -126,6 +132,7 @@ func register(client *http.Client, baseURL, nodeID, nodeName string) (string, er
 			TCPRelay:      true,
 			HTTPRelay:     true,
 			HTTPSRelay:    true,
+			UDPRelay:      true,
 			SOCKS5Connect: true,
 		},
 		Metadata: map[string]string{
@@ -238,7 +245,7 @@ func (m *reverseManager) syncTunnels(ctx context.Context, nodeID string) error {
 	}
 	desired := make(map[string]types.TunnelSpec, len(items))
 	for _, item := range items {
-		if (item.Type != "tcp" && item.Type != "socks5" && item.Type != "http") || item.Status != "active" || item.PublicPort == 0 {
+		if (item.Type != "tcp" && item.Type != "udp" && item.Type != "socks5" && item.Type != "http") || item.Status != "active" || item.PublicPort == 0 {
 			continue
 		}
 		desired[item.ID] = item
@@ -279,7 +286,11 @@ func (m *reverseManager) syncTunnels(ctx context.Context, nodeID string) error {
 		worker.cancel()
 	}
 	for _, start := range toStart {
-		for slot := 0; slot < m.poolSize; slot++ {
+		slotCount := m.poolSize
+		if start.tunnel.Type == "udp" {
+			slotCount = 1
+		}
+		for slot := 0; slot < slotCount; slot++ {
 			go m.runTunnelWorker(start.ctx, start.tunnel, slot)
 		}
 	}
@@ -335,13 +346,11 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 	atomic.AddInt64(&m.active, 1)
 	defer atomic.AddInt64(&m.active, -1)
 
-	conn, err := dialRelayUpgrade(ctx, m.relayURL, types.AgentRelayHello{
-		NodeID:     tunnel.NodeID,
-		TunnelID:   tunnel.ID,
-		PublicPort: tunnel.PublicPort,
-		TargetHost: tunnel.TargetHost,
-		TargetPort: tunnel.TargetPort,
-	})
+	connectURL := m.relayURL
+	if tunnel.Type == "udp" {
+		connectURL = m.udpRelayURL
+	}
+	conn, err := dialRelayUpgrade(ctx, connectURL, tunnelUpgradeHello(tunnel))
 	if err != nil {
 		return err
 	}
@@ -360,6 +369,9 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 	if tunnel.Type == "socks5" {
 		return serveSOCKS5(ctx, conn)
 	}
+	if tunnel.Type == "udp" {
+		return serveUDPRelay(ctx, conn, tunnel.TargetHost, tunnel.TargetPort, m.udpResponseTimeout)
+	}
 
 	targetConn, err := (&net.Dialer{Timeout: m.connectTimout}).DialContext(ctx, "tcp", net.JoinHostPort(tunnel.TargetHost, fmt.Sprintf("%d", tunnel.TargetPort)))
 	if err != nil {
@@ -373,7 +385,7 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 	return nil
 }
 
-func dialRelayUpgrade(ctx context.Context, relayURL string, hello types.AgentRelayHello) (net.Conn, error) {
+func dialRelayUpgrade(ctx context.Context, relayURL string, hello any) (net.Conn, error) {
 	parsed, err := url.Parse(relayURL)
 	if err != nil {
 		return nil, err
@@ -403,7 +415,11 @@ func dialRelayUpgrade(ctx context.Context, relayURL string, hello types.AgentRel
 	if path == "" {
 		path = types.AgentRelayConnectPath
 	}
-	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", path, parsed.Host, types.AgentRelayUpgrade, len(body), body)
+	upgradeHeader := types.AgentRelayUpgrade
+	if strings.Contains(path, "reverse-udp") {
+		upgradeHeader = types.AgentUDPRelayUpgrade
+	}
+	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", path, parsed.Host, upgradeHeader, len(body), body)
 	if _, err := io.WriteString(conn, request); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -641,6 +657,18 @@ func probeHTTPTarget(host string, port int, timeout time.Duration) bool {
 	return true
 }
 
+func deriveUDPRelayURL(baseURL string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "http://127.0.0.1:9093" + types.AgentUDPRelayConnectPath
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return (&url.URL{Scheme: "http", Host: net.JoinHostPort(host, "9093"), Path: types.AgentUDPRelayConnectPath}).String()
+}
+
 func deriveRelayURL(baseURL string) string {
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
@@ -655,6 +683,13 @@ func deriveRelayURL(baseURL string) string {
 		Host:   net.JoinHostPort(host, "9090"),
 		Path:   types.AgentRelayConnectPath,
 	}).String()
+}
+
+func tunnelUpgradeHello(tunnel types.TunnelSpec) any {
+	if tunnel.Type == "udp" {
+		return types.AgentUDPRelayHello{NodeID: tunnel.NodeID, TunnelID: tunnel.ID, PublicPort: tunnel.PublicPort, TargetHost: tunnel.TargetHost, TargetPort: tunnel.TargetPort}
+	}
+	return types.AgentRelayHello{NodeID: tunnel.NodeID, TunnelID: tunnel.ID, PublicPort: tunnel.PublicPort, TargetHost: tunnel.TargetHost, TargetPort: tunnel.TargetPort}
 }
 
 func sameTunnel(left, right types.TunnelSpec) bool {
@@ -672,4 +707,90 @@ func defaultNodeName() string {
 		return "local-node"
 	}
 	return hostname
+}
+
+
+func serveUDPRelay(ctx context.Context, relayConn net.Conn, targetHost string, targetPort int, responseTimeout time.Duration) error {
+	udpTarget, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP(targetHost), Port: targetPort})
+	if err != nil {
+		resolved, resolveErr := net.ResolveUDPAddr("udp", net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort)))
+		if resolveErr != nil {
+			return fmt.Errorf("resolve udp target %s:%d: %w", targetHost, targetPort, err)
+		}
+		udpTarget, err = net.DialUDP("udp", nil, resolved)
+		if err != nil {
+			return fmt.Errorf("dial udp target %s:%d: %w", targetHost, targetPort, err)
+		}
+	}
+	defer udpTarget.Close()
+	reader := bufio.NewReader(relayConn)
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		frame, err := readUDPFrame(reader)
+		if err != nil {
+			return err
+		}
+		if len(frame.Payload) == 0 {
+			if err := writeUDPFrame(relayConn, types.UDPDatagramFrame{SessionID: frame.SessionID}); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := udpTarget.Write(frame.Payload); err != nil {
+			if err := writeUDPFrame(relayConn, types.UDPDatagramFrame{SessionID: frame.SessionID, Error: err.Error()}); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := udpTarget.SetReadDeadline(time.Now().Add(responseTimeout)); err != nil {
+			return err
+		}
+		respBuf := make([]byte, 64*1024)
+		n, _, err := udpTarget.ReadFromUDP(respBuf)
+		if err != nil {
+			if err := writeUDPFrame(relayConn, types.UDPDatagramFrame{SessionID: frame.SessionID, Error: err.Error()}); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := writeUDPFrame(relayConn, types.UDPDatagramFrame{SessionID: frame.SessionID, Payload: append([]byte(nil), respBuf[:n]...)}); err != nil {
+			return err
+		}
+	}
+}
+
+func writeUDPFrame(w io.Writer, frame types.UDPDatagramFrame) error {
+	body, err := json.Marshal(frame)
+	if err != nil {
+		return err
+	}
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(body)))
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
+	_, err = w.Write(body)
+	return err
+}
+
+func readUDPFrame(r io.Reader) (types.UDPDatagramFrame, error) {
+	var sizeBuf [4]byte
+	if _, err := io.ReadFull(r, sizeBuf[:]); err != nil {
+		return types.UDPDatagramFrame{}, err
+	}
+	size := binary.BigEndian.Uint32(sizeBuf[:])
+	if size == 0 || size > 1<<20 {
+		return types.UDPDatagramFrame{}, fmt.Errorf("invalid udp frame size %d", size)
+	}
+	body := make([]byte, size)
+	if _, err := io.ReadFull(r, body); err != nil {
+		return types.UDPDatagramFrame{}, err
+	}
+	var frame types.UDPDatagramFrame
+	if err := json.Unmarshal(body, &frame); err != nil {
+		return types.UDPDatagramFrame{}, err
+	}
+	return frame, nil
 }

@@ -1130,11 +1130,8 @@ func TestPublicPortConflictSemanticsByProtocol(t *testing.T) {
 	applyCookies(tcpUDPConflictAllowedReq, adminCookies)
 	tcpUDPConflictAllowedRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(tcpUDPConflictAllowedRes, tcpUDPConflictAllowedReq)
-	if tcpUDPConflictAllowedRes.Code != http.StatusBadRequest {
-		t.Fatalf("expected udp reserved reject 400, got %d", tcpUDPConflictAllowedRes.Code)
-	}
-	if !strings.Contains(tcpUDPConflictAllowedRes.Body.String(), "udp tunnel is reserved and not enabled yet") {
-		t.Fatalf("expected reserved udp message, got %s", tcpUDPConflictAllowedRes.Body.String())
+	if tcpUDPConflictAllowedRes.Code != http.StatusCreated {
+		t.Fatalf("expected tcp/udp same-port create 201, got %d", tcpUDPConflictAllowedRes.Code)
 	}
 
 	memoryStore := store.NewInMemoryStore()

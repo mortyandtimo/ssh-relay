@@ -87,6 +87,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/agent/heartbeat", s.handleHeartbeat)
 	s.mux.HandleFunc("/agent/tunnels", s.handleAgentTunnels)
 	s.mux.HandleFunc("/internal/routes/tcp", s.handleTCPRoutes)
+	s.mux.HandleFunc("/internal/routes/udp", s.handleUDPRoutes)
 	s.mux.HandleFunc("/internal/routes/http", s.handleHTTPRoutes)
 	s.mux.HandleFunc("/internal/routes/https", s.handleHTTPSRoutes)
 
@@ -825,6 +826,26 @@ func (s *Server) handleTCPRoutes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	visible := make([]types.TunnelSpec, 0, len(items))
+	for _, item := range items {
+		if item.Type == "udp" {
+			continue
+		}
+		visible = append(visible, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": visible})
+}
+
+func (s *Server) handleUDPRoutes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	items, err := s.store.ListTunnels(r.Context(), store.TunnelFilter{Type: "udp", Status: "active"})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -979,6 +1000,9 @@ func (s *Server) deriveTunnelHealth(ctx context.Context, tunnel types.TunnelSpec
 	if tunnel.Type == "socks5" && !node.summary.Capabilities.SOCKS5Connect {
 		return types.TunnelHealthCapabilityMissing
 	}
+	if tunnel.Type == "udp" && !node.summary.Capabilities.UDPRelay {
+		return types.TunnelHealthCapabilityMissing
+	}
 	if (tunnel.Type == "http" || tunnel.Type == "https") && !node.summary.Capabilities.HTTPRelay {
 		return types.TunnelHealthCapabilityMissing
 	}
@@ -995,7 +1019,7 @@ func isTunnelMisconfigured(tunnel types.TunnelSpec) bool {
 		return true
 	}
 	switch tunnel.Type {
-	case "", "tcp", "http":
+	case "", "tcp", "http", "udp":
 		return strings.TrimSpace(tunnel.TargetHost) == "" || tunnel.TargetPort <= 0
 	case "https":
 		return strings.TrimSpace(tunnel.TargetHost) == "" || tunnel.TargetPort <= 0 || strings.TrimSpace(tunnel.Domain) == "" || strings.TrimSpace(tunnel.TLSMode) != "edge_terminate"
@@ -1359,7 +1383,12 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 		spec.TargetHost = "socks5"
 		spec.TargetPort = 1080
 	case "udp":
-		return types.TunnelSpec{}, errors.New("udp tunnel is reserved and not enabled yet")
+		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {
+			return types.TunnelSpec{}, errors.New("udp tunnel requires targetHost and targetPort")
+		}
+		spec.Domain = ""
+		spec.TLSMode = ""
+		spec.ProbePath = ""
 	default:
 		return types.TunnelSpec{}, fmt.Errorf("unsupported tunnel type %s", spec.Type)
 	}
@@ -1376,6 +1405,9 @@ func (s *Server) ensureTunnelNodeCapability(ctx context.Context, nodeID, tunnelT
 	}
 	if tunnelType == "socks5" && !node.Capabilities.SOCKS5Connect {
 		return errors.New("selected node does not support socks5 connect")
+	}
+	if tunnelType == "udp" && !node.Capabilities.UDPRelay {
+		return errors.New("selected node does not support udp relay")
 	}
 	if (tunnelType == "http" || tunnelType == "https") && !node.Capabilities.HTTPRelay {
 		return errors.New("selected node does not support http relay")
