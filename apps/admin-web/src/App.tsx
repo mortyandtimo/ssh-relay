@@ -30,6 +30,10 @@ type NodeSummary = {
   };
   lastSeenAt: string;
   metadata?: Record<string, string>;
+  deploymentMode?: string;
+  serviceUnit?: string;
+  instanceProfile?: string;
+  instanceManaged?: boolean;
   nodeRole?: NodeRole;
   environment?: NodeEnvironment;
   trustLevel?: NodeTrustLevel;
@@ -1493,7 +1497,10 @@ export default function App() {
                             <FactRow label="当前承载" value={<code>{String(selectedNode.activeTunnels)} 个 tunnel</code>} />
                             <FactRow label="主机信息" value={<code>{nodeMeta(selectedNode, "hostname", selectedNode.nodeName)} / {nodeMeta(selectedNode, "os")} / {nodeMeta(selectedNode, "arch")}</code>} />
                             <FactRow label="agent 部署" value={<code>{nodeAgentDeploymentLabel(selectedNode)}</code>} />
-                            <FactRow label="service unit" value={<code>{nodeMeta(selectedNode, "serviceUnit")}</code>} />
+                            <FactRow label="deploymentMode" value={<code>{selectedNode.deploymentMode || "尚未上报"}</code>} />
+                            <FactRow label="service unit" value={<code>{selectedNode.serviceUnit || "尚未上报"}</code>} />
+                            <FactRow label="instance profile" value={<code>{selectedNode.instanceProfile || "尚未上报"}</code>} />
+                            <FactRow label="instance managed" value={<code>{selectedNode.instanceManaged ? "true" : "未托管"}</code>} />
                           </div>
                           <div className="actions-row actions-row-strong">
                             <button type="button" className="secondary" disabled={busyAction === 'isolate-node:' + selectedNode.nodeId || selectedNode.isolated} onClick={() => void setNodeIsolation(selectedNode, true)}>隔离节点</button>
@@ -2956,12 +2963,16 @@ function nodeMeta(node: NodeSummary, key: string, fallback = "-") {
 }
 
 function nodeAgentDeploymentLabel(node: NodeSummary) {
-  const mode = nodeMeta(node, "deploymentMode", "manual");
-  const unit = nodeMeta(node, "serviceUnit", "-");
-  if (mode === "managed") {
-    return unit !== "-" ? "systemd 常驻: " + unit : "systemd 常驻";
+  const mode = (node.deploymentMode || "").trim();
+  const unit = (node.serviceUnit || "").trim();
+  const managed = Boolean(node.instanceManaged);
+  if (mode === "managed" || managed) {
+    return unit ? "systemd 常驻: " + unit : "受管运行，service unit 尚未上报";
   }
-  return "手工/临时 agent";
+  if (mode) {
+    return mode + " / 未托管";
+  }
+  return "尚未上报 / 未托管";
 }
 
 function formatDate(value: string) {

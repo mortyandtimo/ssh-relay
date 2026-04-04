@@ -573,6 +573,10 @@ func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {
 func hydrateNodeSummary(summary types.NodeSummary) types.NodeSummary {
 	meta := parseNodeMetadata(summary.Metadata)
 	summary.Metadata = meta.Extra
+	summary.DeploymentMode = meta.DeploymentMode
+	summary.ServiceUnit = meta.ServiceUnit
+	summary.InstanceProfile = meta.InstanceProfile
+	summary.InstanceManaged = meta.InstanceManaged
 	summary.NodeRole = meta.NodeRole
 	summary.Environment = meta.Environment
 	summary.TrustLevel = meta.TrustLevel
@@ -592,6 +596,10 @@ func parseNodeMetadata(input map[string]string) types.NodeMetadata {
 	meta.Hostname = strings.TrimSpace(extra["hostname"])
 	meta.OS = strings.TrimSpace(extra["os"])
 	meta.Arch = strings.TrimSpace(extra["arch"])
+	meta.DeploymentMode = strings.TrimSpace(extra["deploymentMode"])
+	meta.ServiceUnit = strings.TrimSpace(extra["serviceUnit"])
+	meta.InstanceProfile = strings.TrimSpace(extra["instanceProfile"])
+	meta.InstanceManaged = strings.TrimSpace(extra["instanceManaged"]) == "true"
 	meta.NodeRole = types.NodeRole(strings.TrimSpace(extra["nodeRole"]))
 	meta.Environment = types.NodeEnvironment(strings.TrimSpace(extra["environment"]))
 	meta.TrustLevel = types.NodeTrustLevel(strings.TrimSpace(extra["trustLevel"]))

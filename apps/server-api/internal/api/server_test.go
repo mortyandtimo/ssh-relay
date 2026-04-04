@@ -662,15 +662,19 @@ func TestNodeMetadataFilterAndUpdate(t *testing.T) {
 		AgentVersion: "0.1.0",
 		Capabilities: types.NodeCapabilities{TCPRelay: true, HTTPRelay: true},
 		Metadata: map[string]string{
-			"hostname":    "host-a",
-			"os":          "windows",
-			"arch":        "amd64",
-			"nodeRole":    "local",
-			"environment": "test",
-			"trustLevel":  "trusted",
-			"owner":       "alice",
-			"location":    "shanghai",
-			"tags":        "desk,win",
+			"hostname":        "host-a",
+			"os":              "windows",
+			"arch":            "amd64",
+			"deploymentMode":  "managed",
+			"serviceUnit":     "cloud-relay-client-agent@node-local-a.service",
+			"instanceProfile": "node-local-a",
+			"instanceManaged": "true",
+			"nodeRole":        "local",
+			"environment":     "test",
+			"trustLevel":      "trusted",
+			"owner":           "alice",
+			"location":        "shanghai",
+			"tags":            "desk,win",
 		},
 	})
 	if err != nil {
@@ -708,6 +712,9 @@ func TestNodeMetadataFilterAndUpdate(t *testing.T) {
 	}
 	if len(listOut.Items[0].Tags) != 2 {
 		t.Fatalf("expected tags to be present, got %+v", listOut.Items[0].Tags)
+	}
+	if listOut.Items[0].DeploymentMode != "managed" || listOut.Items[0].ServiceUnit != "cloud-relay-client-agent@node-local-a.service" || listOut.Items[0].InstanceProfile != "node-local-a" || !listOut.Items[0].InstanceManaged {
+		t.Fatalf("expected deployment metadata fields to be hydrated, got %+v", listOut.Items[0])
 	}
 
 	updateBody, err := json.Marshal(types.UpdateNodeRequest{
@@ -748,6 +755,13 @@ func TestNodeMetadataFilterAndUpdate(t *testing.T) {
 	server.Handler().ServeHTTP(getRes, getReq)
 	if getRes.Code != http.StatusOK {
 		t.Fatalf("expected get status 200, got %d", getRes.Code)
+	}
+	var got types.NodeSummary
+	if err := json.NewDecoder(getRes.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DeploymentMode != listOut.Items[0].DeploymentMode || got.ServiceUnit != listOut.Items[0].ServiceUnit || got.InstanceProfile != listOut.Items[0].InstanceProfile || got.InstanceManaged != listOut.Items[0].InstanceManaged {
+		t.Fatalf("expected get/list node management fields to match, got get=%+v list=%+v", got, listOut.Items[0])
 	}
 }
 
@@ -1338,6 +1352,9 @@ func TestNodeRuntimeSummaryReflectsTunnelRuntimeFacts(t *testing.T) {
 	}
 	if nodeOut.RuntimeSummary != summary {
 		t.Fatalf("expected get node runtime summary to match list summary, got %+v vs %+v", nodeOut.RuntimeSummary, summary)
+	}
+	if nodeOut.DeploymentMode != "" || nodeOut.ServiceUnit != "" || nodeOut.InstanceProfile != "" || nodeOut.InstanceManaged {
+		t.Fatalf("expected runtime summary test node to keep management fields empty unless explicitly hydrated, got %+v", nodeOut)
 	}
 	if nodeOut.RuntimeSummary.P2PPathCount != 1 && nodeOut.RuntimeSummary.ActiveTunnelCount == 2 {
 		t.Fatalf("runtime summary must come from runtimePath facts, not transportPolicy intent: %+v", nodeOut.RuntimeSummary)

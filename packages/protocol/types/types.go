@@ -45,17 +45,21 @@ const (
 )
 
 type NodeMetadata struct {
-	Hostname    string            `json:"hostname,omitempty"`
-	OS          string            `json:"os,omitempty"`
-	Arch        string            `json:"arch,omitempty"`
-	NodeRole    NodeRole          `json:"nodeRole,omitempty"`
-	Environment NodeEnvironment   `json:"environment,omitempty"`
-	TrustLevel  NodeTrustLevel    `json:"trustLevel,omitempty"`
-	Owner       string            `json:"owner,omitempty"`
-	Location    string            `json:"location,omitempty"`
-	Tags        []string          `json:"tags,omitempty"`
-	Isolated    bool              `json:"isolated,omitempty"`
-	Extra       map[string]string `json:"-"`
+	Hostname        string            `json:"hostname,omitempty"`
+	OS              string            `json:"os,omitempty"`
+	Arch            string            `json:"arch,omitempty"`
+	DeploymentMode  string            `json:"deploymentMode,omitempty"`
+	ServiceUnit     string            `json:"serviceUnit,omitempty"`
+	InstanceProfile string            `json:"instanceProfile,omitempty"`
+	InstanceManaged bool              `json:"instanceManaged,omitempty"`
+	NodeRole        NodeRole          `json:"nodeRole,omitempty"`
+	Environment     NodeEnvironment   `json:"environment,omitempty"`
+	TrustLevel      NodeTrustLevel    `json:"trustLevel,omitempty"`
+	Owner           string            `json:"owner,omitempty"`
+	Location        string            `json:"location,omitempty"`
+	Tags            []string          `json:"tags,omitempty"`
+	Isolated        bool              `json:"isolated,omitempty"`
+	Extra           map[string]string `json:"-"`
 }
 
 type NodeRegisterRequest struct {
@@ -161,22 +165,26 @@ type UDPDatagramFrame struct {
 }
 
 type NodeSummary struct {
-	NodeID         string             `json:"nodeId"`
-	NodeName       string             `json:"nodeName"`
-	Status         string             `json:"status"`
-	AgentVersion   string             `json:"agentVersion"`
-	Capabilities   NodeCapabilities   `json:"capabilities"`
-	ActiveTunnels  int                `json:"activeTunnels"`
-	RuntimeSummary NodeRuntimeSummary `json:"runtimeSummary"`
-	LastSeenAt     time.Time          `json:"lastSeenAt"`
-	Metadata       map[string]string  `json:"metadata,omitempty"`
-	NodeRole       NodeRole           `json:"nodeRole,omitempty"`
-	Environment    NodeEnvironment    `json:"environment,omitempty"`
-	TrustLevel     NodeTrustLevel     `json:"trustLevel,omitempty"`
-	Owner          string             `json:"owner,omitempty"`
-	Location       string             `json:"location,omitempty"`
-	Tags           []string           `json:"tags,omitempty"`
-	Isolated       bool               `json:"isolated,omitempty"`
+	NodeID          string             `json:"nodeId"`
+	NodeName        string             `json:"nodeName"`
+	Status          string             `json:"status"`
+	AgentVersion    string             `json:"agentVersion"`
+	Capabilities    NodeCapabilities   `json:"capabilities"`
+	ActiveTunnels   int                `json:"activeTunnels"`
+	RuntimeSummary  NodeRuntimeSummary `json:"runtimeSummary"`
+	LastSeenAt      time.Time          `json:"lastSeenAt"`
+	Metadata        map[string]string  `json:"metadata,omitempty"`
+	DeploymentMode  string             `json:"deploymentMode,omitempty"`
+	ServiceUnit     string             `json:"serviceUnit,omitempty"`
+	InstanceProfile string             `json:"instanceProfile,omitempty"`
+	InstanceManaged bool               `json:"instanceManaged,omitempty"`
+	NodeRole        NodeRole           `json:"nodeRole,omitempty"`
+	Environment     NodeEnvironment    `json:"environment,omitempty"`
+	TrustLevel      NodeTrustLevel     `json:"trustLevel,omitempty"`
+	Owner           string             `json:"owner,omitempty"`
+	Location        string             `json:"location,omitempty"`
+	Tags            []string           `json:"tags,omitempty"`
+	Isolated        bool               `json:"isolated,omitempty"`
 }
 
 type NodeRuntimeSummary struct {
