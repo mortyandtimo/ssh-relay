@@ -1445,6 +1445,8 @@ export default function App() {
                                 <div className="grouped-node-meta">
                                   <span>{node.nodeRole ? roleLabel(node.nodeRole) : "未分类"} / {node.environment || "-"}</span>
                                   <span>{node.activeTunnels} tunnel / {nodeLoadStateLabel(profile.loadState)}</span>
+                                  <span>{capabilitySummary(node.capabilities)}</span>
+                                  <span>{node.runtimeSummary?.activeTunnelCount ?? 0} active / relay {node.runtimeSummary?.relayPathCount ?? 0} / p2p {node.runtimeSummary?.p2pPathCount ?? 0}</span>
                                   <span>异常入口 {profile.problemCount}</span>
                                   <span>{nodeAgentDeploymentLabel(node)}</span>
                                 </div>
@@ -1491,6 +1493,14 @@ export default function App() {
                               <span className={statusPillClass(selectedNode.status)}>{selectedNode.status}</span>
                               {selectedNode.isolated ? <span className="status-pill tone-danger">已隔离</span> : <span className="status-pill tone-good">允许挂载</span>}
                             </div>
+                          </div>
+                          <div className="signal-strip profile-strip">
+                            <SignalCard label="在线状态" value={selectedNode.status === "online" ? "online" : "offline"} />
+                            <SignalCard label="隔离状态" value={selectedNode.isolated ? "已隔离" : "未隔离"} />
+                            <SignalCard label="能力摘要" value={capabilitySummary(selectedNode.capabilities)} />
+                            <SignalCard label="active tunnel" value={String(selectedNode.activeTunnels)} />
+                            <SignalCard label="agentVersion" value={selectedNode.agentVersion || "尚未上报"} />
+                            <SignalCard label="最后在线" value={formatDate(selectedNode.lastSeenAt)} />
                           </div>
                           <div className="fact-list">
                             <FactRow label="最后在线" value={<code>{formatDate(selectedNode.lastSeenAt)}</code>} />
@@ -1551,6 +1561,19 @@ export default function App() {
                             </div>
                           </>
                         ) : null}
+                      </section>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>第一屏字段冻结视图</h3>
+                            <span className="muted-line">这里按未来统一 Windows 桌面端第一屏的机器列表项 / 当前机器头部语义做最小验证。当前字段已经足够，所以这轮没有再新增 node 级只读字段，也没有开始 desktop-console 实现。</span>
+                          </div>
+                        </div>
+                        <div className="ops-note-list">
+                          <div className="ops-note tone-info">已冻结且当前已可用：status、isolated、capabilities、activeTunnels、runtimeSummary、deploymentMode、serviceUnit、instanceProfile、instanceManaged、lastSeenAt、agentVersion。</div>
+                          <div className="ops-note tone-neutral">当前故意不做：机器控制命令、会话级历史时间线、desktop-console 脚手架、P2P 数据面。因为这一轮的目标只是冻结第一屏最小只读契约，而不是开始桌面端实现。</div>
+                        </div>
                       </section>
 
                       <section className="workbench-section">
