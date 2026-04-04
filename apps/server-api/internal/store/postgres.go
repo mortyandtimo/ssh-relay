@@ -75,14 +75,15 @@ func (s *PostgresStore) RegisterNode(ctx context.Context, req types.NodeRegister
 		return types.NodeSummary{}, err
 	}
 	return types.NodeSummary{
-		NodeID:        nodeID,
-		NodeName:      req.NodeName,
-		Status:        "online",
-		AgentVersion:  req.AgentVersion,
-		Capabilities:  req.Capabilities,
-		ActiveTunnels: 0,
-		LastSeenAt:    now,
-		Metadata:      mergedMeta,
+		NodeID:         nodeID,
+		NodeName:       req.NodeName,
+		Status:         "online",
+		AgentVersion:   req.AgentVersion,
+		Capabilities:   req.Capabilities,
+		ActiveTunnels:  0,
+		RuntimeSummary: types.NodeRuntimeSummary{},
+		LastSeenAt:     now,
+		Metadata:       mergedMeta,
 	}, nil
 }
 
@@ -119,14 +120,15 @@ func (s *PostgresStore) HeartbeatNode(ctx context.Context, req types.NodeHeartbe
 		return types.NodeSummary{}, err
 	}
 	return types.NodeSummary{
-		NodeID:        req.NodeID,
-		NodeName:      name,
-		Status:        "online",
-		AgentVersion:  agentVersion,
-		Capabilities:  capabilities,
-		ActiveTunnels: req.ActiveTunnels,
-		LastSeenAt:    now,
-		Metadata:      metadata,
+		NodeID:         req.NodeID,
+		NodeName:       name,
+		Status:         "online",
+		AgentVersion:   agentVersion,
+		Capabilities:   capabilities,
+		ActiveTunnels:  req.ActiveTunnels,
+		RuntimeSummary: types.NodeRuntimeSummary{},
+		LastSeenAt:     now,
+		Metadata:       metadata,
 	}, nil
 }
 
@@ -161,7 +163,12 @@ func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]typ
 			n.capabilities,
 			n.metadata,
 			coalesce(n.last_seen_at, now()),
-			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active'), 0)
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active'), 0),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimePath', '') = 'relay'), 0),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimePath', '') = 'p2p'), 0),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimeState', '') = 'pending'), 0),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimeState', '') = 'unavailable'), 0),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'lastFailureReason', '') <> ''), 0)
 		from nodes n
 		where ($1 = '' or coalesce(n.metadata->>'nodeRole', '') = $1)
 		  and ($2 = '' or coalesce(n.metadata->>'environment', '') = $2)
@@ -189,9 +196,15 @@ func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]typ
 			&metadataJSON,
 			&item.LastSeenAt,
 			&item.ActiveTunnels,
+			&item.RuntimeSummary.RelayPathCount,
+			&item.RuntimeSummary.P2PPathCount,
+			&item.RuntimeSummary.PendingStateCount,
+			&item.RuntimeSummary.UnavailableStateCount,
+			&item.RuntimeSummary.FailureReasonCount,
 		); err != nil {
 			return nil, 0, err
 		}
+		item.RuntimeSummary.ActiveTunnelCount = item.ActiveTunnels
 		item.Capabilities, err = unmarshalCapabilities(capabilitiesJSON)
 		if err != nil {
 			return nil, 0, err
@@ -215,15 +228,21 @@ func (s *PostgresStore) GetNode(ctx context.Context, nodeID string) (types.NodeS
 			n.capabilities,
 			n.metadata,
 			coalesce(n.last_seen_at, now()),
-			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active'), 0)
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active'), 0),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimePath', '') = 'relay'), 0),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimePath', '') = 'p2p'), 0),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimeState', '') = 'pending'), 0),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimeState', '') = 'unavailable'), 0),
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'lastFailureReason', '') <> ''), 0)
 		from nodes n
 		where n.id = $1
 	`, nodeID)
 	var item types.NodeSummary
 	var capabilitiesJSON, metadataJSON []byte
-	if err := row.Scan(&item.NodeID, &item.NodeName, &item.Status, &item.AgentVersion, &capabilitiesJSON, &metadataJSON, &item.LastSeenAt, &item.ActiveTunnels); err != nil {
+	if err := row.Scan(&item.NodeID, &item.NodeName, &item.Status, &item.AgentVersion, &capabilitiesJSON, &metadataJSON, &item.LastSeenAt, &item.ActiveTunnels, &item.RuntimeSummary.RelayPathCount, &item.RuntimeSummary.P2PPathCount, &item.RuntimeSummary.PendingStateCount, &item.RuntimeSummary.UnavailableStateCount, &item.RuntimeSummary.FailureReasonCount); err != nil {
 		return types.NodeSummary{}, ErrNotFound
 	}
+	item.RuntimeSummary.ActiveTunnelCount = item.ActiveTunnels
 	var err error
 	item.Capabilities, err = unmarshalCapabilities(capabilitiesJSON)
 	if err != nil {

@@ -20,6 +20,14 @@ type NodeSummary = {
   agentVersion: string;
   capabilities: NodeCapabilities;
   activeTunnels: number;
+  runtimeSummary: {
+    activeTunnelCount: number;
+    relayPathCount: number;
+    p2pPathCount: number;
+    pendingStateCount: number;
+    unavailableStateCount: number;
+    failureReasonCount: number;
+  };
   lastSeenAt: string;
   metadata?: Record<string, string>;
   nodeRole?: NodeRole;
@@ -1536,6 +1544,27 @@ export default function App() {
                             </div>
                           </>
                         ) : null}
+                      </section>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>节点运行态摘要</h3>
+                            <span className="muted-line">这组数字直接来自后端基于当前节点承载 tunnel 的运行事实聚合，供未来桌面端机器选择页和主机总览页直接消费，不是前端按 transportPolicy 自己拼的。</span>
+                          </div>
+                        </div>
+                        <div className="signal-strip profile-strip">
+                          <SignalCard label="active tunnel 总数" value={String(selectedNode.runtimeSummary?.activeTunnelCount ?? 0)} />
+                          <SignalCard label="runtimePath=relay" value={String(selectedNode.runtimeSummary?.relayPathCount ?? 0)} />
+                          <SignalCard label="runtimePath=p2p" value={String(selectedNode.runtimeSummary?.p2pPathCount ?? 0)} />
+                          <SignalCard label="runtimeState=pending" value={String(selectedNode.runtimeSummary?.pendingStateCount ?? 0)} />
+                          <SignalCard label="runtimeState=unavailable" value={String(selectedNode.runtimeSummary?.unavailableStateCount ?? 0)} />
+                          <SignalCard label="有失败原因" value={String(selectedNode.runtimeSummary?.failureReasonCount ?? 0)} />
+                        </div>
+                        <div className="ops-note-list">
+                          <div className="ops-note tone-info">运行事实摘要与 transportPolicy 分离：这里统计的是 tunnel 当前 runtimePath / runtimeState / lastFailureReason，而不是配置想走什么路径。</div>
+                          <div className="ops-note tone-neutral">当前这组字段只是为未来统一桌面端的机器选择页与主机总览页预留后端摘要，不代表已经实现 P2P 数据面。</div>
+                        </div>
                       </section>
 
                       <section className="workbench-section">

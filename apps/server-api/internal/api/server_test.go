@@ -1231,6 +1231,119 @@ func TestTunnelRuntimeFieldsWithNilMetadataDoNotPanic(t *testing.T) {
 	}
 }
 
+func TestNodeRuntimeSummaryReflectsTunnelRuntimeFacts(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeID:       "node-runtime-summary-a",
+		NodeName:     "node-runtime-summary-a",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{TCPRelay: true, UDPRelay: true, P2PAssist: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+
+	items := []types.TunnelSpec{
+		{
+			ID:                "node-runtime-summary-relay",
+			Name:              "node-runtime-summary-relay",
+			Type:              "tcp",
+			TransportPolicy:   types.TunnelTransportP2PPreferred,
+			RuntimePath:       types.TunnelRuntimePathRelay,
+			RuntimeState:      types.TunnelRuntimeStatePending,
+			LastFailureReason: "awaiting relay path",
+			NodeID:            "node-runtime-summary-a",
+			TargetHost:        "127.0.0.1",
+			TargetPort:        20001,
+			PublicPort:        21001,
+			Status:            "active",
+		},
+		{
+			ID:              "node-runtime-summary-p2p",
+			Name:            "node-runtime-summary-p2p",
+			Type:            "udp",
+			TransportPolicy: types.TunnelTransportP2PPreferred,
+			RuntimePath:     types.TunnelRuntimePathP2P,
+			RuntimeState:    types.TunnelRuntimeStateUnavailable,
+			NodeID:          "node-runtime-summary-a",
+			TargetHost:      "127.0.0.1",
+			TargetPort:      20002,
+			PublicPort:      21002,
+			Status:          "active",
+		},
+		{
+			ID:              "node-runtime-summary-inactive",
+			Name:            "node-runtime-summary-inactive",
+			Type:            "tcp",
+			TransportPolicy: types.TunnelTransportP2PPreferred,
+			RuntimePath:     types.TunnelRuntimePathP2P,
+			RuntimeState:    types.TunnelRuntimeStatePending,
+			NodeID:          "node-runtime-summary-a",
+			TargetHost:      "127.0.0.1",
+			TargetPort:      20003,
+			PublicPort:      21003,
+			Status:          "paused",
+		},
+	}
+	for _, item := range items {
+		if _, err := server.store.CreateTunnel(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/nodes", nil)
+	applyCookies(listReq, adminCookies)
+	listRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(listRes, listReq)
+	if listRes.Code != http.StatusOK {
+		t.Fatalf("expected list nodes 200, got %d", listRes.Code)
+	}
+	var listOut types.NodeListResponse
+	if err := json.NewDecoder(listRes.Body).Decode(&listOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(listOut.Items) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(listOut.Items))
+	}
+	summary := listOut.Items[0].RuntimeSummary
+	if summary.ActiveTunnelCount != 2 {
+		t.Fatalf("expected 2 active tunnels in runtime summary, got %d", summary.ActiveTunnelCount)
+	}
+	if summary.RelayPathCount != 1 || summary.P2PPathCount != 1 {
+		t.Fatalf("expected relay=1 and p2p=1, got %+v", summary)
+	}
+	if summary.PendingStateCount != 1 || summary.UnavailableStateCount != 1 {
+		t.Fatalf("expected pending=1 and unavailable=1, got %+v", summary)
+	}
+	if summary.FailureReasonCount != 1 {
+		t.Fatalf("expected failureReasonCount=1, got %+v", summary)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/nodes/node-runtime-summary-a", nil)
+	applyCookies(getReq, adminCookies)
+	getRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(getRes, getReq)
+	if getRes.Code != http.StatusOK {
+		t.Fatalf("expected get node 200, got %d", getRes.Code)
+	}
+	var nodeOut types.NodeSummary
+	if err := json.NewDecoder(getRes.Body).Decode(&nodeOut); err != nil {
+		t.Fatal(err)
+	}
+	if nodeOut.RuntimeSummary != summary {
+		t.Fatalf("expected get node runtime summary to match list summary, got %+v vs %+v", nodeOut.RuntimeSummary, summary)
+	}
+	if nodeOut.RuntimeSummary.P2PPathCount != 1 && nodeOut.RuntimeSummary.ActiveTunnelCount == 2 {
+		t.Fatalf("runtime summary must come from runtimePath facts, not transportPolicy intent: %+v", nodeOut.RuntimeSummary)
+	}
+}
+
 func TestPublicPortConflictSemanticsByProtocol(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
@@ -2086,7 +2199,6 @@ func TestLogoutAuditUsesRealActor(t *testing.T) {
 		t.Fatalf("expected basic user audit logs 403, got %d", userAuditRes.Code)
 	}
 }
-
 
 func TestTunnelPortSuggestionFollowsProtocolRanges(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")

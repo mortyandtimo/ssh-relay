@@ -54,14 +54,15 @@ func (s *InMemoryStore) RegisterNode(_ context.Context, req types.NodeRegisterRe
 	s.mu.Lock()
 	existing := s.nodes[nodeID]
 	summary := types.NodeSummary{
-		NodeID:        nodeID,
-		NodeName:      req.NodeName,
-		Status:        "online",
-		AgentVersion:  req.AgentVersion,
-		Capabilities:  req.Capabilities,
-		ActiveTunnels: s.countActiveTunnelsForNode(nodeID),
-		LastSeenAt:    now,
-		Metadata:      mergeAgentMetadata(existing.Summary.Metadata, req.Metadata),
+		NodeID:         nodeID,
+		NodeName:       req.NodeName,
+		Status:         "online",
+		AgentVersion:   req.AgentVersion,
+		Capabilities:   req.Capabilities,
+		ActiveTunnels:  s.countActiveTunnelsForNode(nodeID),
+		RuntimeSummary: s.buildNodeRuntimeSummaryLocked(nodeID),
+		LastSeenAt:     now,
+		Metadata:       mergeAgentMetadata(existing.Summary.Metadata, req.Metadata),
 	}
 	summary = hydrateNodeSummary(summary)
 	s.nodes[nodeID] = nodeRecord{Summary: summary, Metrics: map[string]string{}}
@@ -80,6 +81,7 @@ func (s *InMemoryStore) HeartbeatNode(_ context.Context, req types.NodeHeartbeat
 	record.Summary.Status = "online"
 	record.Summary.LastSeenAt = now
 	record.Summary.ActiveTunnels = req.ActiveTunnels
+	record.Summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(req.NodeID)
 	record.Metrics = req.Metrics
 	record.Summary = hydrateNodeSummary(record.Summary)
 	s.nodes[req.NodeID] = record
@@ -92,6 +94,7 @@ func (s *InMemoryStore) ListNodes(_ context.Context, filter NodeFilter) ([]types
 	items := make([]types.NodeSummary, 0, len(s.nodes))
 	for _, record := range s.nodes {
 		summary := hydrateNodeSummary(record.Summary)
+		summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(summary.NodeID)
 		if !matchesNodeFilter(summary, filter) {
 			continue
 		}
@@ -124,7 +127,9 @@ func (s *InMemoryStore) GetNode(_ context.Context, nodeID string) (types.NodeSum
 	if !ok {
 		return types.NodeSummary{}, ErrNotFound
 	}
-	return hydrateNodeSummary(record.Summary), nil
+	summary := hydrateNodeSummary(record.Summary)
+	summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(nodeID)
+	return summary, nil
 }
 
 func (s *InMemoryStore) UpdateNode(_ context.Context, params UpdateNodeParams) (types.NodeSummary, error) {
@@ -135,6 +140,7 @@ func (s *InMemoryStore) UpdateNode(_ context.Context, params UpdateNodeParams) (
 		return types.NodeSummary{}, ErrNotFound
 	}
 	record.Summary.Metadata = mergeNodeMetadata(record.Summary.Metadata, params)
+	record.Summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(params.NodeID)
 	record.Summary = hydrateNodeSummary(record.Summary)
 	s.nodes[params.NodeID] = record
 	return record.Summary, nil
@@ -158,6 +164,7 @@ func (s *InMemoryStore) CreateTunnel(_ context.Context, spec types.TunnelSpec) (
 	s.tunnels[tunnel.ID] = tunnel
 	if record, ok := s.nodes[tunnel.NodeID]; ok {
 		record.Summary.ActiveTunnels = s.countActiveTunnelsForNode(record.Summary.NodeID)
+		record.Summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(record.Summary.NodeID)
 		s.nodes[record.Summary.NodeID] = record
 	}
 	s.mu.Unlock()
@@ -200,6 +207,7 @@ func (s *InMemoryStore) UpdateTunnel(_ context.Context, spec types.TunnelSpec) (
 	s.tunnels[tunnel.ID] = tunnel
 	for nodeID, record := range s.nodes {
 		record.Summary.ActiveTunnels = s.countActiveTunnelsForNode(nodeID)
+		record.Summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(nodeID)
 		s.nodes[nodeID] = record
 	}
 	s.mu.Unlock()
@@ -216,6 +224,7 @@ func (s *InMemoryStore) DeleteTunnel(_ context.Context, id string) error {
 	delete(s.tunnels, id)
 	if record, ok := s.nodes[tunnel.NodeID]; ok {
 		record.Summary.ActiveTunnels = s.countActiveTunnelsForNode(record.Summary.NodeID)
+		record.Summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(record.Summary.NodeID)
 		s.nodes[record.Summary.NodeID] = record
 	}
 	s.mu.Unlock()
@@ -468,6 +477,17 @@ func (s *InMemoryStore) countActiveTunnelsForNode(nodeID string) int {
 		}
 	}
 	return count
+}
+
+func (s *InMemoryStore) buildNodeRuntimeSummaryLocked(nodeID string) types.NodeRuntimeSummary {
+	items := make([]types.TunnelSpec, 0)
+	for _, tunnel := range s.tunnels {
+		if tunnel.NodeID != nodeID {
+			continue
+		}
+		items = append(items, tunnel)
+	}
+	return summarizeNodeRuntimeTunnels(items)
 }
 
 func (s *InMemoryStore) findPublicPortConflictLocked(excludeID, tunnelType, status string, publicPort int) bool {

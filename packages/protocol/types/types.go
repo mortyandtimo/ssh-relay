@@ -161,21 +161,31 @@ type UDPDatagramFrame struct {
 }
 
 type NodeSummary struct {
-	NodeID        string            `json:"nodeId"`
-	NodeName      string            `json:"nodeName"`
-	Status        string            `json:"status"`
-	AgentVersion  string            `json:"agentVersion"`
-	Capabilities  NodeCapabilities  `json:"capabilities"`
-	ActiveTunnels int               `json:"activeTunnels"`
-	LastSeenAt    time.Time         `json:"lastSeenAt"`
-	Metadata      map[string]string `json:"metadata,omitempty"`
-	NodeRole      NodeRole          `json:"nodeRole,omitempty"`
-	Environment   NodeEnvironment   `json:"environment,omitempty"`
-	TrustLevel    NodeTrustLevel    `json:"trustLevel,omitempty"`
-	Owner         string            `json:"owner,omitempty"`
-	Location      string            `json:"location,omitempty"`
-	Tags          []string          `json:"tags,omitempty"`
-	Isolated      bool              `json:"isolated,omitempty"`
+	NodeID         string             `json:"nodeId"`
+	NodeName       string             `json:"nodeName"`
+	Status         string             `json:"status"`
+	AgentVersion   string             `json:"agentVersion"`
+	Capabilities   NodeCapabilities   `json:"capabilities"`
+	ActiveTunnels  int                `json:"activeTunnels"`
+	RuntimeSummary NodeRuntimeSummary `json:"runtimeSummary"`
+	LastSeenAt     time.Time          `json:"lastSeenAt"`
+	Metadata       map[string]string  `json:"metadata,omitempty"`
+	NodeRole       NodeRole           `json:"nodeRole,omitempty"`
+	Environment    NodeEnvironment    `json:"environment,omitempty"`
+	TrustLevel     NodeTrustLevel     `json:"trustLevel,omitempty"`
+	Owner          string             `json:"owner,omitempty"`
+	Location       string             `json:"location,omitempty"`
+	Tags           []string           `json:"tags,omitempty"`
+	Isolated       bool               `json:"isolated,omitempty"`
+}
+
+type NodeRuntimeSummary struct {
+	ActiveTunnelCount     int `json:"activeTunnelCount"`
+	RelayPathCount        int `json:"relayPathCount"`
+	P2PPathCount          int `json:"p2pPathCount"`
+	PendingStateCount     int `json:"pendingStateCount"`
+	UnavailableStateCount int `json:"unavailableStateCount"`
+	FailureReasonCount    int `json:"failureReasonCount"`
 }
 
 type UpdateNodeRequest struct {
@@ -221,10 +231,10 @@ type PortRangePlan struct {
 }
 
 type TunnelPortSuggestionResponse struct {
-	Type       string          `json:"type"`
-	Suggested  int             `json:"suggested"`
-	Plan       PortRangePlan   `json:"plan"`
-	Compatible bool            `json:"compatible"`
+	Type       string        `json:"type"`
+	Suggested  int           `json:"suggested"`
+	Plan       PortRangePlan `json:"plan"`
+	Compatible bool          `json:"compatible"`
 }
 
 type ServerMetrics struct {
