@@ -1059,7 +1059,7 @@ export default function App() {
   const httpsCapableNodeCount = allNodes.filter((node) => node.supportsHTTPS ?? node.supportsHTTP).length;
   const udpCapableNodeCount = allNodes.filter((node) => node.supportsUDP).length;
   const socks5CapableNodeCount = allNodes.filter((node) => node.supportsSOCKS5).length;
-  const p2pCapableNodeCount = allNodes.filter((node) => node.supportsP2P).length;
+  const p2pCapableNodeCount = nodes.filter((node) => node.capabilities.p2pAssist).length;
   const p2pCandidateNodeCount = nodes.filter((node) => node.capabilities.p2pAssist && (node.nodeRole === "local" || node.nodeRole === "third_party") && node.status === "online").length;
   const tunnelFormNodeOption = allNodes.find((node) => node.nodeId === tunnelForm.nodeId) ?? null;
   const tunnelEditNodeOption = tunnelEditForm ? allNodes.find((node) => node.nodeId === tunnelEditForm.nodeId) ?? null : null;
