@@ -92,6 +92,9 @@ type TunnelSpec = {
   name: string;
   type: string;
   transportPolicy: string;
+  runtimePath?: string;
+  runtimeState?: string;
+  lastFailureReason?: string;
   nodeId: string;
   targetHost: string;
   targetPort: number;
@@ -1777,6 +1780,9 @@ export default function App() {
                             <FactRow label="运行依赖" value={tunnelRequirementSummary(selectedTunnel, nodes)} />
                             <FactRow label="当前归属" value={selectedTunnelPlacement ? selectedTunnelPlacement.summary : "-"} />
                             <FactRow label="transportPolicy" value={<code>{selectedTunnel.transportPolicy || "relay_only"}</code>} />
+                            <FactRow label="runtimePath" value={<code>{selectedTunnel.runtimePath || "尚无运行态上报"}</code>} />
+                            <FactRow label="runtimeState" value={<code>{selectedTunnel.runtimeState || "尚无运行态上报"}</code>} />
+                            <FactRow label="lastFailureReason" value={<code>{selectedTunnel.lastFailureReason || "尚无运行态上报"}</code>} />
                             {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <FactRow label="probePath" value={<code>{selectedTunnel.probePath || "/"}</code>} /> : null}
                             {selectedTunnel.type === "https" ? <FactRow label="publicPort" value={<span><code>{selectedTunnel.publicPort}</code> 仅作内部保留字段</span>} /> : null}
                           </div>
@@ -1799,10 +1805,28 @@ export default function App() {
                             <div className={(selectedTunnel.healthStatus || "healthy") !== "healthy" ? "ops-note tone-danger note-strong" : "ops-note tone-good"}>{tunnelAvailabilityText(selectedTunnel)}</div>
                             <div className={deriveProbeFreshnessState(selectedTunnel) === "recent_failure" ? "ops-note tone-danger note-strong" : deriveProbeFreshnessState(selectedTunnel) === "stale" ? "ops-note tone-warn" : "ops-note tone-info"}>Probe 状态：{probeFreshnessLabel(deriveProbeFreshnessState(selectedTunnel))}</div>
                             <div className="ops-note tone-neutral">节点：{selectedTunnel.nodeId}</div>
+                            <div className={selectedTunnel.runtimeState === "active" ? "ops-note tone-info" : selectedTunnel.runtimeState ? "ops-note tone-warn" : "ops-note tone-neutral"}>运行态：{selectedTunnel.runtimePath && selectedTunnel.runtimeState ? selectedTunnel.runtimePath + " / " + selectedTunnel.runtimeState : "尚无运行态上报"}</div>
+                            {selectedTunnel.lastFailureReason ? <div className="ops-note tone-warn">最近失败原因：{selectedTunnel.lastFailureReason}</div> : <div className="ops-note tone-neutral">最近失败原因：尚无运行态上报</div>}
                             {selectedTunnelPlacement ? selectedTunnelPlacement.notes.map((note) => <div key={note} className={note.includes("不合适") || note.includes("离线") || note.includes("缺失") ? "ops-note tone-danger note-strong" : note.includes("高承载") ? "ops-note tone-warn" : "ops-note tone-info"}>{note}</div>) : null}
                           </div>
                         </div>
                       </div>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>当前运行态</h3>
+                            <span className="muted-line">这里展示的是当前运行事实，不等于 transportPolicy 配置意图；不会因为配置想走 p2p 就伪装成当前已走 p2p。</span>
+                          </div>
+                        </div>
+                        <div className="empty-state placement-panel">
+                          <strong>{selectedTunnel.runtimePath && selectedTunnel.runtimeState ? selectedTunnel.runtimePath + " / " + selectedTunnel.runtimeState : "尚无运行态上报"}</strong>
+                          <p>隧道类型：<code>{selectedTunnel.type}</code></p>
+                          <p>配置意图：<code>{selectedTunnel.transportPolicy || "relay_only"}</code></p>
+                          <p>当前运行事实：<code>{selectedTunnel.runtimePath || "尚无运行态上报"}</code> / <code>{selectedTunnel.runtimeState || "尚无运行态上报"}</code></p>
+                          <p>最近失败原因：<code>{selectedTunnel.lastFailureReason || "尚无运行态上报"}</code></p>
+                        </div>
+                      </section>
 
                       <section className="workbench-section">
                         <div className="section-head compact-head">
@@ -1831,6 +1855,7 @@ export default function App() {
                         <div className="empty-state placement-panel">
                           <strong>{selectedTunnel.transportPolicy === "p2p_preferred" ? "p2p_preferred（预留语义）" : "relay_only（当前默认）"}</strong>
                           <p>当前为什么仍走 relay_only：本轮没有实现 NAT 穿透、打洞、ICE/STUN/TURN 或真实 P2P 数据面。</p>
+                          <p>当前 runtimePath/runtimeState 代表运行事实；即使 transportPolicy 为 <code>p2p_preferred</code>，只要 runtime 仍上报 <code>relay</code> / <code>pending</code>，就不能表达成“当前已走 p2p”。</p>
                           <p>当前可见性价值：让运维能知道这个 tunnel 将来是否优先尝试 P2P，而不是只能脑补 transport policy。</p>
                         </div>
                       </section>
