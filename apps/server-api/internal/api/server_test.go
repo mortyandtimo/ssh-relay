@@ -1171,6 +1171,66 @@ func TestTunnelRuntimeFieldsStaySeparateFromTransportPolicy(t *testing.T) {
 	}
 }
 
+func TestTunnelRuntimeFieldsWithNilMetadataDoNotPanic(t *testing.T) {
+	backend := store.NewInMemoryStore()
+	created, err := backend.CreateTunnel(context.Background(), types.TunnelSpec{
+		ID:                "runtime-nil-meta-a",
+		Name:              "runtime-nil-meta-a",
+		Type:              "tcp",
+		TransportPolicy:   types.TunnelTransportP2PPreferred,
+		RuntimePath:       types.TunnelRuntimePathRelay,
+		RuntimeState:      types.TunnelRuntimeStatePending,
+		LastFailureReason: "p2p data-plane not enabled yet",
+		NodeID:            "node-a",
+		TargetHost:        "127.0.0.1",
+		TargetPort:        19090,
+		PublicPort:        19091,
+		Status:            "active",
+		Metadata:          nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.RuntimePath != types.TunnelRuntimePathRelay || created.RuntimeState != types.TunnelRuntimeStatePending || created.LastFailureReason != "p2p data-plane not enabled yet" {
+		t.Fatalf("unexpected create runtime fields: %+v", created)
+	}
+	got, err := backend.GetTunnel(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RuntimePath != types.TunnelRuntimePathRelay || got.RuntimeState != types.TunnelRuntimeStatePending || got.LastFailureReason != "p2p data-plane not enabled yet" {
+		t.Fatalf("unexpected get runtime fields: %+v", got)
+	}
+	items, err := backend.ListTunnels(context.Background(), store.TunnelFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 tunnel, got %d", len(items))
+	}
+	if items[0].RuntimePath != types.TunnelRuntimePathRelay || items[0].RuntimeState != types.TunnelRuntimeStatePending || items[0].LastFailureReason != "p2p data-plane not enabled yet" {
+		t.Fatalf("unexpected list runtime fields: %+v", items[0])
+	}
+	got.RuntimePath = types.TunnelRuntimePathP2P
+	got.RuntimeState = types.TunnelRuntimeStateActive
+	got.LastFailureReason = ""
+	got.Metadata = nil
+	updated, err := backend.UpdateTunnel(context.Background(), got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.RuntimePath != types.TunnelRuntimePathP2P || updated.RuntimeState != types.TunnelRuntimeStateActive || updated.LastFailureReason != "" {
+		t.Fatalf("unexpected update runtime fields: %+v", updated)
+	}
+	again, err := backend.GetTunnel(context.Background(), got.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.RuntimePath != types.TunnelRuntimePathP2P || again.RuntimeState != types.TunnelRuntimeStateActive || again.LastFailureReason != "" {
+		t.Fatalf("unexpected get after update runtime fields: %+v", again)
+	}
+}
+
 func TestPublicPortConflictSemanticsByProtocol(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"

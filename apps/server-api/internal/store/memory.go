@@ -503,6 +503,9 @@ func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {
 	if tunnel.TransportPolicy == "" {
 		tunnel.TransportPolicy = "relay_only"
 	}
+	if tunnel.Metadata == nil {
+		tunnel.Metadata = map[string]string{}
+	}
 	if tunnel.RuntimePath == "" {
 		tunnel.RuntimePath = tunnel.Metadata["runtimePath"]
 	} else {
@@ -520,9 +523,6 @@ func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {
 	}
 	if tunnel.UpdatedAt.IsZero() {
 		tunnel.UpdatedAt = time.Now().UTC()
-	}
-	if tunnel.Metadata == nil {
-		tunnel.Metadata = map[string]string{}
 	}
 	if tunnel.ProbePath == "" {
 		tunnel.ProbePath = tunnel.Metadata["probePath"]
