@@ -103,6 +103,9 @@ type TunnelSpec struct {
 	Name                 string             `json:"name"`
 	Type                 string             `json:"type"`
 	TransportPolicy      string             `json:"transportPolicy"`
+	RuntimePath          string             `json:"runtimePath,omitempty"`
+	RuntimeState         string             `json:"runtimeState,omitempty"`
+	LastFailureReason    string             `json:"lastFailureReason,omitempty"`
 	NodeID               string             `json:"nodeId,omitempty"`
 	TargetHost           string             `json:"targetHost"`
 	TargetPort           int                `json:"targetPort"`
@@ -124,6 +127,15 @@ type TunnelSpec struct {
 const (
 	TunnelTransportRelayOnly    = "relay_only"
 	TunnelTransportP2PPreferred = "p2p_preferred"
+)
+
+const (
+	TunnelRuntimePathRelay = "relay"
+	TunnelRuntimePathP2P   = "p2p"
+
+	TunnelRuntimeStatePending     = "pending"
+	TunnelRuntimeStateActive      = "active"
+	TunnelRuntimeStateUnavailable = "unavailable"
 )
 
 type AgentRelayHello struct {

@@ -1090,6 +1090,87 @@ func TestSOCKS5TunnelRequiresSOCKS5CapableNode(t *testing.T) {
 	}
 }
 
+func TestTunnelRuntimeFieldsStaySeparateFromTransportPolicy(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeName: "p2p-phase1-node", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true, P2PAssist: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":              "tunnel-p2p-phase1-a",
+		"nodeId":          registerOut.NodeID,
+		"name":            "p2p-phase1-a",
+		"type":            "tcp",
+		"transportPolicy": types.TunnelTransportP2PPreferred,
+		"targetHost":      "127.0.0.1",
+		"targetPort":      18090,
+		"publicPort":      18091,
+		"status":          "active",
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create status 201, got %d", createRes.Code)
+	}
+
+	created, err := server.store.GetTunnel(context.Background(), "tunnel-p2p-phase1-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.RuntimePath = types.TunnelRuntimePathRelay
+	created.RuntimeState = types.TunnelRuntimeStatePending
+	created.LastFailureReason = "p2p data-plane not enabled yet"
+	if created.Metadata == nil {
+		created.Metadata = map[string]string{}
+	}
+	created.Metadata["runtimePath"] = created.RuntimePath
+	created.Metadata["runtimeState"] = created.RuntimeState
+	created.Metadata["lastFailureReason"] = created.LastFailureReason
+	if _, err := server.store.UpdateTunnel(context.Background(), created); err != nil {
+		t.Fatal(err)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/tunnel-p2p-phase1-a", nil)
+	applyCookies(getReq, adminCookies)
+	getRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(getRes, getReq)
+	if getRes.Code != http.StatusOK {
+		t.Fatalf("expected get status 200, got %d", getRes.Code)
+	}
+	var out types.TunnelSpec
+	if err := json.NewDecoder(getRes.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Type != "tcp" {
+		t.Fatalf("expected type tcp, got %s", out.Type)
+	}
+	if out.TransportPolicy != types.TunnelTransportP2PPreferred {
+		t.Fatalf("expected transportPolicy p2p_preferred, got %s", out.TransportPolicy)
+	}
+	if out.RuntimePath != types.TunnelRuntimePathRelay {
+		t.Fatalf("expected runtimePath relay, got %s", out.RuntimePath)
+	}
+	if out.RuntimeState != types.TunnelRuntimeStatePending {
+		t.Fatalf("expected runtimeState pending, got %s", out.RuntimeState)
+	}
+	if out.LastFailureReason != "p2p data-plane not enabled yet" {
+		t.Fatalf("expected lastFailureReason to round-trip, got %q", out.LastFailureReason)
+	}
+	if out.TransportPolicy == out.RuntimePath {
+		t.Fatalf("transportPolicy and runtimePath must remain separate semantics")
+	}
+}
+
 func TestPublicPortConflictSemanticsByProtocol(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"

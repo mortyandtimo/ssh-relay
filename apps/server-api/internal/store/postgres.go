@@ -326,6 +326,9 @@ func (s *PostgresStore) GetTunnel(ctx context.Context, id string) (types.TunnelS
 	}
 	item.ProbePath = item.Metadata["probePath"]
 	hydrateLastProbeFields(&item)
+	item.RuntimePath = item.Metadata["runtimePath"]
+	item.RuntimeState = item.Metadata["runtimeState"]
+	item.LastFailureReason = item.Metadata["lastFailureReason"]
 	return item, nil
 }
 
@@ -423,6 +426,9 @@ func (s *PostgresStore) ListTunnels(ctx context.Context, filter TunnelFilter) ([
 		}
 		item.ProbePath = item.Metadata["probePath"]
 		hydrateLastProbeFields(&item)
+		item.RuntimePath = item.Metadata["runtimePath"]
+		item.RuntimeState = item.Metadata["runtimeState"]
+		item.LastFailureReason = item.Metadata["lastFailureReason"]
 		items = append(items, item)
 	}
 	return items, rows.Err()

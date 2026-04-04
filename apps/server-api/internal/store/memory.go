@@ -503,6 +503,21 @@ func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {
 	if tunnel.TransportPolicy == "" {
 		tunnel.TransportPolicy = "relay_only"
 	}
+	if tunnel.RuntimePath == "" {
+		tunnel.RuntimePath = tunnel.Metadata["runtimePath"]
+	} else {
+		tunnel.Metadata["runtimePath"] = tunnel.RuntimePath
+	}
+	if tunnel.RuntimeState == "" {
+		tunnel.RuntimeState = tunnel.Metadata["runtimeState"]
+	} else {
+		tunnel.Metadata["runtimeState"] = tunnel.RuntimeState
+	}
+	if tunnel.LastFailureReason == "" {
+		tunnel.LastFailureReason = tunnel.Metadata["lastFailureReason"]
+	} else {
+		tunnel.Metadata["lastFailureReason"] = tunnel.LastFailureReason
+	}
 	if tunnel.UpdatedAt.IsZero() {
 		tunnel.UpdatedAt = time.Now().UTC()
 	}
@@ -524,6 +539,9 @@ func normalizeTunnel(spec types.TunnelSpec) types.TunnelSpec {
 	}
 	tunnel.LastProbeError = tunnel.Metadata["lastProbeError"]
 	tunnel.LastProbeTargetEntry = tunnel.Metadata["lastProbeTargetEntry"]
+	tunnel.RuntimePath = tunnel.Metadata["runtimePath"]
+	tunnel.RuntimeState = tunnel.Metadata["runtimeState"]
+	tunnel.LastFailureReason = tunnel.Metadata["lastFailureReason"]
 	if value := tunnel.Metadata["lastProbedAt"]; value != "" {
 		if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
 			tunnel.LastProbedAt = parsed
