@@ -193,25 +193,34 @@ func allowedActionsForTarget(targetKind types.ControlTargetKind) []types.Control
 }
 
 func controlActionOptionFromResponse(result types.ControlActionResponse) types.ControlActionOption {
-	option := types.ControlActionOption{
-		ActionKind:      result.ActionKind,
-		TargetKind:      result.TargetKind,
-		TargetID:        result.TargetID,
-		SourceSurface:   result.SourceSurface,
-		Label:           controlActionLabel(result.ActionKind),
-		Message:         result.HumanMessage,
-		ExecutionMode:   types.ControlExecutionPlaceholder,
-		PlaceholderOnly: true,
-		ExecutionNotes:  []types.ControlExecutionNote{{Code: types.ControlReasonPlaceholderOnly, Message: "当前只会进入 placeholder execute。"}},
-		ReasonHints:     append([]types.ControlBlockedReason{}, result.Preflight.BlockedReasons...),
-	}
 	if result.Result == types.ControlResultAccepted {
-		option.Available = true
-		option.AvailabilityState = types.ControlAvailabilityPlaceholderOnly
-		return option
+		return types.ControlActionOption{
+			ActionKind:        result.ActionKind,
+			TargetKind:        result.TargetKind,
+			TargetID:          result.TargetID,
+			SourceSurface:     result.SourceSurface,
+			Available:         true,
+			AvailabilityState: types.ControlAvailabilityPlaceholderOnly,
+			Label:             controlActionLabel(result.ActionKind),
+			Message:           result.HumanMessage,
+			ExecutionMode:     types.ControlExecutionPlaceholder,
+			PlaceholderOnly:   true,
+			ExecutionNotes:    []types.ControlExecutionNote{{Code: types.ControlReasonPlaceholderOnly, Message: "当前只会进入 placeholder execute。"}},
+		}
 	}
-	option.Available = false
-	option.AvailabilityState = types.ControlAvailabilityBlocked
+	option := types.ControlActionOption{
+		ActionKind:        result.ActionKind,
+		TargetKind:        result.TargetKind,
+		TargetID:          result.TargetID,
+		SourceSurface:     result.SourceSurface,
+		Available:         false,
+		AvailabilityState: types.ControlAvailabilityBlocked,
+		Label:             controlActionLabel(result.ActionKind),
+		Message:           result.HumanMessage,
+		ExecutionMode:     types.ControlExecutionPlaceholder,
+		PlaceholderOnly:   false,
+		ReasonHints:       append([]types.ControlBlockedReason{}, result.Preflight.BlockedReasons...),
+	}
 	if len(result.Preflight.BlockedReasons) > 0 {
 		option.PrimaryReasonCode = result.Preflight.BlockedReasons[0].Code
 	}
