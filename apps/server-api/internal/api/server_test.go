@@ -3018,10 +3018,9 @@ func TestControlExecuteOnlyCallsExecutorForAllowedNonDryRun(t *testing.T) {
 	registerNode("node-exec-blocked", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-exec-blocked.service", "instanceProfile": "node-exec-blocked", "instanceManaged": "true", "isolated": "true"})
 
 	spy := &spyControlExecutor{result: controlExecutionResult{
-		result:          types.ControlResultAccepted,
-		humanMessage:    "spy accepted placeholder execute",
-		executionMode:   types.ControlExecutionPlaceholder,
-		placeholderOnly: true,
+		outcome:       controlExecutionOutcomeAcceptedPlaceholder,
+		humanMessage:  "spy accepted placeholder execute",
+		executionMode: types.ControlExecutionPlaceholder,
 		executionNotes: []types.ControlExecutionNote{{
 			Code:    types.ControlReasonPlaceholderOnly,
 			Message: "spy placeholder executor",
@@ -3080,4 +3079,115 @@ func TestControlExecuteOnlyCallsExecutorForAllowedNonDryRun(t *testing.T) {
 	if _, ok := NewServer("test", store.NewInMemoryStore(), "").controlExecutor.(placeholderControlExecutor); !ok {
 		t.Fatalf("expected default control executor to remain placeholder")
 	}
+}
+
+func TestBuildControlActionResponseMapsExecutionOutcomes(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-translate", NodeName: "node-translate", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-translate.service", "instanceProfile": "node-translate", "instanceManaged": "true"}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+
+	readySnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetNode, "node-translate", types.ControlSurfaceNodeConsole)
+	if status != http.StatusOK {
+		t.Fatalf("expected ready snapshot status 200, got %d", status)
+	}
+	readyAction := findActionSnapshot(readySnapshot, types.ControlActionRestartAgent)
+	if readyAction == nil {
+		t.Fatalf("expected ready action snapshot")
+	}
+	readyPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionRestartAgent, TargetKind: types.ControlTargetNode, TargetID: "node-translate", SourceSurface: types.ControlSurfaceNodeConsole, RequestedAt: time.Now().UTC()}, readySnapshot, *readyAction)
+
+	blockedSnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetNode, "node-translate", types.ControlSurfaceNodeConsole)
+	if status != http.StatusOK {
+		t.Fatalf("expected blocked snapshot source status 200, got %d", status)
+	}
+	blockedAction := *findActionSnapshot(blockedSnapshot, types.ControlActionRestartAgent)
+	blockedAction.response.Preflight.Allowed = false
+	blockedAction.response.Preflight.BlockedReasons = []types.ControlBlockedReason{{Code: types.ControlReasonNodeOffline, Message: "node offline for translator test"}}
+	blockedPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionRestartAgent, TargetKind: types.ControlTargetNode, TargetID: "node-translate", SourceSurface: types.ControlSurfaceNodeConsole, RequestedAt: time.Now().UTC()}, blockedSnapshot, blockedAction)
+
+	assertMapped := func(name string, plan controlExecutionPlan, result controlExecutionResult, wantResult types.ControlResult, wantPlaceholder bool, wantNote bool, wantMessage string, wantBlockedReason types.ControlReasonCode) {
+		resp := buildControlActionResponse(plan.actionEvaluation.request, plan, result)
+		if resp.Result != wantResult {
+			t.Fatalf("%s: expected result %s, got %+v", name, wantResult, resp)
+		}
+		if resp.PlaceholderOnly != wantPlaceholder {
+			t.Fatalf("%s: expected placeholderOnly=%t, got %+v", name, wantPlaceholder, resp)
+		}
+		if (len(resp.ExecutionNotes) > 0) != wantNote {
+			t.Fatalf("%s: expected executionNotes present=%t, got %+v", name, wantNote, resp.ExecutionNotes)
+		}
+		if resp.HumanMessage != wantMessage {
+			t.Fatalf("%s: expected human message %q, got %+v", name, wantMessage, resp)
+		}
+		if wantBlockedReason != "" {
+			if len(resp.Preflight.BlockedReasons) == 0 || resp.Preflight.BlockedReasons[0].Code != wantBlockedReason {
+				t.Fatalf("%s: expected blocked reason %s, got %+v", name, wantBlockedReason, resp.Preflight.BlockedReasons)
+			}
+		}
+	}
+
+	assertMapped(
+		"accepted placeholder",
+		readyPlan,
+		acceptedPlaceholderExecutionResult(readyPlan),
+		types.ControlResultAccepted,
+		true,
+		true,
+		"动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。",
+		"",
+	)
+
+	assertMapped(
+		"blocked preflight",
+		blockedPlan,
+		blockedExecutionResult(blockedPlan),
+		types.ControlResultBlocked,
+		false,
+		false,
+		"execute 已被预检阻断。",
+		types.ControlReasonNodeOffline,
+	)
+
+	assertMapped(
+		"executor rejected",
+		readyPlan,
+		controlExecutionResult{
+			outcome:       controlExecutionOutcomeExecutorRejected,
+			humanMessage:  "executor rejected this action",
+			executionMode: types.ControlExecutionPlaceholder,
+			executionNotes: []types.ControlExecutionNote{{
+				Message: "executor rejected note",
+			}},
+		},
+		types.ControlResultRejected,
+		false,
+		true,
+		"executor rejected this action",
+		"",
+	)
+
+	assertMapped(
+		"executor failed",
+		readyPlan,
+		controlExecutionResult{
+			outcome:       controlExecutionOutcomeExecutorFailed,
+			humanMessage:  "executor failed this action",
+			executionMode: types.ControlExecutionPlaceholder,
+			executionNotes: []types.ControlExecutionNote{{
+				Message: "executor failed note",
+			}},
+		},
+		types.ControlResultRejected,
+		false,
+		true,
+		"executor failed this action",
+		"",
+	)
 }

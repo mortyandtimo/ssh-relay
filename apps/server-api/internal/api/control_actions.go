@@ -56,17 +56,27 @@ type controlExecutionPlan struct {
 	actionEvaluation  evaluatedControlAction
 }
 
+type controlExecutionOutcome string
+
+const (
+	controlExecutionOutcomeAcceptedPlaceholder controlExecutionOutcome = "accepted_placeholder"
+	controlExecutionOutcomeBlockedPreflight    controlExecutionOutcome = "blocked_preflight"
+	controlExecutionOutcomeExecutorRejected    controlExecutionOutcome = "executor_rejected"
+	controlExecutionOutcomeExecutorFailed      controlExecutionOutcome = "executor_failed"
+)
+
 type controlExecutionResult struct {
-	result          types.ControlResult
-	humanMessage    string
-	executionMode   types.ControlExecutionMode
-	placeholderOnly bool
-	executionNotes  []types.ControlExecutionNote
+	outcome        controlExecutionOutcome
+	humanMessage   string
+	executionMode  types.ControlExecutionMode
+	executionNotes []types.ControlExecutionNote
 }
 
 type controlExecutor interface {
 	// execute only handles already-allowed execute paths. Blocked and dry-run
 	// requests are resolved in evaluateControlAction before the executor seam.
+	// Executors may still classify allowed executions as accepted, rejected, or
+	// failed without changing the external HTTP response schema.
 	execute(ctx context.Context, plan controlExecutionPlan) controlExecutionResult
 }
 
@@ -77,16 +87,7 @@ func newPlaceholderControlExecutor() controlExecutor {
 }
 
 func (placeholderControlExecutor) execute(_ context.Context, plan controlExecutionPlan) controlExecutionResult {
-	return controlExecutionResult{
-		result:          types.ControlResultAccepted,
-		humanMessage:    "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。",
-		executionMode:   plan.executionMode,
-		placeholderOnly: true,
-		executionNotes: []types.ControlExecutionNote{{
-			Code:    types.ControlReasonPlaceholderOnly,
-			Message: "当前还没有接入真实系统执行器。",
-		}},
-	}
+	return acceptedPlaceholderExecutionResult(plan)
 }
 
 func newControlPreflightBuilder() *controlPreflightBuilder {
@@ -378,29 +379,91 @@ func buildExecutionPlan(req types.ControlActionRequest, snapshot controlTargetSn
 
 func buildControlActionResponse(req types.ControlActionRequest, plan controlExecutionPlan, result controlExecutionResult) types.ControlActionResponse {
 	resp := cloneControlActionResponse(plan.actionEvaluation.response)
-	resp.Result = result.result
 	resp.ActionKind = req.ActionKind
 	resp.TargetKind = req.TargetKind
 	resp.TargetID = req.TargetID
 	resp.SourceSurface = req.SourceSurface
-	resp.HumanMessage = result.humanMessage
 	resp.DryRunOnly = false
-	resp.ExecutionMode = result.executionMode
-	resp.PlaceholderOnly = result.placeholderOnly
-	resp.ExecutionNotes = append([]types.ControlExecutionNote{}, result.executionNotes...)
 	resp.Facts = cloneFacts(plan.targetFacts)
 	resp.Preflight = clonePreflightSummary(plan.preflight)
+	resp.ExecutionMode = result.executionMode
+	if resp.ExecutionMode == "" {
+		resp.ExecutionMode = plan.executionMode
+	}
+	switch result.outcome {
+	case controlExecutionOutcomeAcceptedPlaceholder:
+		resp.Result = types.ControlResultAccepted
+		resp.HumanMessage = defaultControlMessage(result.humanMessage, "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。")
+		resp.PlaceholderOnly = true
+		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, placeholderExecutionNotes())
+	case controlExecutionOutcomeBlockedPreflight:
+		resp.Result = types.ControlResultBlocked
+		resp.HumanMessage = defaultControlMessage(result.humanMessage, "execute 已被预检阻断。")
+		resp.PlaceholderOnly = false
+		resp.ExecutionNotes = cloneExecutionNotes(result.executionNotes)
+	case controlExecutionOutcomeExecutorRejected:
+		resp.Result = types.ControlResultRejected
+		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器拒绝了当前动作。")
+		resp.PlaceholderOnly = false
+		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行器拒绝执行当前动作。"}})
+	case controlExecutionOutcomeExecutorFailed:
+		resp.Result = types.ControlResultRejected
+		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器在处理当前动作时失败。")
+		resp.PlaceholderOnly = false
+		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行器在处理当前动作时失败。"}})
+	default:
+		resp.Result = types.ControlResultRejected
+		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器返回了未知结果。")
+		resp.PlaceholderOnly = false
+		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行器返回了未知结果。"}})
+	}
 	return resp
+}
+
+func acceptedPlaceholderExecutionResult(plan controlExecutionPlan) controlExecutionResult {
+	return controlExecutionResult{
+		outcome:       controlExecutionOutcomeAcceptedPlaceholder,
+		humanMessage:  "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。",
+		executionMode: plan.executionMode,
+		executionNotes: []types.ControlExecutionNote{{
+			Code:    types.ControlReasonPlaceholderOnly,
+			Message: "当前还没有接入真实系统执行器。",
+		}},
+	}
 }
 
 func blockedExecutionResult(plan controlExecutionPlan) controlExecutionResult {
 	return controlExecutionResult{
-		result:          types.ControlResultBlocked,
-		humanMessage:    "execute 已被预检阻断。",
-		executionMode:   plan.executionMode,
-		placeholderOnly: false,
-		executionNotes:  []types.ControlExecutionNote{},
+		outcome:        controlExecutionOutcomeBlockedPreflight,
+		humanMessage:   "execute 已被预检阻断。",
+		executionMode:  plan.executionMode,
+		executionNotes: []types.ControlExecutionNote{},
 	}
+}
+
+func placeholderExecutionNotes() []types.ControlExecutionNote {
+	return []types.ControlExecutionNote{{
+		Code:    types.ControlReasonPlaceholderOnly,
+		Message: "当前还没有接入真实系统执行器。",
+	}}
+}
+
+func defaultExecutionNotes(notes []types.ControlExecutionNote, fallback []types.ControlExecutionNote) []types.ControlExecutionNote {
+	if len(notes) > 0 {
+		return cloneExecutionNotes(notes)
+	}
+	return cloneExecutionNotes(fallback)
+}
+
+func cloneExecutionNotes(notes []types.ControlExecutionNote) []types.ControlExecutionNote {
+	return append([]types.ControlExecutionNote{}, notes...)
+}
+
+func defaultControlMessage(message string, fallback string) string {
+	if strings.TrimSpace(message) != "" {
+		return message
+	}
+	return fallback
 }
 
 func (s *Server) buildControlActionOptions(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (types.ControlActionOptionsResponse, int) {
