@@ -6,6 +6,17 @@ import { capabilitySummary, formatDate, nodeAgentDeploymentLabel, publicEntry, r
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
 
+type TunnelEditForm = {
+  name: string;
+  status: "active" | "paused";
+  targetHost: string;
+  targetPort: string;
+  publicPort: string;
+  domain: string;
+  probePath: string;
+  transportPolicy: string;
+};
+
 export default function App() {
   const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
   const [currentUser, setCurrentUser] = useState<UserSummary | null>(null);
@@ -13,6 +24,7 @@ export default function App() {
   const [tunnels, setTunnels] = useState<TunnelSpec[]>([]);
   const [activeTab, setActiveTab] = useState<TunnelTypeTab>("tcp");
   const [selectedTunnelId, setSelectedTunnelId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<TunnelEditForm | null>(null);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -82,6 +94,23 @@ export default function App() {
     () => (selectedTunnelId ? tabTunnels.find((tunnel) => tunnel.id === selectedTunnelId) ?? null : null),
     [selectedTunnelId, tabTunnels],
   );
+
+  useEffect(() => {
+    if (!selectedTunnel) {
+      setEditForm(null);
+      return;
+    }
+    setEditForm({
+      name: selectedTunnel.name,
+      status: selectedTunnel.status === "paused" ? "paused" : "active",
+      targetHost: selectedTunnel.targetHost || "",
+      targetPort: String(selectedTunnel.targetPort || ""),
+      publicPort: String(selectedTunnel.publicPort || ""),
+      domain: selectedTunnel.domain || "",
+      probePath: selectedTunnel.probePath || "",
+      transportPolicy: selectedTunnel.transportPolicy || "relay_only",
+    });
+  }, [selectedTunnel]);
   const boundNode = selectedNode;
   const bindingTone = localBinding.status === "success" ? "good" : localBinding.status === "config_error" ? "danger" : localBinding.status === "ambiguous" ? "warn" : "neutral";
   const bindingStatusLabel = localBinding.status === "success" ? "成功" : localBinding.status === "config_error" ? "配置错误" : localBinding.status === "ambiguous" ? "不唯一" : "未完成";
@@ -146,6 +175,38 @@ export default function App() {
     } finally {
       refreshInFlightRef.current = false;
       setRefreshing(false);
+    }
+  }
+
+  async function handleTunnelSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedTunnel || !boundNode || !editForm) {
+      return;
+    }
+    setBusy("save-tunnel");
+    setError("");
+    setMessage("");
+    try {
+      await api.updateTunnel(selectedTunnel.id, {
+        id: selectedTunnel.id,
+        nodeId: boundNode.nodeId,
+        name: editForm.name.trim(),
+        type: selectedTunnel.type,
+        status: editForm.status,
+        targetHost: editForm.targetHost.trim(),
+        targetPort: Number(editForm.targetPort),
+        publicPort: Number(editForm.publicPort),
+        domain: selectedTunnel.type === "http" || selectedTunnel.type === "https" ? editForm.domain.trim() : "",
+        probePath: selectedTunnel.type === "http" || selectedTunnel.type === "https" ? editForm.probePath.trim() : "",
+        transportPolicy: editForm.transportPolicy,
+        tlsMode: selectedTunnel.tlsMode || "",
+      });
+      await refreshConsoleData(false, "manual");
+      setMessage("当前 tunnel 的最小配置字段已提交，列表和详情已刷新。transportPolicy 仍只代表配置意图，不代表当前 runtime facts 已改变。");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "保存 tunnel 失败");
+    } finally {
+      setBusy("");
     }
   }
 
@@ -278,16 +339,31 @@ export default function App() {
                   <div className="panel tunnel-detail-panel">
                     <div className="panel-head small"><h3>当前隧道详情</h3></div>
                     {!selectedTunnel ? <div className="empty-inline">请先在左侧选择一个 tunnel。</div> : (
-                      <div className="detail-stack">
-                        <Metric label="name" value={selectedTunnel.name} />
-                        <Metric label="type" value={selectedTunnel.type} />
-                        <Metric label="transportPolicy" value={selectedTunnel.transportPolicy || "relay_only"} />
-                        <Metric label="runtimePath" value={selectedTunnel.runtimePath || "尚无运行态上报"} />
-                        <Metric label="runtimeState" value={selectedTunnel.runtimeState || "尚无运行态上报"} />
-                        <Metric label="lastFailureReason" value={selectedTunnel.lastFailureReason || "尚无运行态上报"} />
-                        <Metric label="public entry" value={publicEntry(selectedTunnel)} />
-                        <Metric label="target" value={selectedTunnel.targetHost + ":" + selectedTunnel.targetPort} />
-                        <Metric label="status" value={selectedTunnel.status} />
+                      <div className="detail-column">
+                        <div className="detail-stack">
+                          <Metric label="name" value={selectedTunnel.name} />
+                          <Metric label="type" value={selectedTunnel.type} />
+                          <Metric label="transportPolicy" value={selectedTunnel.transportPolicy || "relay_only"} />
+                          <Metric label="runtimePath" value={selectedTunnel.runtimePath || "尚无运行态上报"} />
+                          <Metric label="runtimeState" value={selectedTunnel.runtimeState || "尚无运行态上报"} />
+                          <Metric label="lastFailureReason" value={selectedTunnel.lastFailureReason || "尚无运行态上报"} />
+                          <Metric label="public entry" value={publicEntry(selectedTunnel)} />
+                          <Metric label="target" value={selectedTunnel.targetHost + ":" + selectedTunnel.targetPort} />
+                          <Metric label="status" value={selectedTunnel.status} />
+                        </div>
+                        <form className="edit-form" onSubmit={handleTunnelSave}>
+                          <div className="panel-head small"><h3>最小编辑入口</h3></div>
+                          <label><span>tunnel 名称</span><input value={editForm?.name || ""} onChange={(event) => setEditForm((current) => current ? { ...current, name: event.target.value } : current)} /></label>
+                          <label><span>status</span><select value={editForm?.status || "active"} onChange={(event) => setEditForm((current) => current ? { ...current, status: event.target.value as "active" | "paused" } : current)}><option value="active">active</option><option value="paused">paused</option></select></label>
+                          <label><span>targetHost</span><input value={editForm?.targetHost || ""} onChange={(event) => setEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} /></label>
+                          <label><span>targetPort</span><input value={editForm?.targetPort || ""} onChange={(event) => setEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} /></label>
+                          <label><span>publicPort</span><input value={editForm?.publicPort || ""} onChange={(event) => setEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} /></label>
+                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>domain</span><input value={editForm?.domain || ""} onChange={(event) => setEditForm((current) => current ? { ...current, domain: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 domain。</div>}
+                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>probePath</span><input value={editForm?.probePath || ""} onChange={(event) => setEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 probePath。</div>}
+                          <label><span>transportPolicy</span><select value={editForm?.transportPolicy || "relay_only"} onChange={(event) => setEditForm((current) => current ? { ...current, transportPolicy: event.target.value } : current)}><option value="relay_only">relay_only</option><option value="p2p_preferred">p2p_preferred</option></select></label>
+                          <div className="weak-note">transportPolicy 只代表配置意图。当前 runtimePath / runtimeState / lastFailureReason 仍然是运行事实，这轮编辑不会把它们伪装成已经改变。</div>
+                          <button type="submit" disabled={busy === "save-tunnel"}>{busy === "save-tunnel" ? "保存中..." : "保存当前 tunnel"}</button>
+                        </form>
                       </div>
                     )}
                   </div>
