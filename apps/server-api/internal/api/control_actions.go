@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -59,12 +62,33 @@ type controlExecutionPlan struct {
 type controlExecutionOutcome string
 
 const (
+	controlExecutionOutcomeAcceptedReal        controlExecutionOutcome = "accepted_real"
 	controlExecutionOutcomeAcceptedPlaceholder controlExecutionOutcome = "accepted_placeholder"
 	controlExecutionOutcomeBlockedPreflight    controlExecutionOutcome = "blocked_preflight"
 	controlExecutionOutcomePolicyRejected      controlExecutionOutcome = "policy_rejected"
 	controlExecutionOutcomeRetryableFailure    controlExecutionOutcome = "retryable_failure"
 	controlExecutionOutcomeNonRetryableFailure controlExecutionOutcome = "non_retryable_failure"
 )
+
+const defaultRestartServicePrefix = "cloud-relay-client-agent@"
+
+type restartAgentExecutorConfig struct {
+	enabled              bool
+	localNodeID          string
+	allowedServicePrefix string
+	timeout              time.Duration
+}
+
+type controlCommandResult struct {
+	exitCode int
+	stdout   string
+	stderr   string
+	err      error
+}
+
+type restartAgentRunner interface {
+	restartService(ctx context.Context, serviceUnit string) controlCommandResult
+}
 
 type controlExecutionResult struct {
 	outcome        controlExecutionOutcome
@@ -81,10 +105,110 @@ type controlExecutor interface {
 	execute(ctx context.Context, plan controlExecutionPlan) controlExecutionResult
 }
 
+type restartCapableControlExecutor struct {
+	placeholder controlExecutor
+	restart     restartAgentExecutor
+}
+
+type restartAgentExecutor struct {
+	config restartAgentExecutorConfig
+	runner restartAgentRunner
+}
+
 type placeholderControlExecutor struct{}
+
+type systemctlRestartRunner struct{}
 
 func newPlaceholderControlExecutor() controlExecutor {
 	return placeholderControlExecutor{}
+}
+
+func newConfiguredControlExecutor() controlExecutor {
+	config := restartAgentExecutorConfig{
+		enabled:              parseBoolEnv(envOrDefault("SERVER_API_CONTROL_REAL_RESTART_ENABLED", "false")),
+		localNodeID:          strings.TrimSpace(envOrDefault("SERVER_API_CONTROL_LOCAL_NODE_ID", "")),
+		allowedServicePrefix: strings.TrimSpace(envOrDefault("SERVER_API_CONTROL_RESTART_SERVICE_PREFIX", defaultRestartServicePrefix)),
+		timeout:              time.Duration(parsePositiveInt(envOrDefault("SERVER_API_CONTROL_RESTART_TIMEOUT_SEC", "15"), 15)) * time.Second,
+	}
+	if !config.enabled {
+		return newPlaceholderControlExecutor()
+	}
+	return newRestartCapableControlExecutor(config, systemctlRestartRunner{})
+
+}
+
+func newRestartCapableControlExecutor(config restartAgentExecutorConfig, runner restartAgentRunner) controlExecutor {
+	if strings.TrimSpace(config.allowedServicePrefix) == "" {
+		config.allowedServicePrefix = defaultRestartServicePrefix
+	}
+	if config.timeout <= 0 {
+		config.timeout = 15 * time.Second
+	}
+	if runner == nil {
+		runner = systemctlRestartRunner{}
+	}
+	return restartCapableControlExecutor{
+		placeholder: newPlaceholderControlExecutor(),
+		restart: restartAgentExecutor{
+			config: config,
+			runner: runner,
+		},
+	}
+}
+
+func (e restartCapableControlExecutor) execute(ctx context.Context, plan controlExecutionPlan) controlExecutionResult {
+	if result, handled := e.restart.execute(ctx, plan); handled {
+		return result
+	}
+	return e.placeholder.execute(ctx, plan)
+}
+
+func (e restartAgentExecutor) execute(ctx context.Context, plan controlExecutionPlan) (controlExecutionResult, bool) {
+	if plan.actionKind != types.ControlActionRestartAgent || plan.targetKind != types.ControlTargetNode {
+		return controlExecutionResult{}, false
+	}
+	if !e.config.enabled {
+		return controlExecutionResult{}, false
+	}
+	if plan.sourceSurface != types.ControlSurfaceNodeConsole {
+		return controlExecutionResult{}, false
+	}
+	if strings.TrimSpace(e.config.localNodeID) == "" || plan.targetID != e.config.localNodeID {
+		return controlExecutionResult{}, false
+	}
+	serviceUnit := strings.TrimSpace(plan.targetFacts["serviceUnit"])
+	if rejected, ok := validateRestartAgentExecutionPolicy(plan, e.config.allowedServicePrefix, serviceUnit); ok {
+		return rejected, true
+	}
+	execCtx, cancel := context.WithTimeout(ctx, e.config.timeout)
+	defer cancel()
+	commandResult := e.runner.restartService(execCtx, serviceUnit)
+	return classifyRestartAgentCommandResult(plan, serviceUnit, commandResult), true
+}
+
+func (systemctlRestartRunner) restartService(ctx context.Context, serviceUnit string) controlCommandResult {
+	cmd := exec.CommandContext(ctx, "systemctl", "restart", serviceUnit)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	result := controlCommandResult{
+		stdout: strings.TrimSpace(stdout.String()),
+		stderr: strings.TrimSpace(stderr.String()),
+		err:    err,
+	}
+	if err == nil {
+		result.exitCode = 0
+		return result
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		result.exitCode = exitErr.ExitCode()
+	} else {
+		result.exitCode = -1
+	}
+	return result
 }
 
 func (placeholderControlExecutor) execute(_ context.Context, plan controlExecutionPlan) controlExecutionResult {
@@ -392,6 +516,11 @@ func buildControlActionResponse(req types.ControlActionRequest, plan controlExec
 		resp.ExecutionMode = plan.executionMode
 	}
 	switch result.outcome {
+	case controlExecutionOutcomeAcceptedReal:
+		resp.Result = types.ControlResultAccepted
+		resp.HumanMessage = defaultControlMessage(result.humanMessage, "已通过真实执行器触发 agent restart。")
+		resp.PlaceholderOnly = false
+		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "已通过真实执行器提交 restart 请求。"}})
 	case controlExecutionOutcomeAcceptedPlaceholder:
 		resp.Result = types.ControlResultAccepted
 		resp.HumanMessage = defaultControlMessage(result.humanMessage, "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。")
@@ -426,6 +555,17 @@ func buildControlActionResponse(req types.ControlActionRequest, plan controlExec
 	return resp
 }
 
+func acceptedRealExecutionResult(plan controlExecutionPlan, serviceUnit string) controlExecutionResult {
+	return controlExecutionResult{
+		outcome:       controlExecutionOutcomeAcceptedReal,
+		humanMessage:  "已通过真实执行器触发 agent restart。",
+		executionMode: types.ControlExecutionReal,
+		executionNotes: []types.ControlExecutionNote{{
+			Message: "systemctl restart " + serviceUnit + " 已提交。",
+		}},
+	}
+}
+
 func acceptedPlaceholderExecutionResult(plan controlExecutionPlan) controlExecutionResult {
 	return controlExecutionResult{
 		outcome:       controlExecutionOutcomeAcceptedPlaceholder,
@@ -445,6 +585,85 @@ func blockedExecutionResult(plan controlExecutionPlan) controlExecutionResult {
 		executionMode:  plan.executionMode,
 		executionNotes: []types.ControlExecutionNote{},
 	}
+}
+
+func policyRejectedExecutionResult(plan controlExecutionPlan, message string) controlExecutionResult {
+	return controlExecutionResult{
+		outcome:       controlExecutionOutcomePolicyRejected,
+		humanMessage:  message,
+		executionMode: types.ControlExecutionReal,
+		executionNotes: []types.ControlExecutionNote{{
+			Message: message,
+		}},
+	}
+}
+
+func retryableFailureExecutionResult(plan controlExecutionPlan, message string) controlExecutionResult {
+	return controlExecutionResult{
+		outcome:       controlExecutionOutcomeRetryableFailure,
+		humanMessage:  message,
+		executionMode: types.ControlExecutionReal,
+		executionNotes: []types.ControlExecutionNote{{
+			Message: message,
+		}},
+	}
+}
+
+func nonRetryableFailureExecutionResult(plan controlExecutionPlan, message string) controlExecutionResult {
+	return controlExecutionResult{
+		outcome:       controlExecutionOutcomeNonRetryableFailure,
+		humanMessage:  message,
+		executionMode: types.ControlExecutionReal,
+		executionNotes: []types.ControlExecutionNote{{
+			Message: message,
+		}},
+	}
+}
+
+func validateRestartAgentExecutionPolicy(plan controlExecutionPlan, allowedServicePrefix string, serviceUnit string) (controlExecutionResult, bool) {
+	if strings.TrimSpace(plan.targetFacts["deploymentMode"]) != "managed" {
+		return policyRejectedExecutionResult(plan, "真实 restart 只允许 deploymentMode=managed 的节点。"), true
+	}
+	if strings.TrimSpace(plan.targetFacts["instanceManaged"]) != "true" {
+		return policyRejectedExecutionResult(plan, "真实 restart 只允许 instanceManaged=true 的节点。"), true
+	}
+	if strings.TrimSpace(serviceUnit) == "" {
+		return policyRejectedExecutionResult(plan, "真实 restart 需要已上报 serviceUnit。"), true
+	}
+	if !strings.HasSuffix(serviceUnit, ".service") || !strings.HasPrefix(serviceUnit, allowedServicePrefix) {
+		return policyRejectedExecutionResult(plan, "真实 restart 只允许安全前缀内的 systemd serviceUnit。"), true
+	}
+	if strings.TrimSpace(plan.targetFacts["instanceProfile"]) == "" {
+		return policyRejectedExecutionResult(plan, "真实 restart 需要已上报 instanceProfile。"), true
+	}
+	return controlExecutionResult{}, false
+}
+
+func classifyRestartAgentCommandResult(plan controlExecutionPlan, serviceUnit string, result controlCommandResult) controlExecutionResult {
+	if result.err == nil && result.exitCode == 0 {
+		return acceptedRealExecutionResult(plan, serviceUnit)
+	}
+	detail := restartCommandDetail(result)
+	lowerDetail := strings.ToLower(detail)
+	if errors.Is(result.err, context.DeadlineExceeded) || errors.Is(result.err, context.Canceled) {
+		return retryableFailureExecutionResult(plan, "真实 restart 调用超时或被取消，可稍后重试。详情: "+detail)
+	}
+	if errors.Is(result.err, exec.ErrNotFound) || result.exitCode == 5 || strings.Contains(lowerDetail, "not found") || strings.Contains(lowerDetail, "not loaded") || strings.Contains(lowerDetail, "permission denied") || strings.Contains(lowerDetail, "access denied") || strings.Contains(lowerDetail, "authentication is required") {
+		return nonRetryableFailureExecutionResult(plan, "真实 restart 调用失败，当前不建议重试。详情: "+detail)
+	}
+	return retryableFailureExecutionResult(plan, "真实 restart 调用失败，可稍后重试。详情: "+detail)
+}
+
+func restartCommandDetail(result controlCommandResult) string {
+	for _, candidate := range []string{result.stderr, result.stdout} {
+		if strings.TrimSpace(candidate) != "" {
+			return strings.TrimSpace(candidate)
+		}
+	}
+	if result.err != nil {
+		return result.err.Error()
+	}
+	return "no command detail"
 }
 
 func placeholderExecutionNotes() []types.ControlExecutionNote {

@@ -25,11 +25,23 @@ type spyControlExecutor struct {
 	result      controlExecutionResult
 }
 
+type fakeRestartRunner struct {
+	callCount       int
+	lastServiceUnit string
+	result          controlCommandResult
+}
+
 func (s *spyControlExecutor) execute(_ context.Context, plan controlExecutionPlan) controlExecutionResult {
 	s.callCount++
 	s.lastPlan = plan
 	s.hasLastPlan = true
 	return s.result
+}
+
+func (f *fakeRestartRunner) restartService(_ context.Context, serviceUnit string) controlCommandResult {
+	f.callCount++
+	f.lastServiceUnit = serviceUnit
+	return f.result
 }
 
 func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
@@ -3251,5 +3263,130 @@ func TestBuildControlActionResponseDistinguishesPolicyRejectionFromPreflightBloc
 	blocked := buildControlActionResponse(blockedPlan.actionEvaluation.request, blockedPlan, blockedExecutionResult(blockedPlan))
 	if blocked.Result != types.ControlResultBlocked || len(blocked.Preflight.BlockedReasons) == 0 || blocked.Preflight.BlockedReasons[0].Code != types.ControlReasonNodeOffline {
 		t.Fatalf("expected blocked preflight to remain distinct, got %+v", blocked)
+	}
+}
+
+func TestRestartExecutorUsesRealPathForManagedLocalRestart(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-real-restart", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-real-restart.service", "instanceProfile": "node-real-restart", "instanceManaged": "true"})
+	registerNode("node-real-blocked", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-real-blocked.service", "instanceProfile": "node-real-blocked", "instanceManaged": "true", "isolated": "true"})
+
+	runner := &fakeRestartRunner{}
+	server.controlExecutor = newRestartCapableControlExecutor(restartAgentExecutorConfig{
+		enabled:              true,
+		localNodeID:          "node-real-restart",
+		allowedServicePrefix: defaultRestartServicePrefix,
+		timeout:              5 * time.Second,
+	}, runner)
+
+	execAction := func(payload map[string]any) types.ControlActionResponse {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+		var out types.ControlActionResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	runner.result = controlCommandResult{}
+	allowedResp := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-real-restart", "sourceSurface": "node_console", "dryRun": false})
+	if runner.callCount != 1 || runner.lastServiceUnit != "cloud-relay-client-agent@node-real-restart.service" {
+		t.Fatalf("expected real restart runner to be used once, got count=%d unit=%q", runner.callCount, runner.lastServiceUnit)
+	}
+	if allowedResp.Result != types.ControlResultAccepted || allowedResp.PlaceholderOnly || allowedResp.ExecutionMode != types.ControlExecutionReal {
+		t.Fatalf("expected real restart success path, got %+v", allowedResp)
+	}
+
+	runner.result = controlCommandResult{err: errors.New("dbus timeout"), stderr: "temporary transport timeout", exitCode: 1}
+	retryableResp := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-real-restart", "sourceSurface": "node_console", "dryRun": false})
+	if runner.callCount != 2 {
+		t.Fatalf("expected retryable failure to still invoke real runner, got count=%d", runner.callCount)
+	}
+	if retryableResp.Result != types.ControlResultRejected || retryableResp.PlaceholderOnly || retryableResp.ExecutionMode != types.ControlExecutionReal || !strings.Contains(retryableResp.HumanMessage, "可稍后重试") {
+		t.Fatalf("expected retryable failure response, got %+v", retryableResp)
+	}
+	if len(retryableResp.ExecutionNotes) == 0 || !strings.Contains(retryableResp.ExecutionNotes[0].Message, "可稍后重试") {
+		t.Fatalf("expected retryable failure note, got %+v", retryableResp.ExecutionNotes)
+	}
+
+	runner.result = controlCommandResult{err: errors.New("permission denied"), stderr: "permission denied", exitCode: 1}
+	nonRetryableResp := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-real-restart", "sourceSurface": "node_console", "dryRun": false})
+	if runner.callCount != 3 {
+		t.Fatalf("expected non-retryable failure to invoke real runner, got count=%d", runner.callCount)
+	}
+	if nonRetryableResp.Result != types.ControlResultRejected || nonRetryableResp.PlaceholderOnly || nonRetryableResp.ExecutionMode != types.ControlExecutionReal || !strings.Contains(nonRetryableResp.HumanMessage, "不建议重试") {
+		t.Fatalf("expected non-retryable failure response, got %+v", nonRetryableResp)
+	}
+	if len(nonRetryableResp.ExecutionNotes) == 0 || !strings.Contains(nonRetryableResp.ExecutionNotes[0].Message, "不建议重试") {
+		t.Fatalf("expected non-retryable failure note, got %+v", nonRetryableResp.ExecutionNotes)
+	}
+
+	blockedResp := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-real-blocked", "sourceSurface": "operator_console", "dryRun": false})
+	if runner.callCount != 3 {
+		t.Fatalf("expected blocked preflight to skip real runner, got count=%d", runner.callCount)
+	}
+	if blockedResp.Result != types.ControlResultBlocked || len(blockedResp.Preflight.BlockedReasons) == 0 || blockedResp.Preflight.BlockedReasons[0].Code != types.ControlReasonNodeIsolated {
+		t.Fatalf("expected blocked real restart candidate to stay blocked, got %+v", blockedResp)
+	}
+}
+
+func TestRestartExecutorKeepsOtherActionsPlaceholderOnly(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-other-actions", NodeName: "node-other-actions", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-other-actions.service", "instanceProfile": "node-other-actions", "instanceManaged": "true", "isolated": "true"}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+
+	runner := &fakeRestartRunner{}
+	server.controlExecutor = newRestartCapableControlExecutor(restartAgentExecutorConfig{
+		enabled:              true,
+		localNodeID:          "node-other-actions",
+		allowedServicePrefix: defaultRestartServicePrefix,
+		timeout:              5 * time.Second,
+	}, runner)
+
+	body, _ := json.Marshal(map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-other-actions", "sourceSurface": "operator_console", "dryRun": false})
+	req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+	applyCookies(req, adminCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d", res.Code)
+	}
+	var out types.ControlActionResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if runner.callCount != 0 {
+		t.Fatalf("expected non-restart action to avoid real restart runner, got count=%d", runner.callCount)
+	}
+	if out.Result != types.ControlResultAccepted || !out.PlaceholderOnly || out.ExecutionMode != types.ControlExecutionPlaceholder {
+		t.Fatalf("expected other actions to remain placeholder-only, got %+v", out)
 	}
 }
