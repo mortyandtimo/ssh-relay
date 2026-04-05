@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
-import type { ControlActionOption, ControlActionRequest, ControlActionResponse, NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
-import { capabilitySummary, checkStateLabel, checkStateTone, controlOptionStateLabel, controlOptionTone, formatControlResultDisplay, formatDate, nodeAgentDeploymentLabel, publicEntry, runtimeLabel, statusClass, tunnelTabs, type SafetyCheckItem } from "../../../packages/desktop-core/src/utils";
+import type { ControlActionOption, ControlActionRequest, ControlActionResponse, ControlPanelSummary, NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
+import { capabilitySummary, checkStateLabel, checkStateTone, controlOptionStateLabel, controlOptionTone, formatControlResultDisplay, formatDate, nodeAgentDeploymentLabel, publicEntry, runtimeLabel, statusClass, tunnelTabs } from "../../../packages/desktop-core/src/utils";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 type RuntimeStateFilter = "all" | "pending" | "unavailable" | "reported";
@@ -39,6 +39,8 @@ export default function App() {
   const [controlResult, setControlResult] = useState<ControlActionResponse | null>(null);
   const [nodeActionOptions, setNodeActionOptions] = useState<ControlActionOption[]>([]);
   const [tunnelActionOptions, setTunnelActionOptions] = useState<ControlActionOption[]>([]);
+  const [nodeControlPanel, setNodeControlPanel] = useState<ControlPanelSummary | null>(null);
+  const [tunnelControlPanel, setTunnelControlPanel] = useState<ControlPanelSummary | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState("");
   const refreshInFlightRef = useRef(false);
@@ -143,49 +145,6 @@ export default function App() {
   const unavailableCount = useMemo(() => selectedNodeTunnels.filter((tunnel) => tunnel.runtimeState === "unavailable").length, [selectedNodeTunnels]);
   const failureReasonCount = useMemo(() => selectedNodeTunnels.filter((tunnel) => Boolean(tunnel.lastFailureReason)).length, [selectedNodeTunnels]);
   const p2pFallbackCount = useMemo(() => selectedNodeTunnels.filter((tunnel) => isP2PFallbackTunnel(tunnel)).length, [selectedNodeTunnels]);
-  const remoteControlChecks = useMemo<SafetyCheckItem[]>(() => {
-    const items: SafetyCheckItem[] = [
-      {
-        label: "已选中机器",
-        state: selectedNode ? "pass" : "blocked",
-        detail: selectedNode ? "当前已选中机器 " + selectedNode.nodeId + "。" : "当前还没有选中机器，无法进入远程控制预检。",
-      },
-      {
-        label: "当前机器 online",
-        state: selectedNode?.status === "online" ? "pass" : selectedNode ? "blocked" : "blocked",
-        detail: selectedNode?.status === "online" ? "当前机器在线。" : "当前机器不在线，未来远程动作应阻断。",
-      },
-      {
-        label: "当前机器未隔离",
-        state: selectedNode && !selectedNode.isolated ? "pass" : selectedNode ? "blocked" : "blocked",
-        detail: selectedNode ? (selectedNode.isolated ? "当前机器已隔离，未来远程动作应阻断。" : "当前机器未隔离。") : "当前还没有选中机器。",
-      },
-      {
-        label: "deploymentMode",
-        state: selectedNode?.deploymentMode ? "pass" : selectedNode ? "missing" : "blocked",
-        detail: selectedNode?.deploymentMode || "当前还没有上报 deploymentMode。",
-      },
-      {
-        label: "serviceUnit 已上报",
-        state: selectedNode?.serviceUnit ? "pass" : selectedNode ? "missing" : "blocked",
-        detail: selectedNode?.serviceUnit || "当前还没有上报 serviceUnit。",
-      },
-      {
-        label: "instanceManaged",
-        state: selectedNode?.instanceManaged ? "pass" : selectedNode ? "missing" : "blocked",
-        detail: selectedNode?.instanceManaged ? "当前机器为受管实例。" : "当前机器不是受管实例，未来远程控制前提不完整。",
-      },
-      {
-        label: "满足未来远程控制前提",
-        state: selectedNode && selectedNode.status === "online" && !selectedNode.isolated && selectedNode.instanceManaged && Boolean(selectedNode.serviceUnit) ? "pass" : selectedNode ? "blocked" : "blocked",
-        detail: selectedNode && selectedNode.status === "online" && !selectedNode.isolated && selectedNode.instanceManaged && Boolean(selectedNode.serviceUnit)
-          ? "当前机器已满足最小远程控制前提，但这轮仍未实现真实命令。"
-          : "当前至少有一项关键前提未满足，因此未来远程动作仍应阻断。",
-      },
-    ];
-    return items;
-  }, [selectedNode]);
-
   useEffect(() => {
     if (!tabTunnels.length) {
       setSelectedTunnelId(null);
@@ -225,6 +184,30 @@ export default function App() {
       cancelled = true;
     };
   }, [selectedNode, currentUser]);
+  useEffect(() => {
+    let cancelled = false;
+    async function loadNodeControlPanel() {
+      if (!selectedNode || !currentUser) {
+        setNodeControlPanel(null);
+        return;
+      }
+      try {
+        const response = await api.loadNodeControlPanel(selectedNode.nodeId, "operator_console");
+        if (!cancelled) {
+          setNodeControlPanel(response);
+        }
+      } catch (panelError) {
+        if (!cancelled) {
+          setNodeControlPanel(null);
+          setError(panelError instanceof Error ? panelError.message : "读取节点控制面板摘要失败");
+        }
+      }
+    }
+    void loadNodeControlPanel();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedNode, currentUser]);
 
   useEffect(() => {
     let cancelled = false;
@@ -246,6 +229,30 @@ export default function App() {
       }
     }
     void loadTunnelActionOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTunnel, currentUser]);
+  useEffect(() => {
+    let cancelled = false;
+    async function loadTunnelControlPanel() {
+      if (!selectedTunnel || !currentUser) {
+        setTunnelControlPanel(null);
+        return;
+      }
+      try {
+        const response = await api.loadTunnelControlPanel(selectedTunnel.id, "operator_console");
+        if (!cancelled) {
+          setTunnelControlPanel(response);
+        }
+      } catch (panelError) {
+        if (!cancelled) {
+          setTunnelControlPanel(null);
+          setError(panelError instanceof Error ? panelError.message : "读取 tunnel 控制面板摘要失败");
+        }
+      }
+    }
+    void loadTunnelControlPanel();
     return () => {
       cancelled = true;
     };
@@ -487,17 +494,18 @@ export default function App() {
                 <div className="panel-head small">
                   <div>
                     <h3>远程控制预检区</h3>
-                    <p className="copy">这里是未来远程危险操作前的预检/确认层。当前还没有执行任何真实控制命令，只是在冻结远程危险动作的人机交互边界。</p>
+                    <p className="copy">这里是未来远程危险操作前的预检/确认层。当前预检列表已开始直接来自后端控制面板摘要。</p>
                   </div>
                 </div>
+                {nodeControlPanel ? <div className="banner info">{nodeControlPanel.headline} {nodeControlPanel.summary} 下一步：{nodeControlPanel.nextStep}</div> : null}
                 <div className="check-list">
-                  {remoteControlChecks.map((item) => (
+                  {(nodeControlPanel?.checks || []).map((item) => (
                     <div key={item.label} className="check-item">
                       <div className="check-head">
                         <strong>{item.label}</strong>
                         <span className={"status-chip " + checkStateTone(item.state)}>{checkStateLabel(item.state)}</span>
                       </div>
-                      <p className="copy">{item.detail}</p>
+                      <p className="copy">{item.message}</p>
                     </div>
                   ))}
                 </div>
@@ -523,7 +531,7 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                <div className="banner info">动作区说明现在优先来自后端动作摘要；如需更细的检查项，再查看上方预检列表或执行 dry-run。</div>
+                <div className="banner info">动作区与预检列表现在都优先来自后端摘要；如需更细的检查项，再执行 dry-run。</div>
                 {controlResult ? <ControlResultBlock result={controlResult} /> : null}
               </section>
               <section className="panel workbench-panel">
@@ -609,6 +617,18 @@ export default function App() {
                           {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>probePath</span><input value={editForm?.probePath || ""} onChange={(event) => setEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 probePath。</div>}
                           <label><span>transportPolicy</span><select value={editForm?.transportPolicy || "relay_only"} onChange={(event) => setEditForm((current) => current ? { ...current, transportPolicy: event.target.value } : current)}><option value="relay_only">relay_only</option><option value="p2p_preferred">p2p_preferred</option></select></label>
                           <div className="weak-note">transportPolicy 只代表配置意图。当前 runtimePath / runtimeState / lastFailureReason 仍然是运行事实，这轮编辑不会把它们伪装成已经改变。</div>
+                          {tunnelControlPanel ? <div className="banner info">{tunnelControlPanel.headline} {tunnelControlPanel.summary} 下一步：{tunnelControlPanel.nextStep}</div> : null}
+                          <div className="check-list compact-check-list">
+                            {(tunnelControlPanel?.checks || []).map((item) => (
+                              <div key={item.code} className="check-item">
+                                <div className="check-head">
+                                  <strong>{item.label}</strong>
+                                  <span className={"status-chip " + checkStateTone(item.state)}>{checkStateLabel(item.state)}</span>
+                                </div>
+                                <p className="copy">{item.message}</p>
+                              </div>
+                            ))}
+                          </div>
                           <div className="check-list compact-check-list">
                             {tunnelActionOptions.map((option) => (
                               <div key={option.actionKind} className="check-item">

@@ -150,6 +150,14 @@ const (
 	ControlAvailabilityPlaceholderOnly ControlAvailabilityState = "placeholder_only"
 )
 
+type ControlReadinessState string
+
+const (
+	ControlReadinessReady   ControlReadinessState = "ready"
+	ControlReadinessPartial ControlReadinessState = "partial"
+	ControlReadinessBlocked ControlReadinessState = "blocked"
+)
+
 type ControlReasonCode string
 
 const (
@@ -219,6 +227,21 @@ type ControlActionOptionsResponse struct {
 	SourceSurface ControlSurface        `json:"sourceSurface"`
 	ExecutionMode ControlExecutionMode  `json:"executionMode"`
 	Items         []ControlActionOption `json:"items"`
+}
+
+type ControlPanelSummary struct {
+	TargetKind        ControlTargetKind     `json:"targetKind"`
+	TargetID          string                `json:"targetId"`
+	SourceSurface     ControlSurface        `json:"sourceSurface"`
+	Headline          string                `json:"headline"`
+	Summary           string                `json:"summary"`
+	ReadinessState    ControlReadinessState `json:"readinessState"`
+	Checks            []ControlCheckItem    `json:"checks"`
+	PrimaryReasonCode ControlReasonCode     `json:"primaryReasonCode,omitempty"`
+	NextStep          string                `json:"nextStep,omitempty"`
+	RecommendedAction ControlActionKind     `json:"recommendedAction,omitempty"`
+	ExecutionMode     ControlExecutionMode  `json:"executionMode"`
+	PlaceholderOnly   bool                  `json:"placeholderOnly,omitempty"`
 }
 
 type ControlPreflightSummary struct {

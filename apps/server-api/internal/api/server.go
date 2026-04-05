@@ -106,6 +106,8 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/tunnels", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnels)))
 	s.mux.Handle("/api/tunnel-port-suggestion", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelPortSuggestion)))
 	s.mux.Handle("/api/tunnels/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelByID)))
+	s.mux.Handle("/api/control-panels/node/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodeControlPanel)))
+	s.mux.Handle("/api/control-panels/tunnel/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelControlPanel)))
 	s.mux.Handle("/api/control-actions/node/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodeControlActionOptions)))
 	s.mux.Handle("/api/control-actions/tunnel/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelControlActionOptions)))
 	s.mux.Handle("/api/control-actions", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleControlActions)))

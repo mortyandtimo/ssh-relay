@@ -102,6 +102,7 @@ export type ControlSurface = "node_console" | "operator_console";
 export type ControlResult = "accepted" | "rejected" | "blocked" | "not_supported";
 export type ControlExecutionMode = "placeholder" | "real";
 export type ControlAvailabilityState = "available" | "blocked" | "placeholder_only";
+export type ControlReadinessState = "ready" | "partial" | "blocked";
 export type ControlCheckState = "pass" | "missing" | "blocked";
 
 export type ControlCheckItem = {
@@ -145,6 +146,21 @@ export type ControlActionOptionsResponse = {
   sourceSurface: ControlSurface;
   executionMode: ControlExecutionMode;
   items: ControlActionOption[];
+};
+
+export type ControlPanelSummary = {
+  targetKind: ControlTargetKind;
+  targetId: string;
+  sourceSurface: ControlSurface;
+  headline: string;
+  summary: string;
+  readinessState: ControlReadinessState;
+  checks: ControlCheckItem[];
+  primaryReasonCode?: string;
+  nextStep?: string;
+  recommendedAction?: ControlActionKind;
+  executionMode: ControlExecutionMode;
+  placeholderOnly?: boolean;
 };
 
 export type ControlPreflightSummary = {

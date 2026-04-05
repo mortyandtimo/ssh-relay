@@ -1,4 +1,4 @@
-import type { AuthUserResponse, BootstrapStatusResponse, ControlActionOptionsResponse, ControlActionRequest, ControlActionResponse, ControlSurface, NodeListResponse, TunnelListResponse } from "./types";
+import type { AuthUserResponse, BootstrapStatusResponse, ControlActionOptionsResponse, ControlActionRequest, ControlActionResponse, ControlPanelSummary, ControlSurface, NodeListResponse, TunnelListResponse } from "./types";
 
 export function createDesktopApi(apiBaseUrl = "") {
   let refreshInFlight: Promise<boolean> | null = null;
@@ -93,6 +93,12 @@ export function createDesktopApi(apiBaseUrl = "") {
     },
     loadTunnelControlActionOptions(tunnelId: string, surface: ControlSurface) {
       return requestJSON<ControlActionOptionsResponse>("/api/control-actions/tunnel/" + encodeURIComponent(tunnelId) + "/" + encodeURIComponent(surface) + "/options");
+    },
+    loadNodeControlPanel(nodeId: string, surface: ControlSurface) {
+      return requestJSON<ControlPanelSummary>("/api/control-panels/node/" + encodeURIComponent(nodeId) + "/" + encodeURIComponent(surface));
+    },
+    loadTunnelControlPanel(tunnelId: string, surface: ControlSurface) {
+      return requestJSON<ControlPanelSummary>("/api/control-panels/tunnel/" + encodeURIComponent(tunnelId) + "/" + encodeURIComponent(surface));
     },
     async loadDesktopData() {
       const [nodes, tunnels] = await Promise.all([this.loadNodes(), this.loadTunnels()]);

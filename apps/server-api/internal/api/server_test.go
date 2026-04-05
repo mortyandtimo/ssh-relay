@@ -2682,3 +2682,92 @@ func TestControlActionOptionsNodeAndTunnel(t *testing.T) {
 		}
 	})
 }
+
+func TestControlPanelSummaryNodeAndTunnel(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-ready", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-ready.service", "instanceProfile": "node-ready", "instanceManaged": "true"})
+	registerNode("node-partial", map[string]string{"deploymentMode": "managed", "instanceManaged": "true"})
+	registerNode("node-blocked", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-blocked.service", "instanceProfile": "node-blocked", "instanceManaged": "true", "isolated": "true"})
+
+	for _, item := range []types.TunnelSpec{
+		{ID: "tunnel-active-panel", NodeID: "node-ready", Name: "tunnel-active-panel", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 22010, Metadata: map[string]string{"nodeId": "node-ready"}},
+		{ID: "tunnel-paused-panel", NodeID: "node-ready", Name: "tunnel-paused-panel", Type: "tcp", Status: "paused", TargetHost: "127.0.0.1", TargetPort: 8081, PublicPort: 22011, Metadata: map[string]string{"nodeId": "node-ready"}},
+	} {
+		if _, err := server.store.CreateTunnel(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertPanel := func(path string, wantStatus int, check func(types.ControlPanelSummary)) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != wantStatus {
+			t.Fatalf("%s: expected status %d, got %d", path, wantStatus, res.Code)
+		}
+		if wantStatus != http.StatusOK {
+			return
+		}
+		var out types.ControlPanelSummary
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("%s: decode failed: %v", path, err)
+		}
+		check(out)
+	}
+
+	assertPanel("/api/control-panels/node/node-ready/node_console", http.StatusOK, func(out types.ControlPanelSummary) {
+		if out.ReadinessState != types.ControlReadinessReady || len(out.Checks) == 0 || out.NextStep == "" || out.RecommendedAction != types.ControlActionRestartAgent {
+			t.Fatalf("unexpected ready node panel: %+v", out)
+		}
+	})
+
+	assertPanel("/api/control-panels/node/node-partial/operator_console", http.StatusOK, func(out types.ControlPanelSummary) {
+		if out.ReadinessState != types.ControlReadinessPartial || len(out.Checks) == 0 || out.PrimaryReasonCode == "" || out.NextStep == "" {
+			t.Fatalf("unexpected partial node panel: %+v", out)
+		}
+		foundMissing := false
+		for _, item := range out.Checks {
+			if item.State == types.ControlCheckMissing {
+				foundMissing = true
+				break
+			}
+		}
+		if !foundMissing {
+			t.Fatalf("expected partial node panel to contain missing checks, got %+v", out.Checks)
+		}
+	})
+
+	assertPanel("/api/control-panels/node/node-blocked/operator_console", http.StatusOK, func(out types.ControlPanelSummary) {
+		if out.ReadinessState != types.ControlReadinessBlocked || len(out.Checks) == 0 || out.PrimaryReasonCode != types.ControlReasonNodeIsolated || out.NextStep == "" {
+			t.Fatalf("unexpected blocked node panel: %+v", out)
+		}
+	})
+
+	assertPanel("/api/control-panels/tunnel/tunnel-active-panel/operator_console", http.StatusOK, func(out types.ControlPanelSummary) {
+		if out.ReadinessState != types.ControlReadinessReady || len(out.Checks) == 0 || out.NextStep == "" {
+			t.Fatalf("unexpected active tunnel panel: %+v", out)
+		}
+	})
+
+	assertPanel("/api/control-panels/tunnel/tunnel-paused-panel/operator_console", http.StatusOK, func(out types.ControlPanelSummary) {
+		if out.ReadinessState != types.ControlReadinessBlocked || len(out.Checks) == 0 || out.PrimaryReasonCode != types.ControlReasonTunnelStateConflict || out.NextStep == "" {
+			t.Fatalf("unexpected paused tunnel panel: %+v", out)
+		}
+	})
+
+	assertPanel("/api/control-panels/tunnel/missing-tunnel/operator_console", http.StatusNotFound, func(out types.ControlPanelSummary) {})
+}

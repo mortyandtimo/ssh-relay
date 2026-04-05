@@ -63,6 +63,34 @@ func (s *Server) handleControlActions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, resp)
 }
 
+func (s *Server) handleNodeControlPanel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	nodeID, surface, ok := parseControlOptionPath(r.URL.Path, "/api/control-panels/node/", "")
+	if !ok {
+		writeError(w, http.StatusNotFound, "control panel not found")
+		return
+	}
+	resp, status := s.buildControlPanelSummary(r.Context(), types.ControlTargetNode, nodeID, surface)
+	writeJSON(w, status, resp)
+}
+
+func (s *Server) handleTunnelControlPanel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	tunnelID, surface, ok := parseControlOptionPath(r.URL.Path, "/api/control-panels/tunnel/", "")
+	if !ok {
+		writeError(w, http.StatusNotFound, "control panel not found")
+		return
+	}
+	resp, status := s.buildControlPanelSummary(r.Context(), types.ControlTargetTunnel, tunnelID, surface)
+	writeJSON(w, status, resp)
+}
+
 func (s *Server) handleNodeControlActionOptions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeMethodNotAllowed(w, http.MethodGet)
@@ -92,10 +120,16 @@ func (s *Server) handleTunnelControlActionOptions(w http.ResponseWriter, r *http
 }
 
 func parseControlOptionPath(path, prefix, suffix string) (string, types.ControlSurface, bool) {
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+	if !strings.HasPrefix(path, prefix) {
 		return "", "", false
 	}
-	trimmed := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	trimmed := strings.TrimPrefix(path, prefix)
+	if suffix != "" {
+		if !strings.HasSuffix(trimmed, suffix) {
+			return "", "", false
+		}
+		trimmed = strings.TrimSuffix(trimmed, suffix)
+	}
 	trimmed = strings.Trim(trimmed, "/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) != 2 {
@@ -181,6 +215,58 @@ func (s *Server) buildControlActionOptions(ctx context.Context, targetKind types
 	return resp, http.StatusOK
 }
 
+func (s *Server) buildControlPanelSummary(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (types.ControlPanelSummary, int) {
+	panel := types.ControlPanelSummary{
+		TargetKind:      targetKind,
+		TargetID:        targetID,
+		SourceSurface:   surface,
+		Checks:          []types.ControlCheckItem{},
+		ExecutionMode:   types.ControlExecutionPlaceholder,
+		PlaceholderOnly: true,
+	}
+	actions := allowedActionsForTarget(targetKind)
+	if len(actions) == 0 {
+		panel.ReadinessState = types.ControlReadinessBlocked
+		panel.Headline = "当前目标没有可用控制动作。"
+		panel.Summary = "当前目标不支持已知控制动作。"
+		panel.NextStep = "请确认 targetKind 是否正确。"
+		return panel, http.StatusBadRequest
+	}
+	first, status := s.evaluateControlAction(ctx, types.ControlActionRequest{
+		ActionKind:    actions[0],
+		TargetKind:    targetKind,
+		TargetID:      targetID,
+		SourceSurface: surface,
+		DryRun:        true,
+		RequestedAt:   time.Now().UTC(),
+	})
+	if status != http.StatusOK {
+		return panel, status
+	}
+	panel.Checks = append(panel.Checks, first.Preflight.Items...)
+	panel.PrimaryReasonCode = firstPrimaryReason(first.Preflight.BlockedReasons)
+	if len(first.Preflight.BlockedReasons) == 0 {
+		panel.ReadinessState = types.ControlReadinessReady
+		panel.Headline = "当前控制前提已满足。"
+		panel.Summary = "当前主要控制前提已经满足，动作仍然只会进入 placeholder execute。"
+		panel.NextStep = "可先执行 dry-run 或占位执行，确认交互边界。"
+		panel.RecommendedAction = first.ActionKind
+		return panel, http.StatusOK
+	}
+	if containsMissingCheck(first.Preflight.Items) {
+		panel.ReadinessState = types.ControlReadinessPartial
+		panel.Headline = "当前控制前提部分缺失。"
+		panel.Summary = first.Preflight.BlockedReasons[0].Message
+		panel.NextStep = nextStepForReason(first.Preflight.BlockedReasons[0].Code)
+		return panel, http.StatusOK
+	}
+	panel.ReadinessState = types.ControlReadinessBlocked
+	panel.Headline = "当前控制前提已阻断。"
+	panel.Summary = first.Preflight.BlockedReasons[0].Message
+	panel.NextStep = nextStepForReason(first.Preflight.BlockedReasons[0].Code)
+	return panel, http.StatusOK
+}
+
 func allowedActionsForTarget(targetKind types.ControlTargetKind) []types.ControlActionKind {
 	switch targetKind {
 	case types.ControlTargetNode:
@@ -242,28 +328,7 @@ func controlOptionSummaryAndNextStep(result types.ControlActionResponse, reasons
 	if len(reasons) == 0 {
 		return "当前动作已被阻断。", "先补齐目标状态或来源界面条件，再重新读取动作摘要。"
 	}
-	switch reasons[0].Code {
-	case types.ControlReasonNodeOffline:
-		return "当前节点离线，动作被阻断。", "先恢复节点在线状态，再重新读取动作摘要。"
-	case types.ControlReasonNodeIsolated:
-		return "当前节点处于隔离状态，动作被阻断。", "先确认是否应 release 节点，或改为使用适合隔离状态的动作。"
-	case types.ControlReasonNodeNotIsolated:
-		return "当前节点未隔离，release 动作被阻断。", "如需 release，先确认节点已经进入隔离状态。"
-	case types.ControlReasonMissingServiceUnit:
-		return "当前动作缺少 serviceUnit 上报，暂时不可发起。", "先补齐 serviceUnit 上报，再重新读取动作摘要。"
-	case types.ControlReasonMissingInstanceProfile:
-		return "当前动作缺少 instanceProfile 上报，暂时不可发起。", "先补齐 instanceProfile 上报，再重新读取动作摘要。"
-	case types.ControlReasonMissingDeploymentMode:
-		return "当前动作缺少 deploymentMode 上报，暂时不可发起。", "先补齐 deploymentMode 上报，再重新读取动作摘要。"
-	case types.ControlReasonUnmanagedInstance:
-		return "当前实例未上报为受管实例，动作被阻断。", "先把实例切回受管模式或补齐受管实例信息。"
-	case types.ControlReasonUnsupportedSurface:
-		return "当前界面不支持这个动作。", "请切换到允许该动作的 console 后再发起。"
-	case types.ControlReasonTunnelStateConflict:
-		return "当前 tunnel 状态与动作要求冲突。", "先确认 tunnel 当前 status，再选择匹配的 pause/resume 动作。"
-	default:
-		return reasons[0].Message, "先处理首个阻断原因，再重新读取动作摘要。"
-	}
+	return reasons[0].Message, nextStepForReason(reasons[0].Code)
 }
 
 func controlActionLabel(actionKind types.ControlActionKind) string {
@@ -281,6 +346,47 @@ func controlActionLabel(actionKind types.ControlActionKind) string {
 	default:
 		return string(actionKind)
 	}
+}
+
+func nextStepForReason(code types.ControlReasonCode) string {
+	switch code {
+	case types.ControlReasonNodeOffline:
+		return "先恢复节点在线状态，再重新读取控制摘要。"
+	case types.ControlReasonNodeIsolated:
+		return "先确认是否应 release 节点，或改为使用适合隔离状态的动作。"
+	case types.ControlReasonNodeNotIsolated:
+		return "如需 release，先确认节点已经进入隔离状态。"
+	case types.ControlReasonMissingServiceUnit:
+		return "先补齐 serviceUnit 上报，再重新读取控制摘要。"
+	case types.ControlReasonMissingInstanceProfile:
+		return "先补齐 instanceProfile 上报，再重新读取控制摘要。"
+	case types.ControlReasonMissingDeploymentMode:
+		return "先补齐 deploymentMode 上报，再重新读取控制摘要。"
+	case types.ControlReasonUnmanagedInstance:
+		return "先把实例切回受管模式或补齐受管实例信息。"
+	case types.ControlReasonUnsupportedSurface:
+		return "请切换到允许该动作的 console 或目标上下文后再重试。"
+	case types.ControlReasonTunnelStateConflict:
+		return "先确认 tunnel 当前 status，再选择匹配的 pause/resume 动作。"
+	default:
+		return "先处理首个阻断原因，再重新读取控制摘要。"
+	}
+}
+
+func firstPrimaryReason(reasons []types.ControlBlockedReason) types.ControlReasonCode {
+	if len(reasons) == 0 {
+		return ""
+	}
+	return reasons[0].Code
+}
+
+func containsMissingCheck(items []types.ControlCheckItem) bool {
+	for _, item := range items {
+		if item.State == types.ControlCheckMissing {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) evaluateControlPreflight(ctx context.Context, req types.ControlActionRequest, resp *types.ControlActionResponse) (types.ControlPreflightSummary, int) {
@@ -363,6 +469,7 @@ func (s *Server) evaluateTunnelControlPreflight(ctx context.Context, req types.C
 	default:
 		builder.addCheck("surface", "来源界面", types.ControlCheckBlocked, "当前来源界面不受支持。", types.ControlReasonUnsupportedSurface)
 	}
+	builder.addCheck("tunnelStatus", "tunnel status", ternaryTunnelCheck(tunnel.Status), ternaryMessage(tunnel.Status != "", "当前 tunnel status="+tunnel.Status+"。", "当前 tunnel 尚未上报 status。"), types.ControlReasonTargetNotFound)
 
 	switch req.ActionKind {
 	case types.ControlActionPauseTunnel:
@@ -381,6 +488,13 @@ func (s *Server) evaluateTunnelControlPreflight(ctx context.Context, req types.C
 		builder.addCheck("action", "动作白名单", types.ControlCheckBlocked, "当前 tunnel 动作不在本轮白名单内。", types.ControlReasonUnsupportedAction)
 	}
 	return http.StatusOK
+}
+
+func ternaryTunnelCheck(status string) types.ControlCheckState {
+	if strings.TrimSpace(status) == "" {
+		return types.ControlCheckMissing
+	}
+	return types.ControlCheckPass
 }
 
 func (s *Server) executePlaceholderControlAction(resp types.ControlActionResponse) types.ControlActionResponse {
