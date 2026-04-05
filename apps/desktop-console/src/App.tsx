@@ -1,8 +1,9 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { loadBootstrapStatus, loadCurrentUser, loadDesktopData, login, logout } from "./api";
 import type { DesktopMode, NodeCapabilities, NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "./types";
 
 const tunnelTabs: TunnelTypeTab[] = ["tcp", "udp", "http", "https", "socks5"];
+const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
 
 export default function App() {
   const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
@@ -17,6 +18,9 @@ export default function App() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefreshAt, setLastRefreshAt] = useState("");
+  const refreshInFlightRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -37,6 +41,7 @@ export default function App() {
         if (cancelled) return;
         setNodes(payload.nodes);
         setTunnels(payload.tunnels);
+        setLastRefreshAt(new Date().toISOString());
       } catch (initError) {
         if (!cancelled) {
           setError(initError instanceof Error ? initError.message : "初始化失败");
@@ -51,19 +56,33 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!currentUser) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshConsoleData(false, "auto");
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [currentUser]);
+
+  const localBinding = useMemo(() => resolveLocalNodeBinding(nodes), [nodes]);
+
+  useEffect(() => {
     if (!mode) {
       setSelectedNodeId(null);
       return;
     }
     if (mode === "local-node") {
-      const preferred = pickLocalModeNode(nodes);
-      setSelectedNodeId(preferred?.nodeId ?? nodes[0]?.nodeId ?? null);
+      setSelectedNodeId(localBinding.node?.nodeId ?? null);
       return;
     }
-    if (!selectedNodeId && nodes[0]) {
-      setSelectedNodeId(nodes[0].nodeId);
-    }
-  }, [mode, nodes, selectedNodeId]);
+    setSelectedNodeId((current) => {
+      if (current && nodes.some((node) => node.nodeId === current)) {
+        return current;
+      }
+      return nodes[0]?.nodeId ?? null;
+    });
+  }, [localBinding.node, mode, nodes]);
 
   const selectedNode = useMemo(
     () => (selectedNodeId ? nodes.find((node) => node.nodeId === selectedNodeId) ?? null : null),
@@ -103,6 +122,7 @@ export default function App() {
       const payload = await loadDesktopData();
       setNodes(payload.nodes);
       setTunnels(payload.tunnels);
+      setLastRefreshAt(new Date().toISOString());
       setMessage("桌面端骨架已接入当前管理面数据。请选择模式继续。");
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "登录失败");
@@ -123,11 +143,40 @@ export default function App() {
       setTunnels([]);
       setSelectedNodeId(null);
       setSelectedTunnelId(null);
+      setLastRefreshAt("");
       setMessage("已退出桌面端骨架会话。");
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "退出失败");
     } finally {
       setBusy("");
+    }
+  }
+
+  async function refreshConsoleData(showNotice: boolean, source: "manual" | "auto") {
+    if (!currentUser || refreshInFlightRef.current) {
+      return;
+    }
+    refreshInFlightRef.current = true;
+    setRefreshing(true);
+    if (showNotice) {
+      setMessage("");
+    }
+    try {
+      const payload = await loadDesktopData();
+      setNodes(payload.nodes);
+      setTunnels(payload.tunnels);
+      setLastRefreshAt(new Date().toISOString());
+      setError("");
+      if (showNotice) {
+        setMessage("桌面端数据已刷新，当前模式和选择上下文已尽量保留。");
+      }
+    } catch (refreshError) {
+      const prefix = source === "auto" ? "自动刷新失败，已保留当前页面数据。" : "手动刷新失败，已保留当前页面数据。";
+      const detail = refreshError instanceof Error ? refreshError.message : "刷新失败";
+      setError(prefix + " " + detail);
+    } finally {
+      refreshInFlightRef.current = false;
+      setRefreshing(false);
     }
   }
 
@@ -197,7 +246,9 @@ export default function App() {
             <strong>{currentUser.displayName}</strong>
             <span className="muted-line">{currentUser.email}</span>
             <span className="status-chip neutral">{currentUser.role}</span>
+            <span className="muted-line">自动刷新 10s{lastRefreshAt ? " / 上次成功 " + formatDate(lastRefreshAt) : " / 尚无成功刷新"}</span>
             <div className="button-row">
+              <button className="secondary" type="button" onClick={() => void refreshConsoleData(true, "manual")} disabled={refreshing}>{refreshing ? "刷新中..." : "手动刷新"}</button>
               <button className="secondary" type="button" onClick={() => setMode(null)}>切换模式</button>
               <button className="secondary" type="button" onClick={() => void handleLogout()} disabled={busy === "logout"}>{busy === "logout" ? "退出中..." : "退出"}</button>
             </div>
@@ -236,8 +287,10 @@ export default function App() {
           {error ? <div className="banner error">{error}</div> : null}
           {message ? <div className="banner info">{message}</div> : null}
 
-          {!selectedNode ? (
-            <StateCard title="当前没有可展示的机器" body={mode === "local-node" ? "本机模式下还没有找到可默认进入的机器，请先确认当前环境已有节点上报。" : "请在左侧机器列表中选择一台机器。"} />
+          {mode === "local-node" && !localBinding.node ? (
+            <StateCard title="尚未完成本机绑定" body={localBinding.reason + " 本机模式这轮不再 fallback 到 third_party、cloud 或首个节点。请配置 VITE_DESKTOP_NODE_ID，或让当前账号下只保留唯一受管 local 节点。"} />
+          ) : !selectedNode ? (
+            <StateCard title="当前没有可展示的机器" body={mode === "local-node" ? "本机模式尚未选中绑定机器。" : "请在左侧机器列表中选择一台机器。"} />
           ) : (
             <>
               <section className="panel hero-panel">
@@ -251,6 +304,7 @@ export default function App() {
                     <span className={statusClass(selectedNode.status)}>{selectedNode.status}</span>
                     <span className={selectedNode.isolated ? "status-chip danger" : "status-chip good"}>{selectedNode.isolated ? "已隔离" : "未隔离"}</span>
                     <span className="status-chip neutral">{selectedNode.agentVersion || "agent 未上报"}</span>
+                    {mode === "local-node" ? <span className="status-chip neutral">绑定来源: {localBinding.sourceLabel}</span> : null}
                   </div>
                 </div>
                 <div className="hero-grid">
@@ -370,8 +424,43 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function pickLocalModeNode(nodes: NodeSummary[]) {
-  return nodes.find((node) => node.nodeRole === "local") ?? nodes.find((node) => node.nodeRole === "third_party") ?? nodes[0] ?? null;
+function resolveLocalNodeBinding(nodes: NodeSummary[]) {
+  if (desktopNodeId) {
+    const matched = nodes.find((node) => node.nodeId === desktopNodeId) ?? null;
+    if (matched) {
+      return {
+        node: matched,
+        sourceLabel: "VITE_DESKTOP_NODE_ID",
+        reason: "已通过 VITE_DESKTOP_NODE_ID 明确绑定到本机节点 " + desktopNodeId + "。",
+      };
+    }
+    return {
+      node: null,
+      sourceLabel: "VITE_DESKTOP_NODE_ID",
+      reason: "当前配置了 VITE_DESKTOP_NODE_ID=" + desktopNodeId + "，但当前节点列表中没有命中该 nodeId。",
+    };
+  }
+
+  const managedLocalNodes = nodes.filter((node) => node.nodeRole === "local" && node.instanceManaged);
+  if (managedLocalNodes.length === 1) {
+    return {
+      node: managedLocalNodes[0],
+      sourceLabel: "唯一受管 local 节点",
+      reason: "当前账号下只检测到一个受管 local 节点，已可确定性绑定。",
+    };
+  }
+  if (managedLocalNodes.length === 0) {
+    return {
+      node: null,
+      sourceLabel: "尚无绑定来源",
+      reason: "没有检测到明确可绑定的受管 local 节点。",
+    };
+  }
+  return {
+    node: null,
+    sourceLabel: "绑定不唯一",
+    reason: "当前检测到 " + managedLocalNodes.length + " 个受管 local 节点，无法确定本机归属。",
+  };
 }
 
 function capabilitySummary(capabilities: NodeCapabilities) {

@@ -107,6 +107,11 @@ button {
   line-height: 1.6;
 }
 
+.state-card {
+  display: grid;
+  gap: 10px;
+}
+
 .eyebrow {
   margin: 0 0 8px;
   text-transform: uppercase;
@@ -215,6 +220,10 @@ button {
 .status-chip.neutral {
   background: #eceff4;
   color: #55667a;
+}
+
+.status-chip.neutral strong {
+  font-size: inherit;
 }
 
 .machine-list,
