@@ -31,6 +31,7 @@ type controlTargetSnapshot struct {
 	recommendedAction types.ControlActionKind
 	readinessState    types.ControlReadinessState
 	primaryReasonCode types.ControlReasonCode
+	blockedReasons    []types.ControlBlockedReason
 	headline          string
 	summary           string
 	nextStep          string
@@ -256,6 +257,7 @@ func (s *Server) buildControlTargetSnapshot(ctx context.Context, targetKind type
 		actions:         []evaluatedControlAction{},
 		executionMode:   types.ControlExecutionPlaceholder,
 		placeholderOnly: true,
+		blockedReasons:  []types.ControlBlockedReason{},
 		checks:          []types.ControlCheckItem{},
 	}
 	actions := allowedActionsForTarget(targetKind)
@@ -286,10 +288,9 @@ func (s *Server) buildControlTargetSnapshot(ctx context.Context, targetKind type
 			status:   status,
 		})
 	}
-	base := snapshot.actions[0].response
-	snapshot.checks = append(snapshot.checks, base.Preflight.Items...)
-	snapshot.primaryReasonCode = firstPrimaryReason(base.Preflight.BlockedReasons)
 	snapshot.recommendedAction = recommendedActionForSnapshot(targetKind, snapshot.actions)
+	snapshot.checks, snapshot.blockedReasons = aggregateTargetChecks(targetKind, snapshot.actions, snapshot.recommendedAction)
+	snapshot.primaryReasonCode = firstPrimaryReason(snapshot.blockedReasons)
 	snapshot.headline, snapshot.summary, snapshot.nextStep, snapshot.readinessState = summarizeSnapshot(snapshot)
 	return snapshot, http.StatusOK
 }
@@ -301,11 +302,101 @@ func summarizeSnapshot(snapshot controlTargetSnapshot) (string, string, string, 
 	if snapshot.primaryReasonCode == "" {
 		return "当前控制前提已满足。", "当前主要控制前提已经满足，推荐动作仍然只会进入 placeholder execute。", "可先执行 dry-run 或占位执行，确认交互边界。", types.ControlReadinessReady
 	}
-	primaryMessage := firstBlockedMessage(snapshot.actions, snapshot.primaryReasonCode)
+	primaryMessage := firstBlockedMessage(snapshot.blockedReasons)
 	if containsMissingCheck(snapshot.checks) {
 		return "当前控制前提部分缺失。", primaryMessage, nextStepForReason(snapshot.primaryReasonCode), types.ControlReadinessPartial
 	}
 	return "当前控制前提已阻断。", primaryMessage, nextStepForReason(snapshot.primaryReasonCode), types.ControlReadinessBlocked
+}
+
+func aggregateTargetChecks(targetKind types.ControlTargetKind, actions []evaluatedControlAction, recommendedAction types.ControlActionKind) ([]types.ControlCheckItem, []types.ControlBlockedReason) {
+	if len(actions) == 0 {
+		return nil, nil
+	}
+	switch targetKind {
+	case types.ControlTargetNode:
+		return aggregateNodeTargetChecks(actions)
+	case types.ControlTargetTunnel:
+		return aggregateTunnelTargetChecks(actions, recommendedAction)
+	default:
+		return nil, nil
+	}
+}
+
+func aggregateNodeTargetChecks(actions []evaluatedControlAction) ([]types.ControlCheckItem, []types.ControlBlockedReason) {
+	byAction := map[types.ControlActionKind]types.ControlActionResponse{}
+	for _, action := range actions {
+		byAction[action.request.ActionKind] = action.response
+	}
+	restart := byAction[types.ControlActionRestartAgent]
+	release := byAction[types.ControlActionReleaseNode]
+	checks := []types.ControlCheckItem{
+		findCheckItem(restart.Preflight.Items, "surface"),
+		findCheckItem(restart.Preflight.Items, "online"),
+		findCheckItem(restart.Preflight.Items, "managed"),
+		findCheckItem(restart.Preflight.Items, "deployment"),
+		findCheckItem(restart.Preflight.Items, "serviceUnit"),
+		findCheckItem(restart.Preflight.Items, "instanceProfile"),
+	}
+	isolation := types.ControlCheckItem{Code: "isolation", Label: "节点当前隔离状态", State: types.ControlCheckPass, Message: "当前节点未隔离。"}
+	if hasBlockedReason(restart.Preflight.BlockedReasons, types.ControlReasonNodeIsolated) || release.Result == types.ControlResultAccepted {
+		isolation = types.ControlCheckItem{Code: "isolation", Label: "节点当前隔离状态", State: types.ControlCheckBlocked, Message: "当前节点已隔离。"}
+	}
+	checks = append(checks, isolation)
+	blockedReasons := []types.ControlBlockedReason{}
+	for _, code := range []types.ControlReasonCode{types.ControlReasonNodeOffline, types.ControlReasonUnmanagedInstance, types.ControlReasonMissingDeploymentMode, types.ControlReasonMissingServiceUnit, types.ControlReasonMissingInstanceProfile, types.ControlReasonNodeIsolated} {
+		if reason, ok := firstReasonByCode(restart.Preflight.BlockedReasons, code); ok {
+			blockedReasons = append(blockedReasons, reason)
+		}
+	}
+	return checks, blockedReasons
+}
+
+func aggregateTunnelTargetChecks(actions []evaluatedControlAction, recommendedAction types.ControlActionKind) ([]types.ControlCheckItem, []types.ControlBlockedReason) {
+	byAction := map[types.ControlActionKind]types.ControlActionResponse{}
+	for _, action := range actions {
+		byAction[action.request.ActionKind] = action.response
+	}
+	recommended := byAction[recommendedAction]
+	checks := []types.ControlCheckItem{
+		findCheckItem(recommended.Preflight.Items, "surface"),
+		findCheckItem(recommended.Preflight.Items, "tunnelStatus"),
+	}
+	statusConflict := types.ControlCheckItem{Code: "statusConflict", Label: "pause/resume 状态匹配性", State: types.ControlCheckPass, Message: "当前 tunnel 状态与推荐动作匹配。"}
+	if reason, ok := firstReasonByCode(recommended.Preflight.BlockedReasons, types.ControlReasonTunnelStateConflict); ok {
+		statusConflict = types.ControlCheckItem{Code: "statusConflict", Label: "pause/resume 状态匹配性", State: types.ControlCheckBlocked, Message: reason.Message}
+	}
+	checks = append(checks, statusConflict)
+	blockedReasons := []types.ControlBlockedReason{}
+	for _, code := range []types.ControlReasonCode{types.ControlReasonTargetNotFound, types.ControlReasonUnsupportedSurface, types.ControlReasonTunnelStateConflict} {
+		if reason, ok := firstReasonByCode(recommended.Preflight.BlockedReasons, code); ok {
+			blockedReasons = append(blockedReasons, reason)
+		}
+	}
+	return checks, blockedReasons
+}
+
+func findCheckItem(items []types.ControlCheckItem, code string) types.ControlCheckItem {
+	for _, item := range items {
+		if item.Code == code {
+			return item
+		}
+	}
+	return types.ControlCheckItem{Code: code, Label: code, State: types.ControlCheckMissing, Message: "当前还没有上报 " + code + "。"}
+}
+
+func firstReasonByCode(reasons []types.ControlBlockedReason, code types.ControlReasonCode) (types.ControlBlockedReason, bool) {
+	for _, reason := range reasons {
+		if reason.Code == code {
+			return reason, true
+		}
+	}
+	return types.ControlBlockedReason{}, false
+}
+
+func hasBlockedReason(reasons []types.ControlBlockedReason, code types.ControlReasonCode) bool {
+	_, ok := firstReasonByCode(reasons, code)
+	return ok
 }
 
 func recommendedActionForSnapshot(targetKind types.ControlTargetKind, actions []evaluatedControlAction) types.ControlActionKind {
@@ -386,13 +477,9 @@ func findEvaluatedAction(actions []evaluatedControlAction, actionKind types.Cont
 	return nil
 }
 
-func firstBlockedMessage(actions []evaluatedControlAction, reason types.ControlReasonCode) string {
-	for _, action := range actions {
-		for _, blocked := range action.response.Preflight.BlockedReasons {
-			if blocked.Code == reason {
-				return blocked.Message
-			}
-		}
+func firstBlockedMessage(reasons []types.ControlBlockedReason) string {
+	if len(reasons) > 0 {
+		return reasons[0].Message
 	}
 	return "当前控制前提已阻断。"
 }

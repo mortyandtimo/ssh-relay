@@ -2770,6 +2770,16 @@ func TestControlPanelSummaryNodeAndTunnel(t *testing.T) {
 		if !foundMissing {
 			t.Fatalf("expected partial node panel to contain missing checks, got %+v", out.Checks)
 		}
+		foundReleaseCheck := false
+		for _, item := range out.Checks {
+			if item.Code == "isolation" {
+				foundReleaseCheck = true
+				break
+			}
+		}
+		if !foundReleaseCheck {
+			t.Fatalf("expected target-level node panel to retain isolation check, got %+v", out.Checks)
+		}
 	})
 
 	assertPanel("/api/control-panels/node/node-blocked/operator_console", http.StatusOK, func(out types.ControlPanelSummary) {
@@ -2785,10 +2795,20 @@ func TestControlPanelSummaryNodeAndTunnel(t *testing.T) {
 		if out.ReadinessState != types.ControlReadinessReady || len(out.Checks) == 0 || out.NextStep == "" || out.RecommendedAction != types.ControlActionPauseTunnel {
 			t.Fatalf("unexpected active tunnel panel: %+v", out)
 		}
+		foundStatusConflict := false
+		for _, item := range out.Checks {
+			if item.Code == "statusConflict" {
+				foundStatusConflict = true
+				break
+			}
+		}
+		if !foundStatusConflict {
+			t.Fatalf("expected target-level tunnel panel to retain statusConflict check, got %+v", out.Checks)
+		}
 	})
 
 	assertPanel("/api/control-panels/tunnel/tunnel-paused-panel/operator_console", http.StatusOK, func(out types.ControlPanelSummary) {
-		if out.ReadinessState != types.ControlReadinessBlocked || len(out.Checks) == 0 || out.PrimaryReasonCode != types.ControlReasonTunnelStateConflict || out.NextStep == "" || out.RecommendedAction != types.ControlActionResumeTunnel {
+		if out.ReadinessState != types.ControlReadinessReady || len(out.Checks) == 0 || out.PrimaryReasonCode != "" || out.NextStep == "" || out.RecommendedAction != types.ControlActionResumeTunnel {
 			t.Fatalf("unexpected paused tunnel panel: %+v", out)
 		}
 	})
@@ -2804,6 +2824,18 @@ func TestControlPanelSummaryNodeAndTunnel(t *testing.T) {
 		}
 		if releaseOpt.AvailabilityState != types.ControlAvailabilityPlaceholderOnly || releaseOpt.NextStep == "" {
 			t.Fatalf("unexpected release option for blocked node: %+v", releaseOpt)
+		}
+	})
+
+	assertOptions("/api/control-actions/tunnel/tunnel-paused-panel/operator_console/options", http.StatusOK, func(out types.ControlActionOptionsResponse) {
+		var pauseOpt types.ControlActionOption
+		for _, item := range out.Items {
+			if item.ActionKind == types.ControlActionPauseTunnel {
+				pauseOpt = item
+			}
+		}
+		if pauseOpt.PrimaryReasonCode != types.ControlReasonTunnelStateConflict || pauseOpt.NextStep == "" {
+			t.Fatalf("expected paused tunnel pause option to expose state conflict guidance, got %+v", pauseOpt)
 		}
 	})
 }
