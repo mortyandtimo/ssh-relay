@@ -145,21 +145,21 @@ const (
 type ControlReasonCode string
 
 const (
-	ControlReasonNodeNotBound          ControlReasonCode = "node_not_bound"
-	ControlReasonTargetNotFound        ControlReasonCode = "target_not_found"
-	ControlReasonNodeNotSelected       ControlReasonCode = "node_not_selected"
-	ControlReasonTunnelNotSelected     ControlReasonCode = "tunnel_not_selected"
-	ControlReasonNodeOffline           ControlReasonCode = "node_offline"
-	ControlReasonNodeIsolated          ControlReasonCode = "node_isolated"
-	ControlReasonNodeNotIsolated       ControlReasonCode = "node_not_isolated"
-	ControlReasonUnmanagedInstance     ControlReasonCode = "unmanaged_instance"
-	ControlReasonMissingDeploymentMode ControlReasonCode = "missing_deployment_mode"
-	ControlReasonMissingServiceUnit    ControlReasonCode = "missing_service_unit"
+	ControlReasonNodeNotBound           ControlReasonCode = "node_not_bound"
+	ControlReasonTargetNotFound         ControlReasonCode = "target_not_found"
+	ControlReasonNodeNotSelected        ControlReasonCode = "node_not_selected"
+	ControlReasonTunnelNotSelected      ControlReasonCode = "tunnel_not_selected"
+	ControlReasonNodeOffline            ControlReasonCode = "node_offline"
+	ControlReasonNodeIsolated           ControlReasonCode = "node_isolated"
+	ControlReasonNodeNotIsolated        ControlReasonCode = "node_not_isolated"
+	ControlReasonUnmanagedInstance      ControlReasonCode = "unmanaged_instance"
+	ControlReasonMissingDeploymentMode  ControlReasonCode = "missing_deployment_mode"
+	ControlReasonMissingServiceUnit     ControlReasonCode = "missing_service_unit"
 	ControlReasonMissingInstanceProfile ControlReasonCode = "missing_instance_profile"
-	ControlReasonUnsupportedSurface    ControlReasonCode = "unsupported_surface"
-	ControlReasonUnsupportedAction     ControlReasonCode = "unsupported_action"
-	ControlReasonPlaceholderOnly       ControlReasonCode = "placeholder_execution_only"
-	ControlReasonTunnelStateConflict   ControlReasonCode = "tunnel_state_conflict"
+	ControlReasonUnsupportedSurface     ControlReasonCode = "unsupported_surface"
+	ControlReasonUnsupportedAction      ControlReasonCode = "unsupported_action"
+	ControlReasonPlaceholderOnly        ControlReasonCode = "placeholder_execution_only"
+	ControlReasonTunnelStateConflict    ControlReasonCode = "tunnel_state_conflict"
 )
 
 type ControlCheckState string
@@ -182,6 +182,11 @@ type ControlBlockedReason struct {
 	Message string            `json:"message"`
 }
 
+type ControlExecutionNote struct {
+	Code    ControlReasonCode `json:"code"`
+	Message string            `json:"message"`
+}
+
 type ControlPreflightSummary struct {
 	Allowed        bool                   `json:"allowed"`
 	Items          []ControlCheckItem     `json:"items"`
@@ -199,16 +204,18 @@ type ControlActionRequest struct {
 }
 
 type ControlActionResponse struct {
-	Result        ControlResult         `json:"result"`
-	ActionKind    ControlActionKind     `json:"actionKind"`
-	TargetKind    ControlTargetKind     `json:"targetKind"`
-	TargetID      string                `json:"targetId"`
-	SourceSurface ControlSurface        `json:"sourceSurface"`
-	Preflight     ControlPreflightSummary `json:"preflight"`
-	HumanMessage  string                `json:"humanMessage"`
-	DryRunOnly    bool                  `json:"dryRunOnly"`
-	ExecutionMode ControlExecutionMode  `json:"executionMode,omitempty"`
-	Facts         map[string]string     `json:"facts,omitempty"`
+	Result          ControlResult           `json:"result"`
+	ActionKind      ControlActionKind       `json:"actionKind"`
+	TargetKind      ControlTargetKind       `json:"targetKind"`
+	TargetID        string                  `json:"targetId"`
+	SourceSurface   ControlSurface          `json:"sourceSurface"`
+	Preflight       ControlPreflightSummary `json:"preflight"`
+	HumanMessage    string                  `json:"humanMessage"`
+	DryRunOnly      bool                    `json:"dryRunOnly"`
+	ExecutionMode   ControlExecutionMode    `json:"executionMode,omitempty"`
+	PlaceholderOnly bool                    `json:"placeholderOnly,omitempty"`
+	ExecutionNotes  []ControlExecutionNote  `json:"executionNotes,omitempty"`
+	Facts           map[string]string       `json:"facts,omitempty"`
 }
 
 type TunnelSpec struct {

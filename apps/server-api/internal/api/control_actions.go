@@ -96,13 +96,14 @@ func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlAct
 
 func newControlActionResponse(req types.ControlActionRequest) types.ControlActionResponse {
 	return types.ControlActionResponse{
-		ActionKind:    req.ActionKind,
-		TargetKind:    req.TargetKind,
-		TargetID:      req.TargetID,
-		SourceSurface: req.SourceSurface,
-		DryRunOnly:    req.DryRun,
-		ExecutionMode: types.ControlExecutionPlaceholder,
-		Facts:         map[string]string{},
+		ActionKind:     req.ActionKind,
+		TargetKind:     req.TargetKind,
+		TargetID:       req.TargetID,
+		SourceSurface:  req.SourceSurface,
+		DryRunOnly:     req.DryRun,
+		ExecutionMode:  types.ControlExecutionPlaceholder,
+		ExecutionNotes: []types.ControlExecutionNote{},
+		Facts:          map[string]string{},
 	}
 }
 
@@ -134,10 +135,10 @@ func (s *Server) evaluateNodeControlPreflight(ctx context.Context, req types.Con
 	populateNodeControlFacts(resp, node)
 	addNodeSurfaceCheck(req, builder)
 	builder.addCheck("online", "节点 online", requiredCheck(node.Status == "online"), ternaryMessage(node.Status == "online", "当前节点在线。", "当前节点离线。"), types.ControlReasonNodeOffline)
-	builder.addCheck("managed", "受管实例", requiredCheck(node.InstanceManaged), ternaryMessage(node.InstanceManaged, "当前节点为受管实例。", "当前节点不是受管实例。"), types.ControlReasonUnmanagedInstance)
-	builder.addCheck("deployment", "deploymentMode", requiredCheck(strings.TrimSpace(node.DeploymentMode) != ""), ternaryMessage(strings.TrimSpace(node.DeploymentMode) != "", node.DeploymentMode, "当前还没有上报 deploymentMode。"), types.ControlReasonMissingDeploymentMode)
-	builder.addCheck("serviceUnit", "serviceUnit 已上报", requiredCheck(strings.TrimSpace(node.ServiceUnit) != ""), ternaryMessage(strings.TrimSpace(node.ServiceUnit) != "", node.ServiceUnit, "当前还没有上报 serviceUnit。"), types.ControlReasonMissingServiceUnit)
-	builder.addCheck("instanceProfile", "instanceProfile 已上报", requiredCheck(strings.TrimSpace(node.InstanceProfile) != ""), ternaryMessage(strings.TrimSpace(node.InstanceProfile) != "", node.InstanceProfile, "当前还没有上报 instanceProfile。"), types.ControlReasonMissingInstanceProfile)
+	builder.addCheck("managed", "受管实例", missingOrPass(node.InstanceManaged), ternaryMessage(node.InstanceManaged, "当前节点为受管实例。", "当前节点没有上报为受管实例。"), types.ControlReasonUnmanagedInstance)
+	builder.addCheck("deployment", "deploymentMode", missingOrPass(strings.TrimSpace(node.DeploymentMode) != ""), ternaryMessage(strings.TrimSpace(node.DeploymentMode) != "", node.DeploymentMode, "当前还没有上报 deploymentMode。"), types.ControlReasonMissingDeploymentMode)
+	builder.addCheck("serviceUnit", "serviceUnit 已上报", missingOrPass(strings.TrimSpace(node.ServiceUnit) != ""), ternaryMessage(strings.TrimSpace(node.ServiceUnit) != "", node.ServiceUnit, "当前还没有上报 serviceUnit。"), types.ControlReasonMissingServiceUnit)
+	builder.addCheck("instanceProfile", "instanceProfile 已上报", missingOrPass(strings.TrimSpace(node.InstanceProfile) != ""), ternaryMessage(strings.TrimSpace(node.InstanceProfile) != "", node.InstanceProfile, "当前还没有上报 instanceProfile。"), types.ControlReasonMissingInstanceProfile)
 
 	switch req.ActionKind {
 	case types.ControlActionRestartAgent:
@@ -167,6 +168,7 @@ func (s *Server) evaluateNodeControlPreflight(ctx context.Context, req types.Con
 	default:
 		builder.addCheck("action", "动作白名单", types.ControlCheckBlocked, "当前节点动作不在本轮白名单内。", types.ControlReasonUnsupportedAction)
 	}
+	enforceMissingChecksAsBlocked(builder)
 	return http.StatusOK
 }
 
@@ -211,13 +213,15 @@ func (s *Server) executePlaceholderControlAction(resp types.ControlActionRespons
 		resp.HumanMessage = "execute 已被预检阻断。"
 		resp.DryRunOnly = false
 		resp.ExecutionMode = types.ControlExecutionPlaceholder
+		resp.PlaceholderOnly = false
 		return resp
 	}
 	resp.Result = types.ControlResultAccepted
 	resp.HumanMessage = "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。"
 	resp.DryRunOnly = false
 	resp.ExecutionMode = types.ControlExecutionPlaceholder
-	resp.Preflight.BlockedReasons = append(resp.Preflight.BlockedReasons, types.ControlBlockedReason{
+	resp.PlaceholderOnly = true
+	resp.ExecutionNotes = append(resp.ExecutionNotes, types.ControlExecutionNote{
 		Code:    types.ControlReasonPlaceholderOnly,
 		Message: "当前还没有接入真实系统执行器。",
 	})
@@ -251,11 +255,46 @@ func addNodeSurfaceCheck(req types.ControlActionRequest, builder *controlPreflig
 	}
 }
 
+func enforceMissingChecksAsBlocked(builder *controlPreflightBuilder) {
+	for _, item := range builder.summary.Items {
+		if item.State != types.ControlCheckMissing {
+			continue
+		}
+		reasonCode, ok := missingReasonCodeForCheck(item.Code)
+		if !ok {
+			continue
+		}
+		builder.block(reasonCode, item.Message)
+	}
+}
+
+func missingReasonCodeForCheck(code string) (types.ControlReasonCode, bool) {
+	switch code {
+	case "managed":
+		return types.ControlReasonUnmanagedInstance, true
+	case "deployment":
+		return types.ControlReasonMissingDeploymentMode, true
+	case "serviceUnit":
+		return types.ControlReasonMissingServiceUnit, true
+	case "instanceProfile":
+		return types.ControlReasonMissingInstanceProfile, true
+	default:
+		return "", false
+	}
+}
+
 func requiredCheck(ok bool) types.ControlCheckState {
 	if ok {
 		return types.ControlCheckPass
 	}
 	return types.ControlCheckBlocked
+}
+
+func missingOrPass(ok bool) types.ControlCheckState {
+	if ok {
+		return types.ControlCheckPass
+	}
+	return types.ControlCheckMissing
 }
 
 func ternaryMessage(ok bool, passMsg, failMsg string) string {

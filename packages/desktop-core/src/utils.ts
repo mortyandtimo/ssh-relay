@@ -134,8 +134,10 @@ export type ControlResultDisplay = {
 	message: string;
 	executionMode: string;
 	dryRunOnly: string;
+	placeholderOnly: boolean;
 	checks: Array<{ code: string; label: string; state: CheckState; stateLabel: string; stateTone: string; message: string }>;
 	blockedReasons: Array<{ code: string; message: string }>;
+	executionNotes: Array<{ code: string; message: string }>;
 };
 
 export function formatControlResultDisplay(result: ControlActionResponse): ControlResultDisplay {
@@ -144,6 +146,7 @@ export function formatControlResultDisplay(result: ControlActionResponse): Contr
 		message: result.humanMessage,
 		executionMode: result.executionMode,
 		dryRunOnly: String(result.dryRunOnly),
+		placeholderOnly: Boolean(result.placeholderOnly),
 		checks: result.preflight.items.map((item) => ({
 			code: item.code,
 			label: item.label,
@@ -155,6 +158,10 @@ export function formatControlResultDisplay(result: ControlActionResponse): Contr
 		blockedReasons: (result.preflight.blockedReasons || []).map((reason) => ({
 			code: reason.code,
 			message: reason.message,
+		})),
+		executionNotes: (result.executionNotes || []).map((note) => ({
+			code: note.code,
+			message: note.message,
 		})),
 	};
 }

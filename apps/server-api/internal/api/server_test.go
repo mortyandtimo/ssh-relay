@@ -2387,7 +2387,7 @@ func TestControlActionNodePreflightBranches(t *testing.T) {
 	offline.Status = "offline"
 	server.store = nodeOverrideStore{Store: server.store, overrides: map[string]types.NodeSummary{"node-offline": offline}}
 
-	assertAction := func(name string, payload map[string]any, wantResult types.ControlResult, wantReason types.ControlReasonCode) {
+	assertAction := func(name string, payload map[string]any, wantResult types.ControlResult, wantReason types.ControlReasonCode, wantMissingCode string, wantBlockedReasons bool) {
 		body, _ := json.Marshal(payload)
 		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
 		applyCookies(req, adminCookies)
@@ -2403,6 +2403,12 @@ func TestControlActionNodePreflightBranches(t *testing.T) {
 		if out.Result != wantResult {
 			t.Fatalf("%s: expected result %s, got %s", name, wantResult, out.Result)
 		}
+		if wantBlockedReasons && len(out.Preflight.BlockedReasons) == 0 {
+			t.Fatalf("%s: expected blocked reasons, got none", name)
+		}
+		if !wantBlockedReasons && len(out.Preflight.BlockedReasons) != 0 {
+			t.Fatalf("%s: expected no blocked reasons, got %+v", name, out.Preflight.BlockedReasons)
+		}
 		if wantReason != "" {
 			found := false
 			for _, item := range out.Preflight.BlockedReasons {
@@ -2415,21 +2421,33 @@ func TestControlActionNodePreflightBranches(t *testing.T) {
 				t.Fatalf("%s: expected blocked reason %s, got %+v", name, wantReason, out.Preflight.BlockedReasons)
 			}
 		}
+		if wantMissingCode != "" {
+			found := false
+			for _, item := range out.Preflight.Items {
+				if item.Code == wantMissingCode && item.State == types.ControlCheckMissing {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("%s: expected missing check for %s, got %+v", name, wantMissingCode, out.Preflight.Items)
+			}
+		}
 	}
 
-	assertAction("restart accepted dry-run", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultAccepted, "")
-	assertAction("isolate blocked on node console surface", map[string]any{"actionKind": "isolate_node", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedSurface)
-	assertAction("release blocked on node console surface", map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-isolated", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedSurface)
-	assertAction("restart offline blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-offline", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonNodeOffline)
-	assertAction("restart unmanaged blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-unmanaged", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnmanagedInstance)
-	assertAction("missing service unit blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-missing-service", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonMissingServiceUnit)
-	assertAction("missing profile blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-missing-profile", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonMissingInstanceProfile)
-	assertAction("missing deployment blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-missing-deploy", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonMissingDeploymentMode)
-	assertAction("unsupported surface blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "bad_surface", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedSurface)
-	assertAction("unsupported action blocked", map[string]any{"actionKind": "delete_node", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedAction)
-	assertAction("isolate blocked when isolated", map[string]any{"actionKind": "isolate_node", "targetKind": "node", "targetId": "node-isolated", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonNodeIsolated)
-	assertAction("release blocked when not isolated", map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonNodeNotIsolated)
-	assertAction("release accepted when isolated", map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-isolated", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultAccepted, "")
+	assertAction("restart accepted dry-run", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultAccepted, "", "", false)
+	assertAction("isolate blocked on node console surface", map[string]any{"actionKind": "isolate_node", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedSurface, "", true)
+	assertAction("release blocked on node console surface", map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-isolated", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedSurface, "", true)
+	assertAction("restart offline blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-offline", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonNodeOffline, "", true)
+	assertAction("restart unmanaged blocked with missing signal", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-unmanaged", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnmanagedInstance, "managed", true)
+	assertAction("missing service unit blocked with missing signal", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-missing-service", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonMissingServiceUnit, "serviceUnit", true)
+	assertAction("missing profile blocked with missing signal", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-missing-profile", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonMissingInstanceProfile, "instanceProfile", true)
+	assertAction("missing deployment blocked with missing signal", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-missing-deploy", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonMissingDeploymentMode, "deployment", true)
+	assertAction("unsupported surface blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "bad_surface", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedSurface, "", true)
+	assertAction("unsupported action blocked", map[string]any{"actionKind": "delete_node", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedAction, "", true)
+	assertAction("isolate blocked when isolated", map[string]any{"actionKind": "isolate_node", "targetKind": "node", "targetId": "node-isolated", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonNodeIsolated, "", true)
+	assertAction("release blocked when not isolated", map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonNodeNotIsolated, "", true)
+	assertAction("release accepted when isolated", map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-isolated", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultAccepted, "", "", false)
 }
 
 func TestControlActionTunnelPreflightAndPlaceholderExecute(t *testing.T) {
@@ -2454,7 +2472,7 @@ func TestControlActionTunnelPreflightAndPlaceholderExecute(t *testing.T) {
 		}
 	}
 
-	assertTunnel := func(name string, payload map[string]any, wantResult types.ControlResult, wantReason types.ControlReasonCode, wantExecutionMode types.ControlExecutionMode, wantDryRun bool) {
+	assertTunnel := func(name string, payload map[string]any, wantResult types.ControlResult, wantReason types.ControlReasonCode, wantExecutionMode types.ControlExecutionMode, wantDryRun bool, wantPlaceholderOnly bool, wantExecutionNote bool, wantBlockedReasons bool) {
 		body, _ := json.Marshal(payload)
 		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
 		applyCookies(req, adminCookies)
@@ -2476,6 +2494,21 @@ func TestControlActionTunnelPreflightAndPlaceholderExecute(t *testing.T) {
 		if out.DryRunOnly != wantDryRun {
 			t.Fatalf("%s: expected dryRunOnly=%t, got %t", name, wantDryRun, out.DryRunOnly)
 		}
+		if out.PlaceholderOnly != wantPlaceholderOnly {
+			t.Fatalf("%s: expected placeholderOnly=%t, got %t", name, wantPlaceholderOnly, out.PlaceholderOnly)
+		}
+		if wantExecutionNote && len(out.ExecutionNotes) == 0 {
+			t.Fatalf("%s: expected execution notes, got none", name)
+		}
+		if !wantExecutionNote && len(out.ExecutionNotes) != 0 {
+			t.Fatalf("%s: expected no execution notes, got %+v", name, out.ExecutionNotes)
+		}
+		if wantBlockedReasons && len(out.Preflight.BlockedReasons) == 0 {
+			t.Fatalf("%s: expected blocked reasons, got none", name)
+		}
+		if !wantBlockedReasons && len(out.Preflight.BlockedReasons) != 0 {
+			t.Fatalf("%s: expected no blocked reasons, got %+v", name, out.Preflight.BlockedReasons)
+		}
 		if wantReason != "" {
 			found := false
 			for _, item := range out.Preflight.BlockedReasons {
@@ -2485,16 +2518,24 @@ func TestControlActionTunnelPreflightAndPlaceholderExecute(t *testing.T) {
 				}
 			}
 			if !found {
-				t.Fatalf("%s: expected blocked reason %s, got %+v", name, wantReason, out.Preflight.BlockedReasons)
+				for _, item := range out.ExecutionNotes {
+					if item.Code == wantReason {
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("%s: expected reason %s, got blocked=%+v execution=%+v", name, wantReason, out.Preflight.BlockedReasons, out.ExecutionNotes)
 			}
 		}
 	}
 
-	assertTunnel("tunnel target missing", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "missing-tunnel", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTargetNotFound, types.ControlExecutionPlaceholder, true)
-	assertTunnel("active pause accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultAccepted, "", types.ControlExecutionPlaceholder, true)
-	assertTunnel("paused resume accepted", map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultAccepted, "", types.ControlExecutionPlaceholder, true)
-	assertTunnel("paused pause blocked", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, true)
-	assertTunnel("active resume blocked", map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, true)
-	assertTunnel("execute placeholder accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultAccepted, types.ControlReasonPlaceholderOnly, types.ControlExecutionPlaceholder, false)
-	assertTunnel("execute blocked when conflict", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, false)
+	assertTunnel("tunnel target missing", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "missing-tunnel", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTargetNotFound, types.ControlExecutionPlaceholder, true, false, false, true)
+	assertTunnel("active pause accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultAccepted, "", types.ControlExecutionPlaceholder, true, false, false, false)
+	assertTunnel("paused resume accepted", map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultAccepted, "", types.ControlExecutionPlaceholder, true, false, false, false)
+	assertTunnel("paused pause blocked", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, true, false, false, true)
+	assertTunnel("active resume blocked", map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, true, false, false, true)
+	assertTunnel("execute placeholder accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultAccepted, types.ControlReasonPlaceholderOnly, types.ControlExecutionPlaceholder, false, true, true, false)
+	assertTunnel("execute blocked when conflict", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, false, false, false, true)
 }

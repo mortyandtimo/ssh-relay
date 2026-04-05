@@ -115,6 +115,11 @@ export type ControlBlockedReason = {
   message: string;
 };
 
+export type ControlExecutionNote = {
+  code: string;
+  message: string;
+};
+
 export type ControlPreflightSummary = {
   allowed: boolean;
   items: ControlCheckItem[];
@@ -141,5 +146,7 @@ export type ControlActionResponse = {
   humanMessage: string;
   dryRunOnly: boolean;
   executionMode: ControlExecutionMode;
+  placeholderOnly?: boolean;
+  executionNotes?: ControlExecutionNote[];
   facts?: Record<string, string>;
 };

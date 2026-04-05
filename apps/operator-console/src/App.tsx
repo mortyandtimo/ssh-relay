@@ -588,6 +588,7 @@ function ControlResultBlock({ result }: { result: ControlActionResponse }) {
       </div>
       <p className="copy">{display.message}</p>
       <p className="copy">executionMode: <code>{display.executionMode}</code> / dryRunOnly: <code>{display.dryRunOnly}</code></p>
+      {display.placeholderOnly ? <div className="banner info">当前仅为占位执行提示，尚未接入真实系统执行器。</div> : null}
       <div className="check-list compact-check-list">
         {display.checks.map((item) => (
           <div key={item.code} className="check-item">
@@ -608,6 +609,19 @@ function ControlResultBlock({ result }: { result: ControlActionResponse }) {
                 <span className="status-chip danger">阻断</span>
               </div>
               <p className="copy">{reason.message}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {display.executionNotes.length > 0 ? (
+        <div className="check-list compact-check-list">
+          {display.executionNotes.map((note) => (
+            <div key={note.code} className="check-item">
+              <div className="check-head">
+                <strong>{note.code}</strong>
+                <span className="status-chip neutral">占位执行提示</span>
+              </div>
+              <p className="copy">{note.message}</p>
             </div>
           ))}
         </div>
