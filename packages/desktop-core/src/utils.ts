@@ -1,5 +1,13 @@
 import type { NodeCapabilities, NodeSummary, TunnelSpec } from "./types";
 
+export type CheckState = "pass" | "missing" | "blocked";
+
+export type SafetyCheckItem = {
+  label: string;
+  state: CheckState;
+  detail: string;
+};
+
 export const tunnelTabs = ["tcp", "udp", "http", "https", "socks5"] as const;
 
 export function capabilitySummary(capabilities: NodeCapabilities) {
@@ -101,4 +109,16 @@ export function resolveLocalNodeBinding(nodes: NodeSummary[], desktopNodeId: str
     reason: "当前检测到 " + managedLocalNodes.length + " 个受管 local 节点，无法确定本机归属。",
     nextAction: "请显式配置 VITE_DESKTOP_NODE_ID，避免在多本地节点账号下继续歧义绑定。",
   };
+}
+
+export function checkStateLabel(state: CheckState) {
+  if (state === "pass") return "通过";
+  if (state === "missing") return "缺失";
+  return "阻断";
+}
+
+export function checkStateTone(state: CheckState) {
+  if (state === "pass") return "good";
+  if (state === "missing") return "warn";
+  return "danger";
 }

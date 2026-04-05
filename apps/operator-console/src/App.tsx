@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
 import type { NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
-import { capabilitySummary, formatDate, nodeAgentDeploymentLabel, publicEntry, runtimeLabel, statusClass, tunnelTabs } from "../../../packages/desktop-core/src/utils";
+import { capabilitySummary, checkStateLabel, checkStateTone, formatDate, nodeAgentDeploymentLabel, publicEntry, runtimeLabel, statusClass, tunnelTabs, type SafetyCheckItem } from "../../../packages/desktop-core/src/utils";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 type RuntimeStateFilter = "all" | "pending" | "unavailable" | "reported";
@@ -139,6 +139,48 @@ export default function App() {
   const unavailableCount = useMemo(() => selectedNodeTunnels.filter((tunnel) => tunnel.runtimeState === "unavailable").length, [selectedNodeTunnels]);
   const failureReasonCount = useMemo(() => selectedNodeTunnels.filter((tunnel) => Boolean(tunnel.lastFailureReason)).length, [selectedNodeTunnels]);
   const p2pFallbackCount = useMemo(() => selectedNodeTunnels.filter((tunnel) => isP2PFallbackTunnel(tunnel)).length, [selectedNodeTunnels]);
+  const remoteControlChecks = useMemo<SafetyCheckItem[]>(() => {
+    const items: SafetyCheckItem[] = [
+      {
+        label: "已选中机器",
+        state: selectedNode ? "pass" : "blocked",
+        detail: selectedNode ? "当前已选中机器 " + selectedNode.nodeId + "。" : "当前还没有选中机器，无法进入远程控制预检。",
+      },
+      {
+        label: "当前机器 online",
+        state: selectedNode?.status === "online" ? "pass" : selectedNode ? "blocked" : "blocked",
+        detail: selectedNode?.status === "online" ? "当前机器在线。" : "当前机器不在线，未来远程动作应阻断。",
+      },
+      {
+        label: "当前机器未隔离",
+        state: selectedNode && !selectedNode.isolated ? "pass" : selectedNode ? "blocked" : "blocked",
+        detail: selectedNode ? (selectedNode.isolated ? "当前机器已隔离，未来远程动作应阻断。" : "当前机器未隔离。") : "当前还没有选中机器。",
+      },
+      {
+        label: "deploymentMode",
+        state: selectedNode?.deploymentMode ? "pass" : selectedNode ? "missing" : "blocked",
+        detail: selectedNode?.deploymentMode || "当前还没有上报 deploymentMode。",
+      },
+      {
+        label: "serviceUnit 已上报",
+        state: selectedNode?.serviceUnit ? "pass" : selectedNode ? "missing" : "blocked",
+        detail: selectedNode?.serviceUnit || "当前还没有上报 serviceUnit。",
+      },
+      {
+        label: "instanceManaged",
+        state: selectedNode?.instanceManaged ? "pass" : selectedNode ? "missing" : "blocked",
+        detail: selectedNode?.instanceManaged ? "当前机器为受管实例。" : "当前机器不是受管实例，未来远程控制前提不完整。",
+      },
+      {
+        label: "满足未来远程控制前提",
+        state: selectedNode && selectedNode.status === "online" && !selectedNode.isolated && selectedNode.instanceManaged && Boolean(selectedNode.serviceUnit) ? "pass" : selectedNode ? "blocked" : "blocked",
+        detail: selectedNode && selectedNode.status === "online" && !selectedNode.isolated && selectedNode.instanceManaged && Boolean(selectedNode.serviceUnit)
+          ? "当前机器已满足最小远程控制前提，但这轮仍未实现真实命令。"
+          : "当前至少有一项关键前提未满足，因此未来远程动作仍应阻断。",
+      },
+    ];
+    return items;
+  }, [selectedNode]);
 
   useEffect(() => {
     if (!tabTunnels.length) {
@@ -362,6 +404,27 @@ export default function App() {
                   <Metric label="last seen" value={formatDate(selectedNode.lastSeenAt)} />
                   <Metric label="失败原因数" value={String(selectedNode.runtimeSummary?.failureReasonCount ?? 0)} />
                 </div>
+              </section>
+              <section className="panel preflight-panel">
+                <div className="panel-head small">
+                  <div>
+                    <h3>远程控制预检区</h3>
+                    <p className="copy">这里是未来远程危险操作前的预检/确认层。当前还没有执行任何真实控制命令，只是在冻结远程危险动作的人机交互边界。</p>
+                  </div>
+                </div>
+                <div className="check-list">
+                  {remoteControlChecks.map((item) => (
+                    <div key={item.label} className="check-item">
+                      <div className="check-head">
+                        <strong>{item.label}</strong>
+                        <span className={"status-chip " + checkStateTone(item.state)}>{checkStateLabel(item.state)}</span>
+                      </div>
+                      <p className="copy">{item.detail}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="banner info">当前为什么还不能执行未来远程控制动作：只要机器未选中、offline、isolated、未受管、未上报 serviceUnit 中任一成立，就应继续阻断。</div>
+                <div className="banner info">下一步建议：先补齐机器在线性、受管实例信息和 serviceUnit 上报，再进入真正控制命令实现阶段；当前这轮只做确认层，不执行动作。</div>
               </section>
               <section className="panel workbench-panel">
                 <div className="panel-head"><div><h2>按隧道类型切换的工作区</h2><p className="copy">进入某台机器后，复用按类型切换的工作区与 tunnel 详情区。</p></div></div>

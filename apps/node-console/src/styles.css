@@ -43,3 +43,27 @@
   color: #65768c;
   line-height: 1.6;
 }
+
+.preflight-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.check-list {
+  display: grid;
+  gap: 12px;
+}
+
+.check-item {
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(17, 34, 56, 0.05);
+}
+
+.check-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}

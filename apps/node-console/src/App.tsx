@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
 import type { NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
-import { capabilitySummary, formatDate, nodeAgentDeploymentLabel, publicEntry, resolveLocalNodeBinding, runtimeLabel, statusClass, tunnelTabs } from "../../../packages/desktop-core/src/utils";
+import { capabilitySummary, checkStateLabel, checkStateTone, formatDate, nodeAgentDeploymentLabel, publicEntry, resolveLocalNodeBinding, runtimeLabel, statusClass, tunnelTabs, type SafetyCheckItem } from "../../../packages/desktop-core/src/utils";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
@@ -114,6 +114,51 @@ export default function App() {
   const boundNode = selectedNode;
   const bindingTone = localBinding.status === "success" ? "good" : localBinding.status === "config_error" ? "danger" : localBinding.status === "ambiguous" ? "warn" : "neutral";
   const bindingStatusLabel = localBinding.status === "success" ? "成功" : localBinding.status === "config_error" ? "配置错误" : localBinding.status === "ambiguous" ? "不唯一" : "未完成";
+  const localControlChecks = useMemo<SafetyCheckItem[]>(() => {
+    const items: SafetyCheckItem[] = [
+      {
+        label: "本机绑定状态",
+        state: localBinding.status === "success" ? "pass" : localBinding.status === "config_error" ? "blocked" : localBinding.status === "ambiguous" ? "blocked" : "missing",
+        detail: localBinding.reason,
+      },
+      {
+        label: "已明确命中本机节点",
+        state: localBinding.node ? "pass" : "blocked",
+        detail: localBinding.node ? "当前已命中 nodeId=" + localBinding.node.nodeId : "当前还没有命中明确本机节点。",
+      },
+      {
+        label: "当前为受管实例",
+        state: boundNode?.instanceManaged ? "pass" : boundNode ? "missing" : "blocked",
+        detail: boundNode?.instanceManaged ? "instanceManaged=true。" : "当前实例未标记为受管实例。",
+      },
+      {
+        label: "deploymentMode",
+        state: boundNode?.deploymentMode ? "pass" : boundNode ? "missing" : "blocked",
+        detail: boundNode?.deploymentMode ? boundNode.deploymentMode : "当前还没有上报 deploymentMode。",
+      },
+      {
+        label: "serviceUnit 已上报",
+        state: boundNode?.serviceUnit ? "pass" : boundNode ? "missing" : "blocked",
+        detail: boundNode?.serviceUnit || "当前还没有上报 serviceUnit。",
+      },
+      {
+        label: "instanceProfile 已上报",
+        state: boundNode?.instanceProfile ? "pass" : boundNode ? "missing" : "blocked",
+        detail: boundNode?.instanceProfile || "当前还没有上报 instanceProfile。",
+      },
+      {
+        label: "当前节点 online",
+        state: boundNode?.status === "online" ? "pass" : boundNode ? "blocked" : "blocked",
+        detail: boundNode?.status === "online" ? "当前节点在线。" : "当前节点不在线，未来本机控制动作应阻断。",
+      },
+      {
+        label: "当前节点未隔离",
+        state: boundNode && !boundNode.isolated ? "pass" : boundNode ? "blocked" : "blocked",
+        detail: boundNode ? (boundNode.isolated ? "当前节点已隔离，未来危险动作应阻断。" : "当前节点未隔离。") : "当前没有命中本机节点。",
+      },
+    ];
+    return items;
+  }, [boundNode, localBinding]);
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -307,6 +352,27 @@ export default function App() {
                   <Metric label="last seen" value={formatDate(boundNode.lastSeenAt)} />
                   <Metric label="失败原因数" value={String(boundNode.runtimeSummary?.failureReasonCount ?? 0)} />
                 </div>
+              </section>
+              <section className="panel preflight-panel">
+                <div className="panel-head small">
+                  <div>
+                    <h3>本机控制预检区</h3>
+                    <p className="copy">这里是未来危险操作前的预检/确认层。当前还没有执行任何真实控制命令，只是在冻结本机危险动作的人机交互边界。</p>
+                  </div>
+                </div>
+                <div className="check-list">
+                  {localControlChecks.map((item) => (
+                    <div key={item.label} className="check-item">
+                      <div className="check-head">
+                        <strong>{item.label}</strong>
+                        <span className={"status-chip " + checkStateTone(item.state)}>{checkStateLabel(item.state)}</span>
+                      </div>
+                      <p className="copy">{item.detail}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="banner info">当前为什么还不能执行未来本机控制动作：只要本机绑定、受管实例、serviceUnit、online、未隔离这几项中任一不满足，就应继续阻断。</div>
+                <div className="banner info">下一步建议：先补齐本机绑定与受管实例信息，再进入真正控制命令实现阶段；当前这轮只做确认层，不执行动作。</div>
               </section>
               <section className="panel workbench-panel">
                 <div className="panel-head">
