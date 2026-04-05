@@ -1,4 +1,4 @@
-import type { NodeCapabilities, NodeSummary, TunnelSpec } from "./types";
+import type { ControlActionResponse, NodeCapabilities, NodeSummary, TunnelSpec } from "./types";
 
 export type CheckState = "pass" | "missing" | "blocked";
 
@@ -121,4 +121,40 @@ export function checkStateTone(state: CheckState) {
   if (state === "pass") return "good";
   if (state === "missing") return "warn";
   return "danger";
+}
+
+export function controlResultTone(result: ControlActionResponse["result"]) {
+	if (result === "accepted") return "good";
+	if (result === "blocked") return "danger";
+	return "warn";
+}
+
+export type ControlResultDisplay = {
+	tone: string;
+	message: string;
+	executionMode: string;
+	dryRunOnly: string;
+	checks: Array<{ code: string; label: string; state: CheckState; stateLabel: string; stateTone: string; message: string }>;
+	blockedReasons: Array<{ code: string; message: string }>;
+};
+
+export function formatControlResultDisplay(result: ControlActionResponse): ControlResultDisplay {
+	return {
+		tone: controlResultTone(result.result),
+		message: result.humanMessage,
+		executionMode: result.executionMode,
+		dryRunOnly: String(result.dryRunOnly),
+		checks: result.preflight.items.map((item) => ({
+			code: item.code,
+			label: item.label,
+			state: item.state,
+			stateLabel: checkStateLabel(item.state),
+			stateTone: checkStateTone(item.state),
+			message: item.message,
+		})),
+		blockedReasons: (result.preflight.blockedReasons || []).map((reason) => ({
+			code: reason.code,
+			message: reason.message,
+		})),
+	};
 }

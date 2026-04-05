@@ -2356,3 +2356,145 @@ func TestTunnelPortSuggestionAvoidsActualConflictGroup(t *testing.T) {
 		t.Fatalf("expected socks5 suggestion 23001 to avoid tcp conflict, got %d", socksOut.Suggested)
 	}
 }
+
+func TestControlActionNodePreflightBranches(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID, nodeName string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeName, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-managed", "node-managed", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-managed.service", "instanceProfile": "node-managed", "instanceManaged": "true"})
+	registerNode("node-unmanaged", "node-unmanaged", map[string]string{"deploymentMode": "manual", "instanceManaged": "false"})
+	registerNode("node-missing-service", "node-missing-service", map[string]string{"deploymentMode": "managed", "instanceProfile": "node-missing-service", "instanceManaged": "true"})
+	registerNode("node-missing-profile", "node-missing-profile", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-missing-profile.service", "instanceManaged": "true"})
+	registerNode("node-missing-deploy", "node-missing-deploy", map[string]string{"serviceUnit": "cloud-relay-client-agent@node-missing-deploy.service", "instanceProfile": "node-missing-deploy", "instanceManaged": "true"})
+	registerNode("node-isolated", "node-isolated", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-isolated.service", "instanceProfile": "node-isolated", "instanceManaged": "true", "isolated": "true"})
+
+	offline, err := server.store.GetNode(context.Background(), "node-managed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	offline.NodeID = "node-offline"
+	offline.Status = "offline"
+	server.store = nodeOverrideStore{Store: server.store, overrides: map[string]types.NodeSummary{"node-offline": offline}}
+
+	assertAction := func(name string, payload map[string]any, wantResult types.ControlResult, wantReason types.ControlReasonCode) {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK && res.Code != http.StatusNotFound {
+			t.Fatalf("%s: unexpected status %d", name, res.Code)
+		}
+		var out types.ControlActionResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("%s: decode failed: %v", name, err)
+		}
+		if out.Result != wantResult {
+			t.Fatalf("%s: expected result %s, got %s", name, wantResult, out.Result)
+		}
+		if wantReason != "" {
+			found := false
+			for _, item := range out.Preflight.BlockedReasons {
+				if item.Code == wantReason {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("%s: expected blocked reason %s, got %+v", name, wantReason, out.Preflight.BlockedReasons)
+			}
+		}
+	}
+
+	assertAction("restart accepted dry-run", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultAccepted, "")
+	assertAction("isolate blocked on node console surface", map[string]any{"actionKind": "isolate_node", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedSurface)
+	assertAction("release blocked on node console surface", map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-isolated", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedSurface)
+	assertAction("restart offline blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-offline", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonNodeOffline)
+	assertAction("restart unmanaged blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-unmanaged", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnmanagedInstance)
+	assertAction("missing service unit blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-missing-service", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonMissingServiceUnit)
+	assertAction("missing profile blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-missing-profile", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonMissingInstanceProfile)
+	assertAction("missing deployment blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-missing-deploy", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonMissingDeploymentMode)
+	assertAction("unsupported surface blocked", map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "bad_surface", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedSurface)
+	assertAction("unsupported action blocked", map[string]any{"actionKind": "delete_node", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonUnsupportedAction)
+	assertAction("isolate blocked when isolated", map[string]any{"actionKind": "isolate_node", "targetKind": "node", "targetId": "node-isolated", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonNodeIsolated)
+	assertAction("release blocked when not isolated", map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-managed", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonNodeNotIsolated)
+	assertAction("release accepted when isolated", map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-isolated", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultAccepted, "")
+}
+
+func TestControlActionTunnelPreflightAndPlaceholderExecute(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-control", NodeName: "node-control", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+
+	for _, item := range []types.TunnelSpec{
+		{ID: "tunnel-active", NodeID: "node-control", Name: "tunnel-active", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 20010, Metadata: map[string]string{"nodeId": "node-control"}},
+		{ID: "tunnel-paused", NodeID: "node-control", Name: "tunnel-paused", Type: "tcp", Status: "paused", TargetHost: "127.0.0.1", TargetPort: 8081, PublicPort: 20011, Metadata: map[string]string{"nodeId": "node-control"}},
+	} {
+		if _, err := server.store.CreateTunnel(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertTunnel := func(name string, payload map[string]any, wantResult types.ControlResult, wantReason types.ControlReasonCode, wantExecutionMode types.ControlExecutionMode, wantDryRun bool) {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK && res.Code != http.StatusNotFound {
+			t.Fatalf("%s: unexpected status %d", name, res.Code)
+		}
+		var out types.ControlActionResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("%s: decode failed: %v", name, err)
+		}
+		if out.Result != wantResult {
+			t.Fatalf("%s: expected result %s, got %s", name, wantResult, out.Result)
+		}
+		if out.ExecutionMode != wantExecutionMode {
+			t.Fatalf("%s: expected execution mode %s, got %s", name, wantExecutionMode, out.ExecutionMode)
+		}
+		if out.DryRunOnly != wantDryRun {
+			t.Fatalf("%s: expected dryRunOnly=%t, got %t", name, wantDryRun, out.DryRunOnly)
+		}
+		if wantReason != "" {
+			found := false
+			for _, item := range out.Preflight.BlockedReasons {
+				if item.Code == wantReason {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("%s: expected blocked reason %s, got %+v", name, wantReason, out.Preflight.BlockedReasons)
+			}
+		}
+	}
+
+	assertTunnel("tunnel target missing", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "missing-tunnel", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTargetNotFound, types.ControlExecutionPlaceholder, true)
+	assertTunnel("active pause accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultAccepted, "", types.ControlExecutionPlaceholder, true)
+	assertTunnel("paused resume accepted", map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultAccepted, "", types.ControlExecutionPlaceholder, true)
+	assertTunnel("paused pause blocked", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, true)
+	assertTunnel("active resume blocked", map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, true)
+	assertTunnel("execute placeholder accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultAccepted, types.ControlReasonPlaceholderOnly, types.ControlExecutionPlaceholder, false)
+	assertTunnel("execute blocked when conflict", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, false)
+}
