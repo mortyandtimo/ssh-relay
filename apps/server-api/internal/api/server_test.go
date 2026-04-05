@@ -2911,4 +2911,59 @@ func TestControlExecuteConsistencyWithOptionsAndPanels(t *testing.T) {
 	if _, ok := server.controlExecutor.(placeholderControlExecutor); !ok {
 		t.Fatalf("expected default control executor to remain placeholder, got %T", server.controlExecutor)
 	}
+
+	readySnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetNode, "node-ready-exec", types.ControlSurfaceNodeConsole)
+	if status != http.StatusOK {
+		t.Fatalf("expected ready snapshot status 200, got %d", status)
+	}
+	readyAction := findActionSnapshot(readySnapshot, types.ControlActionRestartAgent)
+	if readyAction == nil {
+		t.Fatalf("expected ready restart action snapshot")
+	}
+	readyPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionRestartAgent, TargetKind: types.ControlTargetNode, TargetID: "node-ready-exec", SourceSurface: types.ControlSurfaceNodeConsole, RequestedAt: time.Now().UTC(), Note: "ready-node"}, readySnapshot, *readyAction)
+	if readyPlan.readinessState != types.ControlReadinessReady || readyPlan.recommendedAction != types.ControlActionRestartAgent || readyPlan.primaryReasonCode != "" {
+		t.Fatalf("unexpected ready execution plan: %+v", readyPlan)
+	}
+	if readyPlan.actionEvaluation.request.ActionKind != types.ControlActionRestartAgent {
+		t.Fatalf("expected ready execution plan to carry restart action evaluation, got %+v", readyPlan.actionEvaluation)
+	}
+
+	blockedSnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetNode, "node-blocked-exec", types.ControlSurfaceOperatorConsole)
+	if status != http.StatusOK {
+		t.Fatalf("expected blocked snapshot status 200, got %d", status)
+	}
+	blockedAction := findActionSnapshot(blockedSnapshot, types.ControlActionRestartAgent)
+	if blockedAction == nil {
+		t.Fatalf("expected blocked restart action snapshot")
+	}
+	blockedPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionRestartAgent, TargetKind: types.ControlTargetNode, TargetID: "node-blocked-exec", SourceSurface: types.ControlSurfaceOperatorConsole, RequestedAt: time.Now().UTC(), Note: "blocked-node"}, blockedSnapshot, *blockedAction)
+	if blockedPlan.readinessState != types.ControlReadinessBlocked || blockedPlan.primaryReasonCode != types.ControlReasonNodeIsolated || len(blockedPlan.blockingReasons) == 0 {
+		t.Fatalf("unexpected blocked execution plan: %+v", blockedPlan)
+	}
+
+	readyTunnelSnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetTunnel, "tunnel-active-exec", types.ControlSurfaceOperatorConsole)
+	if status != http.StatusOK {
+		t.Fatalf("expected ready tunnel snapshot status 200, got %d", status)
+	}
+	readyTunnelAction := findActionSnapshot(readyTunnelSnapshot, types.ControlActionPauseTunnel)
+	if readyTunnelAction == nil {
+		t.Fatalf("expected ready tunnel pause action snapshot")
+	}
+	readyTunnelPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionPauseTunnel, TargetKind: types.ControlTargetTunnel, TargetID: "tunnel-active-exec", SourceSurface: types.ControlSurfaceOperatorConsole, RequestedAt: time.Now().UTC(), Note: "ready-tunnel"}, readyTunnelSnapshot, *readyTunnelAction)
+	if readyTunnelPlan.readinessState != types.ControlReadinessReady || readyTunnelPlan.recommendedAction != types.ControlActionPauseTunnel || readyTunnelPlan.primaryReasonCode != "" {
+		t.Fatalf("unexpected ready tunnel execution plan: %+v", readyTunnelPlan)
+	}
+
+	blockedTunnelSnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetTunnel, "tunnel-paused-exec", types.ControlSurfaceOperatorConsole)
+	if status != http.StatusOK {
+		t.Fatalf("expected blocked tunnel snapshot status 200, got %d", status)
+	}
+	blockedTunnelAction := findActionSnapshot(blockedTunnelSnapshot, types.ControlActionPauseTunnel)
+	if blockedTunnelAction == nil {
+		t.Fatalf("expected blocked tunnel pause action snapshot")
+	}
+	blockedTunnelPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionPauseTunnel, TargetKind: types.ControlTargetTunnel, TargetID: "tunnel-paused-exec", SourceSurface: types.ControlSurfaceOperatorConsole, RequestedAt: time.Now().UTC(), Note: "blocked-tunnel"}, blockedTunnelSnapshot, *blockedTunnelAction)
+	if blockedTunnelPlan.readinessState != types.ControlReadinessReady || blockedTunnelPlan.primaryReasonCode != types.ControlReasonTunnelStateConflict || len(blockedTunnelPlan.blockingReasons) == 0 {
+		t.Fatalf("unexpected blocked tunnel execution plan: %+v", blockedTunnelPlan)
+	}
 }

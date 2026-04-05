@@ -38,8 +38,26 @@ type controlTargetSnapshot struct {
 	checks            []types.ControlCheckItem
 }
 
+type controlExecutionPlan struct {
+	actionKind        types.ControlActionKind
+	targetKind        types.ControlTargetKind
+	targetID          string
+	sourceSurface     types.ControlSurface
+	executionMode     types.ControlExecutionMode
+	placeholderOnly   bool
+	requestedAt       time.Time
+	note              string
+	targetFacts       map[string]string
+	preflight         types.ControlPreflightSummary
+	primaryReasonCode types.ControlReasonCode
+	blockingReasons   []types.ControlBlockedReason
+	readinessState    types.ControlReadinessState
+	recommendedAction types.ControlActionKind
+	actionEvaluation  evaluatedControlAction
+}
+
 type controlExecutor interface {
-	execute(ctx context.Context, snapshot controlTargetSnapshot, action evaluatedControlAction) types.ControlActionResponse
+	execute(ctx context.Context, plan controlExecutionPlan) types.ControlActionResponse
 }
 
 type placeholderControlExecutor struct{}
@@ -48,14 +66,18 @@ func newPlaceholderControlExecutor() controlExecutor {
 	return placeholderControlExecutor{}
 }
 
-func (placeholderControlExecutor) execute(_ context.Context, snapshot controlTargetSnapshot, action evaluatedControlAction) types.ControlActionResponse {
-	resp := cloneControlActionResponse(action.response)
+func (placeholderControlExecutor) execute(_ context.Context, plan controlExecutionPlan) types.ControlActionResponse {
+	resp := cloneControlActionResponse(plan.actionEvaluation.response)
 	resp.DryRunOnly = false
-	resp.ExecutionMode = snapshot.executionMode
+	resp.ExecutionMode = plan.executionMode
 	resp.PlaceholderOnly = false
 	resp.ExecutionNotes = []types.ControlExecutionNote{}
 	resp.Preflight = clonePreflightSummary(resp.Preflight)
-	resp.Facts = cloneFacts(resp.Facts)
+	resp.Facts = cloneFacts(plan.targetFacts)
+	resp.SourceSurface = plan.sourceSurface
+	resp.TargetID = plan.targetID
+	resp.TargetKind = plan.targetKind
+	resp.ActionKind = plan.actionKind
 	if !resp.Preflight.Allowed {
 		resp.Result = types.ControlResultBlocked
 		resp.HumanMessage = "execute 已被预检阻断。"
@@ -276,7 +298,7 @@ func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlAct
 		resp.ExecutionMode = snapshot.executionMode
 		return resp, http.StatusOK
 	}
-	return s.controlExecutor.execute(ctx, snapshot, *actionSnapshot), http.StatusOK
+	return s.controlExecutor.execute(ctx, buildExecutionPlan(req, snapshot, *actionSnapshot)), http.StatusOK
 }
 
 func newControlActionResponse(req types.ControlActionRequest) types.ControlActionResponse {
@@ -330,6 +352,27 @@ func cloneFacts(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func buildExecutionPlan(req types.ControlActionRequest, snapshot controlTargetSnapshot, action evaluatedControlAction) controlExecutionPlan {
+	plan := controlExecutionPlan{
+		actionKind:        req.ActionKind,
+		targetKind:        req.TargetKind,
+		targetID:          req.TargetID,
+		sourceSurface:     req.SourceSurface,
+		executionMode:     snapshot.executionMode,
+		placeholderOnly:   snapshot.placeholderOnly,
+		requestedAt:       req.RequestedAt,
+		note:              req.Note,
+		targetFacts:       cloneFacts(action.response.Facts),
+		preflight:         clonePreflightSummary(action.response.Preflight),
+		primaryReasonCode: firstPrimaryReason(action.response.Preflight.BlockedReasons),
+		blockingReasons:   append([]types.ControlBlockedReason{}, action.response.Preflight.BlockedReasons...),
+		readinessState:    snapshot.readinessState,
+		recommendedAction: snapshot.recommendedAction,
+		actionEvaluation:  action,
+	}
+	return plan
 }
 
 func (s *Server) buildControlActionOptions(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (types.ControlActionOptionsResponse, int) {
