@@ -15,6 +15,28 @@ type controlPreflightBuilder struct {
 	summary types.ControlPreflightSummary
 }
 
+type evaluatedControlAction struct {
+	request  types.ControlActionRequest
+	response types.ControlActionResponse
+	status   int
+}
+
+type controlTargetSnapshot struct {
+	targetKind        types.ControlTargetKind
+	targetID          string
+	surface           types.ControlSurface
+	actions           []evaluatedControlAction
+	executionMode     types.ControlExecutionMode
+	placeholderOnly   bool
+	recommendedAction types.ControlActionKind
+	readinessState    types.ControlReadinessState
+	primaryReasonCode types.ControlReasonCode
+	headline          string
+	summary           string
+	nextStep          string
+	checks            []types.ControlCheckItem
+}
+
 func newControlPreflightBuilder() *controlPreflightBuilder {
 	return &controlPreflightBuilder{
 		summary: types.ControlPreflightSummary{
@@ -188,15 +210,60 @@ func newControlActionResponse(req types.ControlActionRequest) types.ControlActio
 }
 
 func (s *Server) buildControlActionOptions(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (types.ControlActionOptionsResponse, int) {
+	snapshot, status := s.buildControlTargetSnapshot(ctx, targetKind, targetID, surface)
+	if status != http.StatusOK {
+		return types.ControlActionOptionsResponse{}, status
+	}
 	resp := types.ControlActionOptionsResponse{
 		TargetKind:    targetKind,
 		TargetID:      targetID,
 		SourceSurface: surface,
-		ExecutionMode: types.ControlExecutionPlaceholder,
+		ExecutionMode: snapshot.executionMode,
 		Items:         []types.ControlActionOption{},
 	}
-	for _, actionKind := range allowedActionsForTarget(targetKind) {
-		result, status := s.evaluateControlAction(ctx, types.ControlActionRequest{
+	for _, evaluated := range snapshot.actions {
+		resp.Items = append(resp.Items, controlActionOptionFromEvaluated(evaluated))
+	}
+	return resp, http.StatusOK
+}
+
+func (s *Server) buildControlPanelSummary(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (types.ControlPanelSummary, int) {
+	snapshot, status := s.buildControlTargetSnapshot(ctx, targetKind, targetID, surface)
+	if status != http.StatusOK {
+		return types.ControlPanelSummary{}, status
+	}
+	return types.ControlPanelSummary{
+		TargetKind:        targetKind,
+		TargetID:          targetID,
+		SourceSurface:     surface,
+		Headline:          snapshot.headline,
+		Summary:           snapshot.summary,
+		ReadinessState:    snapshot.readinessState,
+		Checks:            append([]types.ControlCheckItem{}, snapshot.checks...),
+		PrimaryReasonCode: snapshot.primaryReasonCode,
+		NextStep:          snapshot.nextStep,
+		RecommendedAction: snapshot.recommendedAction,
+		ExecutionMode:     snapshot.executionMode,
+		PlaceholderOnly:   snapshot.placeholderOnly,
+	}, http.StatusOK
+}
+
+func (s *Server) buildControlTargetSnapshot(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (controlTargetSnapshot, int) {
+	snapshot := controlTargetSnapshot{
+		targetKind:      targetKind,
+		targetID:        targetID,
+		surface:         surface,
+		actions:         []evaluatedControlAction{},
+		executionMode:   types.ControlExecutionPlaceholder,
+		placeholderOnly: true,
+		checks:          []types.ControlCheckItem{},
+	}
+	actions := allowedActionsForTarget(targetKind)
+	if len(actions) == 0 {
+		return snapshot, http.StatusBadRequest
+	}
+	for _, actionKind := range actions {
+		resp, status := s.evaluateControlAction(ctx, types.ControlActionRequest{
 			ActionKind:    actionKind,
 			TargetKind:    targetKind,
 			TargetID:      targetID,
@@ -204,67 +271,130 @@ func (s *Server) buildControlActionOptions(ctx context.Context, targetKind types
 			DryRun:        true,
 			RequestedAt:   time.Now().UTC(),
 		})
-		if status == http.StatusNotFound {
-			return resp, status
-		}
 		if status != http.StatusOK {
-			return resp, status
+			return snapshot, status
 		}
-		resp.Items = append(resp.Items, controlActionOptionFromResponse(result))
+		snapshot.actions = append(snapshot.actions, evaluatedControlAction{
+			request: types.ControlActionRequest{
+				ActionKind:    actionKind,
+				TargetKind:    targetKind,
+				TargetID:      targetID,
+				SourceSurface: surface,
+				DryRun:        true,
+			},
+			response: resp,
+			status:   status,
+		})
 	}
-	return resp, http.StatusOK
+	base := snapshot.actions[0].response
+	snapshot.checks = append(snapshot.checks, base.Preflight.Items...)
+	snapshot.primaryReasonCode = firstPrimaryReason(base.Preflight.BlockedReasons)
+	snapshot.recommendedAction = recommendedActionForSnapshot(targetKind, snapshot.actions)
+	snapshot.headline, snapshot.summary, snapshot.nextStep, snapshot.readinessState = summarizeSnapshot(snapshot)
+	return snapshot, http.StatusOK
 }
 
-func (s *Server) buildControlPanelSummary(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (types.ControlPanelSummary, int) {
-	panel := types.ControlPanelSummary{
-		TargetKind:      targetKind,
-		TargetID:        targetID,
-		SourceSurface:   surface,
-		Checks:          []types.ControlCheckItem{},
-		ExecutionMode:   types.ControlExecutionPlaceholder,
-		PlaceholderOnly: true,
+func summarizeSnapshot(snapshot controlTargetSnapshot) (string, string, string, types.ControlReadinessState) {
+	if len(snapshot.checks) == 0 {
+		return "当前控制前提已阻断。", "当前没有可用的控制检查。", "请重新读取控制摘要。", types.ControlReadinessBlocked
 	}
-	actions := allowedActionsForTarget(targetKind)
-	if len(actions) == 0 {
-		panel.ReadinessState = types.ControlReadinessBlocked
-		panel.Headline = "当前目标没有可用控制动作。"
-		panel.Summary = "当前目标不支持已知控制动作。"
-		panel.NextStep = "请确认 targetKind 是否正确。"
-		return panel, http.StatusBadRequest
+	if snapshot.primaryReasonCode == "" {
+		return "当前控制前提已满足。", "当前主要控制前提已经满足，推荐动作仍然只会进入 placeholder execute。", "可先执行 dry-run 或占位执行，确认交互边界。", types.ControlReadinessReady
 	}
-	first, status := s.evaluateControlAction(ctx, types.ControlActionRequest{
-		ActionKind:    actions[0],
-		TargetKind:    targetKind,
-		TargetID:      targetID,
-		SourceSurface: surface,
-		DryRun:        true,
-		RequestedAt:   time.Now().UTC(),
-	})
-	if status != http.StatusOK {
-		return panel, status
+	primaryMessage := firstBlockedMessage(snapshot.actions, snapshot.primaryReasonCode)
+	if containsMissingCheck(snapshot.checks) {
+		return "当前控制前提部分缺失。", primaryMessage, nextStepForReason(snapshot.primaryReasonCode), types.ControlReadinessPartial
 	}
-	panel.Checks = append(panel.Checks, first.Preflight.Items...)
-	panel.PrimaryReasonCode = firstPrimaryReason(first.Preflight.BlockedReasons)
-	if len(first.Preflight.BlockedReasons) == 0 {
-		panel.ReadinessState = types.ControlReadinessReady
-		panel.Headline = "当前控制前提已满足。"
-		panel.Summary = "当前主要控制前提已经满足，动作仍然只会进入 placeholder execute。"
-		panel.NextStep = "可先执行 dry-run 或占位执行，确认交互边界。"
-		panel.RecommendedAction = first.ActionKind
-		return panel, http.StatusOK
+	return "当前控制前提已阻断。", primaryMessage, nextStepForReason(snapshot.primaryReasonCode), types.ControlReadinessBlocked
+}
+
+func recommendedActionForSnapshot(targetKind types.ControlTargetKind, actions []evaluatedControlAction) types.ControlActionKind {
+	switch targetKind {
+	case types.ControlTargetNode:
+		if actionBlockedForReason(actions, types.ControlActionRestartAgent, types.ControlReasonNodeIsolated) || actionAllowed(actions, types.ControlActionReleaseNode) {
+			if hasAction(actions, types.ControlActionReleaseNode) {
+				return types.ControlActionReleaseNode
+			}
+		}
+		if actionAllowed(actions, types.ControlActionRestartAgent) {
+			return types.ControlActionRestartAgent
+		}
+		if actionAllowed(actions, types.ControlActionIsolateNode) {
+			return types.ControlActionIsolateNode
+		}
+		if hasAction(actions, types.ControlActionRestartAgent) {
+			return types.ControlActionRestartAgent
+		}
+		if hasAction(actions, types.ControlActionReleaseNode) {
+			return types.ControlActionReleaseNode
+		}
+		return types.ControlActionRestartAgent
+	case types.ControlTargetTunnel:
+		if actionAllowed(actions, types.ControlActionResumeTunnel) {
+			return types.ControlActionResumeTunnel
+		}
+		if actionAllowed(actions, types.ControlActionPauseTunnel) {
+			return types.ControlActionPauseTunnel
+		}
+		if hasAction(actions, types.ControlActionResumeTunnel) {
+			return types.ControlActionResumeTunnel
+		}
+		return types.ControlActionPauseTunnel
+	default:
+		return ""
 	}
-	if containsMissingCheck(first.Preflight.Items) {
-		panel.ReadinessState = types.ControlReadinessPartial
-		panel.Headline = "当前控制前提部分缺失。"
-		panel.Summary = first.Preflight.BlockedReasons[0].Message
-		panel.NextStep = nextStepForReason(first.Preflight.BlockedReasons[0].Code)
-		return panel, http.StatusOK
+}
+
+func actionBlockedForReason(actions []evaluatedControlAction, actionKind types.ControlActionKind, reason types.ControlReasonCode) bool {
+	for _, action := range actions {
+		if action.request.ActionKind != actionKind {
+			continue
+		}
+		for _, blocked := range action.response.Preflight.BlockedReasons {
+			if blocked.Code == reason {
+				return true
+			}
+		}
 	}
-	panel.ReadinessState = types.ControlReadinessBlocked
-	panel.Headline = "当前控制前提已阻断。"
-	panel.Summary = first.Preflight.BlockedReasons[0].Message
-	panel.NextStep = nextStepForReason(first.Preflight.BlockedReasons[0].Code)
-	return panel, http.StatusOK
+	return false
+}
+
+func actionAllowed(actions []evaluatedControlAction, actionKind types.ControlActionKind) bool {
+	for _, action := range actions {
+		if action.request.ActionKind == actionKind && len(action.response.Preflight.BlockedReasons) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAction(actions []evaluatedControlAction, actionKind types.ControlActionKind) bool {
+	for _, action := range actions {
+		if action.request.ActionKind == actionKind {
+			return true
+		}
+	}
+	return false
+}
+
+func findEvaluatedAction(actions []evaluatedControlAction, actionKind types.ControlActionKind) *evaluatedControlAction {
+	for index := range actions {
+		if actions[index].request.ActionKind == actionKind {
+			return &actions[index]
+		}
+	}
+	return nil
+}
+
+func firstBlockedMessage(actions []evaluatedControlAction, reason types.ControlReasonCode) string {
+	for _, action := range actions {
+		for _, blocked := range action.response.Preflight.BlockedReasons {
+			if blocked.Code == reason {
+				return blocked.Message
+			}
+		}
+	}
+	return "当前控制前提已阻断。"
 }
 
 func allowedActionsForTarget(targetKind types.ControlTargetKind) []types.ControlActionKind {
@@ -278,7 +408,8 @@ func allowedActionsForTarget(targetKind types.ControlTargetKind) []types.Control
 	}
 }
 
-func controlActionOptionFromResponse(result types.ControlActionResponse) types.ControlActionOption {
+func controlActionOptionFromEvaluated(evaluated evaluatedControlAction) types.ControlActionOption {
+	result := evaluated.response
 	if result.Result == types.ControlResultAccepted {
 		summary, nextStep := controlOptionSummaryAndNextStep(result, nil)
 		return types.ControlActionOption{
@@ -302,7 +433,7 @@ func controlActionOptionFromResponse(result types.ControlActionResponse) types.C
 		primaryReason = result.Preflight.BlockedReasons[0].Code
 	}
 	summary, nextStep := controlOptionSummaryAndNextStep(result, result.Preflight.BlockedReasons)
-	option := types.ControlActionOption{
+	return types.ControlActionOption{
 		ActionKind:        result.ActionKind,
 		TargetKind:        result.TargetKind,
 		TargetID:          result.TargetID,
@@ -318,7 +449,6 @@ func controlActionOptionFromResponse(result types.ControlActionResponse) types.C
 		PlaceholderOnly:   false,
 		ReasonHints:       append([]types.ControlBlockedReason{}, result.Preflight.BlockedReasons...),
 	}
-	return option
 }
 
 func controlOptionSummaryAndNextStep(result types.ControlActionResponse, reasons []types.ControlBlockedReason) (string, string) {

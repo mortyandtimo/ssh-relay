@@ -2729,6 +2729,24 @@ func TestControlPanelSummaryNodeAndTunnel(t *testing.T) {
 		check(out)
 	}
 
+	assertOptions := func(path string, wantStatus int, check func(types.ControlActionOptionsResponse)) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != wantStatus {
+			t.Fatalf("%s: expected status %d, got %d", path, wantStatus, res.Code)
+		}
+		if wantStatus != http.StatusOK {
+			return
+		}
+		var out types.ControlActionOptionsResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("%s: decode failed: %v", path, err)
+		}
+		check(out)
+	}
+
 	assertPanel("/api/control-panels/node/node-ready/node_console", http.StatusOK, func(out types.ControlPanelSummary) {
 		if out.ReadinessState != types.ControlReadinessReady || len(out.Checks) == 0 || out.NextStep == "" || out.RecommendedAction != types.ControlActionRestartAgent {
 			t.Fatalf("unexpected ready node panel: %+v", out)
@@ -2738,6 +2756,9 @@ func TestControlPanelSummaryNodeAndTunnel(t *testing.T) {
 	assertPanel("/api/control-panels/node/node-partial/operator_console", http.StatusOK, func(out types.ControlPanelSummary) {
 		if out.ReadinessState != types.ControlReadinessPartial || len(out.Checks) == 0 || out.PrimaryReasonCode == "" || out.NextStep == "" {
 			t.Fatalf("unexpected partial node panel: %+v", out)
+		}
+		if out.RecommendedAction != types.ControlActionRestartAgent {
+			t.Fatalf("expected partial node to recommend restart_agent fallback, got %+v", out)
 		}
 		foundMissing := false
 		for _, item := range out.Checks {
@@ -2755,19 +2776,34 @@ func TestControlPanelSummaryNodeAndTunnel(t *testing.T) {
 		if out.ReadinessState != types.ControlReadinessBlocked || len(out.Checks) == 0 || out.PrimaryReasonCode != types.ControlReasonNodeIsolated || out.NextStep == "" {
 			t.Fatalf("unexpected blocked node panel: %+v", out)
 		}
+		if out.RecommendedAction != types.ControlActionReleaseNode {
+			t.Fatalf("expected isolated node to recommend release_node, got %+v", out)
+		}
 	})
 
 	assertPanel("/api/control-panels/tunnel/tunnel-active-panel/operator_console", http.StatusOK, func(out types.ControlPanelSummary) {
-		if out.ReadinessState != types.ControlReadinessReady || len(out.Checks) == 0 || out.NextStep == "" {
+		if out.ReadinessState != types.ControlReadinessReady || len(out.Checks) == 0 || out.NextStep == "" || out.RecommendedAction != types.ControlActionPauseTunnel {
 			t.Fatalf("unexpected active tunnel panel: %+v", out)
 		}
 	})
 
 	assertPanel("/api/control-panels/tunnel/tunnel-paused-panel/operator_console", http.StatusOK, func(out types.ControlPanelSummary) {
-		if out.ReadinessState != types.ControlReadinessBlocked || len(out.Checks) == 0 || out.PrimaryReasonCode != types.ControlReasonTunnelStateConflict || out.NextStep == "" {
+		if out.ReadinessState != types.ControlReadinessBlocked || len(out.Checks) == 0 || out.PrimaryReasonCode != types.ControlReasonTunnelStateConflict || out.NextStep == "" || out.RecommendedAction != types.ControlActionResumeTunnel {
 			t.Fatalf("unexpected paused tunnel panel: %+v", out)
 		}
 	})
 
 	assertPanel("/api/control-panels/tunnel/missing-tunnel/operator_console", http.StatusNotFound, func(out types.ControlPanelSummary) {})
+
+	assertOptions("/api/control-actions/node/node-blocked/operator_console/options", http.StatusOK, func(out types.ControlActionOptionsResponse) {
+		var releaseOpt types.ControlActionOption
+		for _, item := range out.Items {
+			if item.ActionKind == types.ControlActionReleaseNode {
+				releaseOpt = item
+			}
+		}
+		if releaseOpt.AvailabilityState != types.ControlAvailabilityPlaceholderOnly || releaseOpt.NextStep == "" {
+			t.Fatalf("unexpected release option for blocked node: %+v", releaseOpt)
+		}
+	})
 }

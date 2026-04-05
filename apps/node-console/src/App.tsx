@@ -414,6 +414,7 @@ export default function App() {
                         <strong>{option.label}</strong>
                         <span className={"status-chip " + controlOptionTone(option)}>{controlOptionStateLabel(option)}</span>
                       </div>
+                      {nodeControlPanel?.recommendedAction === option.actionKind ? <p className="copy">推荐动作</p> : null}
                       <p className="copy">{option.message}</p>
                       {option.summary ? <p className="copy">{option.summary}</p> : null}
                       {option.nextStep ? <p className="copy">下一步：{option.nextStep}</p> : null}
