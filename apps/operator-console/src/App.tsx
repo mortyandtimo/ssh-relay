@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
-import type { ControlActionRequest, ControlActionResponse, NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
-import { capabilitySummary, checkStateLabel, checkStateTone, formatControlResultDisplay, formatDate, nodeAgentDeploymentLabel, publicEntry, runtimeLabel, statusClass, tunnelTabs, type SafetyCheckItem } from "../../../packages/desktop-core/src/utils";
+import type { ControlActionOption, ControlActionRequest, ControlActionResponse, NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
+import { capabilitySummary, checkStateLabel, checkStateTone, controlOptionStateLabel, controlOptionTone, formatControlResultDisplay, formatDate, nodeAgentDeploymentLabel, publicEntry, runtimeLabel, statusClass, tunnelTabs, type SafetyCheckItem } from "../../../packages/desktop-core/src/utils";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 type RuntimeStateFilter = "all" | "pending" | "unavailable" | "reported";
@@ -37,6 +37,8 @@ export default function App() {
   const [busy, setBusy] = useState("");
   const [controlNote, setControlNote] = useState("");
   const [controlResult, setControlResult] = useState<ControlActionResponse | null>(null);
+  const [nodeActionOptions, setNodeActionOptions] = useState<ControlActionOption[]>([]);
+  const [tunnelActionOptions, setTunnelActionOptions] = useState<ControlActionOption[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState("");
   const refreshInFlightRef = useRef(false);
@@ -198,6 +200,56 @@ export default function App() {
     () => (selectedTunnelId ? tabTunnels.find((tunnel) => tunnel.id === selectedTunnelId) ?? null : null),
     [selectedTunnelId, tabTunnels],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadNodeActionOptions() {
+      if (!selectedNode || !currentUser) {
+        setNodeActionOptions([]);
+        return;
+      }
+      try {
+        const response = await api.loadNodeControlActionOptions(selectedNode.nodeId, "operator_console");
+        if (!cancelled) {
+          setNodeActionOptions(response.items);
+        }
+      } catch (actionError) {
+        if (!cancelled) {
+          setNodeActionOptions([]);
+          setError(actionError instanceof Error ? actionError.message : "读取节点动作摘要失败");
+        }
+      }
+    }
+    void loadNodeActionOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedNode, currentUser]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadTunnelActionOptions() {
+      if (!selectedTunnel || !currentUser) {
+        setTunnelActionOptions([]);
+        return;
+      }
+      try {
+        const response = await api.loadTunnelControlActionOptions(selectedTunnel.id, "operator_console");
+        if (!cancelled) {
+          setTunnelActionOptions(response.items);
+        }
+      } catch (actionError) {
+        if (!cancelled) {
+          setTunnelActionOptions([]);
+          setError(actionError instanceof Error ? actionError.message : "读取 tunnel 动作摘要失败");
+        }
+      }
+    }
+    void loadTunnelActionOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTunnel, currentUser]);
 
   useEffect(() => {
     if (!selectedTunnel) {
@@ -453,11 +505,21 @@ export default function App() {
                   <span>远程动作备注</span>
                   <textarea value={controlNote} onChange={(event) => setControlNote(event.target.value)} placeholder="可选：记录为什么要做远程动作预检/占位执行" />
                 </label>
-                <div className="button-row wrap-actions">
-                  <button className="secondary" type="button" disabled={!selectedNode || busy === "control-action"} onClick={() => void runControlAction("restart_agent", "node", selectedNode.nodeId, true)}>{busy === "control-action" ? "处理中..." : "预检 restart_agent"}</button>
-                  <button className="secondary" type="button" disabled={!selectedNode || busy === "control-action"} onClick={() => void runControlAction("restart_agent", "node", selectedNode.nodeId, false)}>{busy === "control-action" ? "处理中..." : "占位执行 restart_agent"}</button>
-                  <button className="secondary" type="button" disabled={!selectedNode || busy === "control-action"} onClick={() => void runControlAction("isolate_node", "node", selectedNode.nodeId, true)}>{busy === "control-action" ? "处理中..." : "预检 isolate_node"}</button>
-                  <button className="secondary" type="button" disabled={!selectedNode || busy === "control-action"} onClick={() => void runControlAction("release_node", "node", selectedNode.nodeId, true)}>{busy === "control-action" ? "处理中..." : "预检 release_node"}</button>
+                <div className="check-list compact-check-list">
+                  {nodeActionOptions.map((option) => (
+                    <div key={option.actionKind} className="check-item">
+                      <div className="check-head">
+                        <strong>{option.label}</strong>
+                        <span className={"status-chip " + controlOptionTone(option)}>{controlOptionStateLabel(option)}</span>
+                      </div>
+                      <p className="copy">{option.message}</p>
+                      {option.primaryReasonCode ? <p className="copy">primaryReason: <code>{option.primaryReasonCode}</code></p> : null}
+                      <div className="button-row wrap-actions">
+                        <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
+                        {option.placeholderOnly ? <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : "占位执行 " + option.label}</button> : null}
+                      </div>
+                    </div>
+                  ))}
                 </div>
                 <div className="banner info">当前为什么还不能执行未来远程控制动作：只要机器未选中、offline、isolated、未受管、未上报 serviceUnit 中任一成立，就应继续阻断。</div>
                 <div className="banner info">下一步建议：先补齐机器在线性、受管实例信息和 serviceUnit 上报，再进入真正控制命令实现阶段；当前这轮只做确认层，不执行动作。</div>
@@ -546,10 +608,21 @@ export default function App() {
                           {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>probePath</span><input value={editForm?.probePath || ""} onChange={(event) => setEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 probePath。</div>}
                           <label><span>transportPolicy</span><select value={editForm?.transportPolicy || "relay_only"} onChange={(event) => setEditForm((current) => current ? { ...current, transportPolicy: event.target.value } : current)}><option value="relay_only">relay_only</option><option value="p2p_preferred">p2p_preferred</option></select></label>
                           <div className="weak-note">transportPolicy 只代表配置意图。当前 runtimePath / runtimeState / lastFailureReason 仍然是运行事实，这轮编辑不会把它们伪装成已经改变。</div>
-                          <div className="button-row wrap-actions">
-                            <button className="secondary" type="button" disabled={busy === "control-action"} onClick={() => void runControlAction("pause_tunnel", "tunnel", selectedTunnel.id, true)}>{busy === "control-action" ? "处理中..." : "预检 pause_tunnel"}</button>
-                            <button className="secondary" type="button" disabled={busy === "control-action"} onClick={() => void runControlAction("pause_tunnel", "tunnel", selectedTunnel.id, false)}>{busy === "control-action" ? "处理中..." : "占位执行 pause_tunnel"}</button>
-                            <button className="secondary" type="button" disabled={busy === "control-action"} onClick={() => void runControlAction("resume_tunnel", "tunnel", selectedTunnel.id, true)}>{busy === "control-action" ? "处理中..." : "预检 resume_tunnel"}</button>
+                          <div className="check-list compact-check-list">
+                            {tunnelActionOptions.map((option) => (
+                              <div key={option.actionKind} className="check-item">
+                                <div className="check-head">
+                                  <strong>{option.label}</strong>
+                                  <span className={"status-chip " + controlOptionTone(option)}>{controlOptionStateLabel(option)}</span>
+                                </div>
+                                <p className="copy">{option.message}</p>
+                                {option.primaryReasonCode ? <p className="copy">primaryReason: <code>{option.primaryReasonCode}</code></p> : null}
+                                <div className="button-row wrap-actions">
+                                  <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
+                                  {option.placeholderOnly ? <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : "占位执行 " + option.label}</button> : null}
+                                </div>
+                              </div>
+                            ))}
                           </div>
                           <button type="submit" disabled={busy === "save-tunnel"}>{busy === "save-tunnel" ? "保存中..." : "保存当前 tunnel"}</button>
                         </form>

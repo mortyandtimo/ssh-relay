@@ -1,4 +1,4 @@
-import type { ControlActionResponse, NodeCapabilities, NodeSummary, TunnelSpec } from "./types";
+import type { ControlActionOption, ControlActionResponse, NodeCapabilities, NodeSummary, TunnelSpec } from "./types";
 
 export type CheckState = "pass" | "missing" | "blocked";
 
@@ -127,6 +127,18 @@ export function controlResultTone(result: ControlActionResponse["result"]) {
 	if (result === "accepted") return "good";
 	if (result === "blocked") return "danger";
 	return "warn";
+}
+
+export function controlOptionTone(option: ControlActionOption) {
+	if (option.availabilityState === "blocked") return "danger";
+	if (option.availabilityState === "placeholder_only") return "neutral";
+	return "good";
+}
+
+export function controlOptionStateLabel(option: ControlActionOption) {
+	if (option.availabilityState === "blocked") return "阻断";
+	if (option.availabilityState === "placeholder_only") return "占位执行";
+	return "可用";
 }
 
 export type ControlResultDisplay = {

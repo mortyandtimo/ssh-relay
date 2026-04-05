@@ -63,6 +63,52 @@ func (s *Server) handleControlActions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, resp)
 }
 
+func (s *Server) handleNodeControlActionOptions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	nodeID, surface, ok := parseControlOptionPath(r.URL.Path, "/api/control-actions/node/", "/options")
+	if !ok {
+		writeError(w, http.StatusNotFound, "control action options not found")
+		return
+	}
+	resp, status := s.buildControlActionOptions(r.Context(), types.ControlTargetNode, nodeID, surface)
+	writeJSON(w, status, resp)
+}
+
+func (s *Server) handleTunnelControlActionOptions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	tunnelID, surface, ok := parseControlOptionPath(r.URL.Path, "/api/control-actions/tunnel/", "/options")
+	if !ok {
+		writeError(w, http.StatusNotFound, "control action options not found")
+		return
+	}
+	resp, status := s.buildControlActionOptions(r.Context(), types.ControlTargetTunnel, tunnelID, surface)
+	writeJSON(w, status, resp)
+}
+
+func parseControlOptionPath(path, prefix, suffix string) (string, types.ControlSurface, bool) {
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", "", false
+	}
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	trimmed = strings.Trim(trimmed, "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	id := strings.TrimSpace(parts[0])
+	surface := types.ControlSurface(strings.TrimSpace(parts[1]))
+	if id == "" || surface == "" {
+		return "", "", false
+	}
+	return id, surface, true
+}
+
 func decodeControlActionRequest(r *http.Request) (types.ControlActionRequest, error) {
 	var req types.ControlActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -104,6 +150,88 @@ func newControlActionResponse(req types.ControlActionRequest) types.ControlActio
 		ExecutionMode:  types.ControlExecutionPlaceholder,
 		ExecutionNotes: []types.ControlExecutionNote{},
 		Facts:          map[string]string{},
+	}
+}
+
+func (s *Server) buildControlActionOptions(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (types.ControlActionOptionsResponse, int) {
+	resp := types.ControlActionOptionsResponse{
+		TargetKind:    targetKind,
+		TargetID:      targetID,
+		SourceSurface: surface,
+		ExecutionMode: types.ControlExecutionPlaceholder,
+		Items:         []types.ControlActionOption{},
+	}
+	for _, actionKind := range allowedActionsForTarget(targetKind) {
+		result, status := s.evaluateControlAction(ctx, types.ControlActionRequest{
+			ActionKind:    actionKind,
+			TargetKind:    targetKind,
+			TargetID:      targetID,
+			SourceSurface: surface,
+			DryRun:        true,
+			RequestedAt:   time.Now().UTC(),
+		})
+		if status == http.StatusNotFound {
+			return resp, status
+		}
+		if status != http.StatusOK {
+			return resp, status
+		}
+		resp.Items = append(resp.Items, controlActionOptionFromResponse(result))
+	}
+	return resp, http.StatusOK
+}
+
+func allowedActionsForTarget(targetKind types.ControlTargetKind) []types.ControlActionKind {
+	switch targetKind {
+	case types.ControlTargetNode:
+		return []types.ControlActionKind{types.ControlActionRestartAgent, types.ControlActionIsolateNode, types.ControlActionReleaseNode}
+	case types.ControlTargetTunnel:
+		return []types.ControlActionKind{types.ControlActionPauseTunnel, types.ControlActionResumeTunnel}
+	default:
+		return nil
+	}
+}
+
+func controlActionOptionFromResponse(result types.ControlActionResponse) types.ControlActionOption {
+	option := types.ControlActionOption{
+		ActionKind:      result.ActionKind,
+		TargetKind:      result.TargetKind,
+		TargetID:        result.TargetID,
+		SourceSurface:   result.SourceSurface,
+		Label:           controlActionLabel(result.ActionKind),
+		Message:         result.HumanMessage,
+		ExecutionMode:   types.ControlExecutionPlaceholder,
+		PlaceholderOnly: true,
+		ExecutionNotes:  []types.ControlExecutionNote{{Code: types.ControlReasonPlaceholderOnly, Message: "当前只会进入 placeholder execute。"}},
+		ReasonHints:     append([]types.ControlBlockedReason{}, result.Preflight.BlockedReasons...),
+	}
+	if result.Result == types.ControlResultAccepted {
+		option.Available = true
+		option.AvailabilityState = types.ControlAvailabilityPlaceholderOnly
+		return option
+	}
+	option.Available = false
+	option.AvailabilityState = types.ControlAvailabilityBlocked
+	if len(result.Preflight.BlockedReasons) > 0 {
+		option.PrimaryReasonCode = result.Preflight.BlockedReasons[0].Code
+	}
+	return option
+}
+
+func controlActionLabel(actionKind types.ControlActionKind) string {
+	switch actionKind {
+	case types.ControlActionRestartAgent:
+		return "restart_agent"
+	case types.ControlActionIsolateNode:
+		return "isolate_node"
+	case types.ControlActionReleaseNode:
+		return "release_node"
+	case types.ControlActionPauseTunnel:
+		return "pause_tunnel"
+	case types.ControlActionResumeTunnel:
+		return "resume_tunnel"
+	default:
+		return string(actionKind)
 	}
 }
 

@@ -101,6 +101,7 @@ export type ControlTargetKind = "node" | "tunnel";
 export type ControlSurface = "node_console" | "operator_console";
 export type ControlResult = "accepted" | "rejected" | "blocked" | "not_supported";
 export type ControlExecutionMode = "placeholder" | "real";
+export type ControlAvailabilityState = "available" | "blocked" | "placeholder_only";
 export type ControlCheckState = "pass" | "missing" | "blocked";
 
 export type ControlCheckItem = {
@@ -118,6 +119,30 @@ export type ControlBlockedReason = {
 export type ControlExecutionNote = {
   code: string;
   message: string;
+};
+
+export type ControlActionOption = {
+  actionKind: ControlActionKind;
+  targetKind: ControlTargetKind;
+  targetId: string;
+  sourceSurface: ControlSurface;
+  available: boolean;
+  availabilityState: ControlAvailabilityState;
+  label: string;
+  message: string;
+  primaryReasonCode?: string;
+  reasonHints?: ControlBlockedReason[];
+  executionMode: ControlExecutionMode;
+  placeholderOnly?: boolean;
+  executionNotes?: ControlExecutionNote[];
+};
+
+export type ControlActionOptionsResponse = {
+  targetKind: ControlTargetKind;
+  targetId: string;
+  sourceSurface: ControlSurface;
+  executionMode: ControlExecutionMode;
+  items: ControlActionOption[];
 };
 
 export type ControlPreflightSummary = {

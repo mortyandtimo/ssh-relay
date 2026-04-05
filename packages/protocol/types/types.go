@@ -142,6 +142,14 @@ const (
 	ControlExecutionReal        ControlExecutionMode = "real"
 )
 
+type ControlAvailabilityState string
+
+const (
+	ControlAvailabilityAvailable       ControlAvailabilityState = "available"
+	ControlAvailabilityBlocked         ControlAvailabilityState = "blocked"
+	ControlAvailabilityPlaceholderOnly ControlAvailabilityState = "placeholder_only"
+)
+
 type ControlReasonCode string
 
 const (
@@ -185,6 +193,30 @@ type ControlBlockedReason struct {
 type ControlExecutionNote struct {
 	Code    ControlReasonCode `json:"code"`
 	Message string            `json:"message"`
+}
+
+type ControlActionOption struct {
+	ActionKind        ControlActionKind        `json:"actionKind"`
+	TargetKind        ControlTargetKind        `json:"targetKind"`
+	TargetID          string                   `json:"targetId"`
+	SourceSurface     ControlSurface           `json:"sourceSurface"`
+	Available         bool                     `json:"available"`
+	AvailabilityState ControlAvailabilityState `json:"availabilityState"`
+	Label             string                   `json:"label"`
+	Message           string                   `json:"message"`
+	PrimaryReasonCode ControlReasonCode        `json:"primaryReasonCode,omitempty"`
+	ReasonHints       []ControlBlockedReason   `json:"reasonHints,omitempty"`
+	ExecutionMode     ControlExecutionMode     `json:"executionMode"`
+	PlaceholderOnly   bool                     `json:"placeholderOnly,omitempty"`
+	ExecutionNotes    []ControlExecutionNote   `json:"executionNotes,omitempty"`
+}
+
+type ControlActionOptionsResponse struct {
+	TargetKind    ControlTargetKind     `json:"targetKind"`
+	TargetID      string                `json:"targetId"`
+	SourceSurface ControlSurface        `json:"sourceSurface"`
+	ExecutionMode ControlExecutionMode  `json:"executionMode"`
+	Items         []ControlActionOption `json:"items"`
 }
 
 type ControlPreflightSummary struct {

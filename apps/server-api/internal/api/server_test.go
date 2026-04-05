@@ -2539,3 +2539,113 @@ func TestControlActionTunnelPreflightAndPlaceholderExecute(t *testing.T) {
 	assertTunnel("execute placeholder accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultAccepted, types.ControlReasonPlaceholderOnly, types.ControlExecutionPlaceholder, false, true, true, false)
 	assertTunnel("execute blocked when conflict", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, false, false, false, true)
 }
+
+func TestControlActionOptionsNodeAndTunnel(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-managed", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-managed.service", "instanceProfile": "node-managed", "instanceManaged": "true"})
+	registerNode("node-isolated", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-isolated.service", "instanceProfile": "node-isolated", "instanceManaged": "true", "isolated": "true"})
+	registerNode("node-missing-service", map[string]string{"deploymentMode": "managed", "instanceProfile": "node-missing-service", "instanceManaged": "true"})
+
+	for _, item := range []types.TunnelSpec{
+		{ID: "tunnel-active-options", NodeID: "node-managed", Name: "tunnel-active-options", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 21010, Metadata: map[string]string{"nodeId": "node-managed"}},
+		{ID: "tunnel-paused-options", NodeID: "node-managed", Name: "tunnel-paused-options", Type: "tcp", Status: "paused", TargetHost: "127.0.0.1", TargetPort: 8081, PublicPort: 21011, Metadata: map[string]string{"nodeId": "node-managed"}},
+	} {
+		if _, err := server.store.CreateTunnel(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertOptions := func(path string, wantStatus int, check func(types.ControlActionOptionsResponse)) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != wantStatus {
+			t.Fatalf("%s: expected status %d, got %d", path, wantStatus, res.Code)
+		}
+		if wantStatus != http.StatusOK {
+			return
+		}
+		var out types.ControlActionOptionsResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("%s: decode failed: %v", path, err)
+		}
+		check(out)
+	}
+
+	assertOptions("/api/control-actions/node/node-managed/node_console/options", http.StatusOK, func(out types.ControlActionOptionsResponse) {
+		if len(out.Items) != 3 {
+			t.Fatalf("expected 3 node action options, got %d", len(out.Items))
+		}
+		if out.Items[0].ActionKind != types.ControlActionRestartAgent || !out.Items[0].Available || out.Items[0].AvailabilityState != types.ControlAvailabilityPlaceholderOnly {
+			t.Fatalf("unexpected restart_agent option: %+v", out.Items[0])
+		}
+		if out.Items[1].ActionKind != types.ControlActionIsolateNode || out.Items[1].Available || out.Items[1].AvailabilityState != types.ControlAvailabilityBlocked || out.Items[1].PrimaryReasonCode != types.ControlReasonUnsupportedSurface {
+			t.Fatalf("unexpected isolate_node option: %+v", out.Items[1])
+		}
+		if !out.Items[0].PlaceholderOnly || len(out.Items[0].ExecutionNotes) == 0 {
+			t.Fatalf("expected placeholder-only restart option, got %+v", out.Items[0])
+		}
+	})
+
+	assertOptions("/api/control-actions/node/node-isolated/operator_console/options", http.StatusOK, func(out types.ControlActionOptionsResponse) {
+		var releaseOpt types.ControlActionOption
+		for _, item := range out.Items {
+			if item.ActionKind == types.ControlActionReleaseNode {
+				releaseOpt = item
+			}
+		}
+		if !releaseOpt.Available || releaseOpt.AvailabilityState != types.ControlAvailabilityPlaceholderOnly {
+			t.Fatalf("expected release_node available on isolated node, got %+v", releaseOpt)
+		}
+	})
+
+	assertOptions("/api/control-actions/node/node-missing-service/operator_console/options", http.StatusOK, func(out types.ControlActionOptionsResponse) {
+		var restartOpt types.ControlActionOption
+		for _, item := range out.Items {
+			if item.ActionKind == types.ControlActionRestartAgent {
+				restartOpt = item
+			}
+		}
+		if restartOpt.AvailabilityState != types.ControlAvailabilityBlocked || restartOpt.PrimaryReasonCode != types.ControlReasonMissingServiceUnit {
+			t.Fatalf("expected missing service unit to block restart_agent, got %+v", restartOpt)
+		}
+	})
+
+	assertOptions("/api/control-actions/tunnel/tunnel-active-options/operator_console/options", http.StatusOK, func(out types.ControlActionOptionsResponse) {
+		if len(out.Items) != 2 {
+			t.Fatalf("expected 2 tunnel action options, got %d", len(out.Items))
+		}
+		if out.Items[0].ActionKind != types.ControlActionPauseTunnel || !out.Items[0].Available || out.Items[0].AvailabilityState != types.ControlAvailabilityPlaceholderOnly {
+			t.Fatalf("unexpected pause_tunnel option: %+v", out.Items[0])
+		}
+		if out.Items[1].ActionKind != types.ControlActionResumeTunnel || out.Items[1].Available || out.Items[1].AvailabilityState != types.ControlAvailabilityBlocked || out.Items[1].PrimaryReasonCode != types.ControlReasonTunnelStateConflict {
+			t.Fatalf("unexpected resume_tunnel option: %+v", out.Items[1])
+		}
+	})
+
+	assertOptions("/api/control-actions/tunnel/tunnel-paused-options/node_console/options", http.StatusOK, func(out types.ControlActionOptionsResponse) {
+		var resumeOpt types.ControlActionOption
+		for _, item := range out.Items {
+			if item.ActionKind == types.ControlActionResumeTunnel {
+				resumeOpt = item
+			}
+		}
+		if !resumeOpt.Available || resumeOpt.AvailabilityState != types.ControlAvailabilityPlaceholderOnly {
+			t.Fatalf("expected resume_tunnel available, got %+v", resumeOpt)
+		}
+	})
+}

@@ -106,6 +106,8 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/tunnels", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnels)))
 	s.mux.Handle("/api/tunnel-port-suggestion", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelPortSuggestion)))
 	s.mux.Handle("/api/tunnels/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelByID)))
+	s.mux.Handle("/api/control-actions/node/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodeControlActionOptions)))
+	s.mux.Handle("/api/control-actions/tunnel/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelControlActionOptions)))
 	s.mux.Handle("/api/control-actions", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleControlActions)))
 	s.mux.Handle("/api/server/metrics", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleServerMetrics)))
 	s.mux.Handle("/api/relay/tcp/runtime", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleRelayTCPRuntime)))
@@ -796,7 +798,6 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut+", "+http.MethodDelete)
 	}
 }
-
 
 func (s *Server) handleTunnelProbe(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {

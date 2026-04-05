@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
-import type { ControlActionRequest, ControlActionResponse, NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
-import { capabilitySummary, checkStateLabel, checkStateTone, formatControlResultDisplay, formatDate, nodeAgentDeploymentLabel, publicEntry, resolveLocalNodeBinding, runtimeLabel, statusClass, tunnelTabs, type SafetyCheckItem } from "../../../packages/desktop-core/src/utils";
+import type { ControlActionOption, ControlActionRequest, ControlActionResponse, NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
+import { capabilitySummary, checkStateLabel, checkStateTone, controlOptionStateLabel, controlOptionTone, formatControlResultDisplay, formatDate, nodeAgentDeploymentLabel, publicEntry, resolveLocalNodeBinding, runtimeLabel, statusClass, tunnelTabs, type SafetyCheckItem } from "../../../packages/desktop-core/src/utils";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
@@ -31,6 +31,7 @@ export default function App() {
   const [busy, setBusy] = useState("");
   const [controlNote, setControlNote] = useState("");
   const [controlResult, setControlResult] = useState<ControlActionResponse | null>(null);
+  const [nodeActionOptions, setNodeActionOptions] = useState<ControlActionOption[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState("");
   const refreshInFlightRef = useRef(false);
@@ -114,6 +115,30 @@ export default function App() {
     });
   }, [selectedTunnel]);
   const boundNode = selectedNode;
+  useEffect(() => {
+    let cancelled = false;
+    async function loadNodeActionOptions() {
+      if (!boundNode || !currentUser) {
+        setNodeActionOptions([]);
+        return;
+      }
+      try {
+        const response = await api.loadNodeControlActionOptions(boundNode.nodeId, "node_console");
+        if (!cancelled) {
+          setNodeActionOptions(response.items);
+        }
+      } catch (actionError) {
+        if (!cancelled) {
+          setNodeActionOptions([]);
+          setError(actionError instanceof Error ? actionError.message : "读取动作摘要失败");
+        }
+      }
+    }
+    void loadNodeActionOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [boundNode, currentUser]);
   const bindingTone = localBinding.status === "success" ? "good" : localBinding.status === "config_error" ? "danger" : localBinding.status === "ambiguous" ? "warn" : "neutral";
   const bindingStatusLabel = localBinding.status === "success" ? "成功" : localBinding.status === "config_error" ? "配置错误" : localBinding.status === "ambiguous" ? "不唯一" : "未完成";
   const localControlChecks = useMemo<SafetyCheckItem[]>(() => {
@@ -401,9 +426,21 @@ export default function App() {
                   <span>本机动作备注</span>
                   <textarea value={controlNote} onChange={(event) => setControlNote(event.target.value)} placeholder="可选：记录为什么要做本机动作预检/占位执行" />
                 </label>
-                <div className="button-row">
-                  <button className="secondary" type="button" disabled={!boundNode || busy === "control-action"} onClick={() => void runControlAction("restart_agent", "node", boundNode.nodeId, true)}>{busy === "control-action" ? "处理中..." : "预检 restart_agent"}</button>
-                  <button className="secondary" type="button" disabled={!boundNode || busy === "control-action"} onClick={() => void runControlAction("restart_agent", "node", boundNode.nodeId, false)}>{busy === "control-action" ? "处理中..." : "占位执行 restart_agent"}</button>
+                <div className="check-list compact-check-list">
+                  {nodeActionOptions.map((option) => (
+                    <div key={option.actionKind} className="check-item">
+                      <div className="check-head">
+                        <strong>{option.label}</strong>
+                        <span className={"status-chip " + controlOptionTone(option)}>{controlOptionStateLabel(option)}</span>
+                      </div>
+                      <p className="copy">{option.message}</p>
+                      {option.primaryReasonCode ? <p className="copy">primaryReason: <code>{option.primaryReasonCode}</code></p> : null}
+                      <div className="button-row wrap-actions">
+                        <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
+                        {option.placeholderOnly ? <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : "占位执行 " + option.label}</button> : null}
+                      </div>
+                    </div>
+                  ))}
                 </div>
                 <div className="banner info">当前为什么还不能执行未来本机控制动作：只要本机绑定、受管实例、serviceUnit、online、未隔离这几项中任一不满足，就应继续阻断。</div>
                 <div className="banner info">下一步建议：先补齐本机绑定与受管实例信息，再进入真正控制命令实现阶段；当前这轮只做确认层，不执行动作。</div>
