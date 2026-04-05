@@ -2596,11 +2596,17 @@ func TestControlActionOptionsNodeAndTunnel(t *testing.T) {
 		if !out.Items[0].PlaceholderOnly || len(out.Items[0].ExecutionNotes) == 0 {
 			t.Fatalf("expected placeholder-only restart option, got %+v", out.Items[0])
 		}
+		if out.Items[0].Summary == "" || out.Items[0].NextStep == "" {
+			t.Fatalf("expected placeholder-only restart option to include summary and nextStep, got %+v", out.Items[0])
+		}
 		if out.Items[1].ActionKind != types.ControlActionIsolateNode || out.Items[1].Available || out.Items[1].AvailabilityState != types.ControlAvailabilityBlocked || out.Items[1].PrimaryReasonCode != types.ControlReasonUnsupportedSurface {
 			t.Fatalf("unexpected isolate_node option: %+v", out.Items[1])
 		}
 		if out.Items[1].PlaceholderOnly || len(out.Items[1].ExecutionNotes) != 0 {
 			t.Fatalf("expected blocked isolate option without placeholder fields, got %+v", out.Items[1])
+		}
+		if out.Items[1].Summary == "" || out.Items[1].NextStep == "" {
+			t.Fatalf("expected blocked isolate option to include summary and nextStep, got %+v", out.Items[1])
 		}
 	})
 
@@ -2629,6 +2635,9 @@ func TestControlActionOptionsNodeAndTunnel(t *testing.T) {
 		if restartOpt.PlaceholderOnly || len(restartOpt.ExecutionNotes) != 0 {
 			t.Fatalf("expected blocked restart option without placeholder fields, got %+v", restartOpt)
 		}
+		if restartOpt.Summary == "" || restartOpt.NextStep == "" {
+			t.Fatalf("expected blocked restart option to include summary and nextStep, got %+v", restartOpt)
+		}
 	})
 
 	assertOptions("/api/control-actions/tunnel/tunnel-active-options/operator_console/options", http.StatusOK, func(out types.ControlActionOptionsResponse) {
@@ -2641,11 +2650,17 @@ func TestControlActionOptionsNodeAndTunnel(t *testing.T) {
 		if !out.Items[0].PlaceholderOnly || len(out.Items[0].ExecutionNotes) == 0 {
 			t.Fatalf("expected placeholder-only pause option, got %+v", out.Items[0])
 		}
+		if out.Items[0].Summary == "" || out.Items[0].NextStep == "" {
+			t.Fatalf("expected placeholder-only pause option to include summary and nextStep, got %+v", out.Items[0])
+		}
 		if out.Items[1].ActionKind != types.ControlActionResumeTunnel || out.Items[1].Available || out.Items[1].AvailabilityState != types.ControlAvailabilityBlocked || out.Items[1].PrimaryReasonCode != types.ControlReasonTunnelStateConflict {
 			t.Fatalf("unexpected resume_tunnel option: %+v", out.Items[1])
 		}
 		if out.Items[1].PlaceholderOnly || len(out.Items[1].ExecutionNotes) != 0 {
 			t.Fatalf("expected blocked resume option without placeholder fields, got %+v", out.Items[1])
+		}
+		if out.Items[1].Summary == "" || out.Items[1].NextStep == "" {
+			t.Fatalf("expected blocked resume option to include summary and nextStep, got %+v", out.Items[1])
 		}
 	})
 
@@ -2661,6 +2676,9 @@ func TestControlActionOptionsNodeAndTunnel(t *testing.T) {
 		}
 		if !resumeOpt.PlaceholderOnly || len(resumeOpt.ExecutionNotes) == 0 {
 			t.Fatalf("expected placeholder-only resume option, got %+v", resumeOpt)
+		}
+		if resumeOpt.Summary == "" || resumeOpt.NextStep == "" {
+			t.Fatalf("expected placeholder-only resume option to include summary and nextStep, got %+v", resumeOpt)
 		}
 	})
 }

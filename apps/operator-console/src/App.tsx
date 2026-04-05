@@ -513,6 +513,8 @@ export default function App() {
                         <span className={"status-chip " + controlOptionTone(option)}>{controlOptionStateLabel(option)}</span>
                       </div>
                       <p className="copy">{option.message}</p>
+                      {option.summary ? <p className="copy">{option.summary}</p> : null}
+                      {option.nextStep ? <p className="copy">下一步：{option.nextStep}</p> : null}
                       {option.primaryReasonCode ? <p className="copy">primaryReason: <code>{option.primaryReasonCode}</code></p> : null}
                       <div className="button-row wrap-actions">
                         <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
@@ -521,8 +523,7 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                <div className="banner info">当前为什么还不能执行未来远程控制动作：只要机器未选中、offline、isolated、未受管、未上报 serviceUnit 中任一成立，就应继续阻断。</div>
-                <div className="banner info">下一步建议：先补齐机器在线性、受管实例信息和 serviceUnit 上报，再进入真正控制命令实现阶段；当前这轮只做确认层，不执行动作。</div>
+                <div className="banner info">动作区说明现在优先来自后端动作摘要；如需更细的检查项，再查看上方预检列表或执行 dry-run。</div>
                 {controlResult ? <ControlResultBlock result={controlResult} /> : null}
               </section>
               <section className="panel workbench-panel">
@@ -616,6 +617,8 @@ export default function App() {
                                   <span className={"status-chip " + controlOptionTone(option)}>{controlOptionStateLabel(option)}</span>
                                 </div>
                                 <p className="copy">{option.message}</p>
+                                {option.summary ? <p className="copy">{option.summary}</p> : null}
+                                {option.nextStep ? <p className="copy">下一步：{option.nextStep}</p> : null}
                                 {option.primaryReasonCode ? <p className="copy">primaryReason: <code>{option.primaryReasonCode}</code></p> : null}
                                 <div className="button-row wrap-actions">
                                   <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>

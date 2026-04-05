@@ -130,6 +130,8 @@ export type ControlActionOption = {
   availabilityState: ControlAvailabilityState;
   label: string;
   message: string;
+  summary?: string;
+  nextStep?: string;
   primaryReasonCode?: string;
   reasonHints?: ControlBlockedReason[];
   executionMode: ControlExecutionMode;

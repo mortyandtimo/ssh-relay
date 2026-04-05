@@ -194,6 +194,7 @@ func allowedActionsForTarget(targetKind types.ControlTargetKind) []types.Control
 
 func controlActionOptionFromResponse(result types.ControlActionResponse) types.ControlActionOption {
 	if result.Result == types.ControlResultAccepted {
+		summary, nextStep := controlOptionSummaryAndNextStep(result, nil)
 		return types.ControlActionOption{
 			ActionKind:        result.ActionKind,
 			TargetKind:        result.TargetKind,
@@ -203,11 +204,18 @@ func controlActionOptionFromResponse(result types.ControlActionResponse) types.C
 			AvailabilityState: types.ControlAvailabilityPlaceholderOnly,
 			Label:             controlActionLabel(result.ActionKind),
 			Message:           result.HumanMessage,
+			Summary:           summary,
+			NextStep:          nextStep,
 			ExecutionMode:     types.ControlExecutionPlaceholder,
 			PlaceholderOnly:   true,
 			ExecutionNotes:    []types.ControlExecutionNote{{Code: types.ControlReasonPlaceholderOnly, Message: "当前只会进入 placeholder execute。"}},
 		}
 	}
+	var primaryReason types.ControlReasonCode
+	if len(result.Preflight.BlockedReasons) > 0 {
+		primaryReason = result.Preflight.BlockedReasons[0].Code
+	}
+	summary, nextStep := controlOptionSummaryAndNextStep(result, result.Preflight.BlockedReasons)
 	option := types.ControlActionOption{
 		ActionKind:        result.ActionKind,
 		TargetKind:        result.TargetKind,
@@ -217,14 +225,45 @@ func controlActionOptionFromResponse(result types.ControlActionResponse) types.C
 		AvailabilityState: types.ControlAvailabilityBlocked,
 		Label:             controlActionLabel(result.ActionKind),
 		Message:           result.HumanMessage,
+		Summary:           summary,
+		NextStep:          nextStep,
+		PrimaryReasonCode: primaryReason,
 		ExecutionMode:     types.ControlExecutionPlaceholder,
 		PlaceholderOnly:   false,
 		ReasonHints:       append([]types.ControlBlockedReason{}, result.Preflight.BlockedReasons...),
 	}
-	if len(result.Preflight.BlockedReasons) > 0 {
-		option.PrimaryReasonCode = result.Preflight.BlockedReasons[0].Code
-	}
 	return option
+}
+
+func controlOptionSummaryAndNextStep(result types.ControlActionResponse, reasons []types.ControlBlockedReason) (string, string) {
+	if result.Result == types.ControlResultAccepted {
+		return "当前动作可以发起，但本轮只会进入占位执行边界。", "先执行 dry-run 或占位执行确认交互，再等待后续真实执行器接入。"
+	}
+	if len(reasons) == 0 {
+		return "当前动作已被阻断。", "先补齐目标状态或来源界面条件，再重新读取动作摘要。"
+	}
+	switch reasons[0].Code {
+	case types.ControlReasonNodeOffline:
+		return "当前节点离线，动作被阻断。", "先恢复节点在线状态，再重新读取动作摘要。"
+	case types.ControlReasonNodeIsolated:
+		return "当前节点处于隔离状态，动作被阻断。", "先确认是否应 release 节点，或改为使用适合隔离状态的动作。"
+	case types.ControlReasonNodeNotIsolated:
+		return "当前节点未隔离，release 动作被阻断。", "如需 release，先确认节点已经进入隔离状态。"
+	case types.ControlReasonMissingServiceUnit:
+		return "当前动作缺少 serviceUnit 上报，暂时不可发起。", "先补齐 serviceUnit 上报，再重新读取动作摘要。"
+	case types.ControlReasonMissingInstanceProfile:
+		return "当前动作缺少 instanceProfile 上报，暂时不可发起。", "先补齐 instanceProfile 上报，再重新读取动作摘要。"
+	case types.ControlReasonMissingDeploymentMode:
+		return "当前动作缺少 deploymentMode 上报，暂时不可发起。", "先补齐 deploymentMode 上报，再重新读取动作摘要。"
+	case types.ControlReasonUnmanagedInstance:
+		return "当前实例未上报为受管实例，动作被阻断。", "先把实例切回受管模式或补齐受管实例信息。"
+	case types.ControlReasonUnsupportedSurface:
+		return "当前界面不支持这个动作。", "请切换到允许该动作的 console 后再发起。"
+	case types.ControlReasonTunnelStateConflict:
+		return "当前 tunnel 状态与动作要求冲突。", "先确认 tunnel 当前 status，再选择匹配的 pause/resume 动作。"
+	default:
+		return reasons[0].Message, "先处理首个阻断原因，再重新读取动作摘要。"
+	}
 }
 
 func controlActionLabel(actionKind types.ControlActionKind) string {

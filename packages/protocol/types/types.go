@@ -204,6 +204,8 @@ type ControlActionOption struct {
 	AvailabilityState ControlAvailabilityState `json:"availabilityState"`
 	Label             string                   `json:"label"`
 	Message           string                   `json:"message"`
+	Summary           string                   `json:"summary,omitempty"`
+	NextStep          string                   `json:"nextStep,omitempty"`
 	PrimaryReasonCode ControlReasonCode        `json:"primaryReasonCode,omitempty"`
 	ReasonHints       []ControlBlockedReason   `json:"reasonHints,omitempty"`
 	ExecutionMode     ControlExecutionMode     `json:"executionMode"`
