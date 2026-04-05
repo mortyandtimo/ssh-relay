@@ -3156,38 +3156,100 @@ func TestBuildControlActionResponseMapsExecutionOutcomes(t *testing.T) {
 	)
 
 	assertMapped(
-		"executor rejected",
+		"policy rejected",
 		readyPlan,
 		controlExecutionResult{
-			outcome:       controlExecutionOutcomeExecutorRejected,
-			humanMessage:  "executor rejected this action",
+			outcome:       controlExecutionOutcomePolicyRejected,
+			humanMessage:  "policy rejected this action",
 			executionMode: types.ControlExecutionPlaceholder,
 			executionNotes: []types.ControlExecutionNote{{
-				Message: "executor rejected note",
+				Message: "policy rejected note",
 			}},
 		},
 		types.ControlResultRejected,
 		false,
 		true,
-		"executor rejected this action",
+		"policy rejected this action",
 		"",
 	)
 
 	assertMapped(
-		"executor failed",
+		"retryable failure",
 		readyPlan,
 		controlExecutionResult{
-			outcome:       controlExecutionOutcomeExecutorFailed,
-			humanMessage:  "executor failed this action",
+			outcome:       controlExecutionOutcomeRetryableFailure,
+			humanMessage:  "executor failed this action but retry is allowed",
 			executionMode: types.ControlExecutionPlaceholder,
 			executionNotes: []types.ControlExecutionNote{{
-				Message: "executor failed note",
+				Message: "retryable executor failure note",
 			}},
 		},
 		types.ControlResultRejected,
 		false,
 		true,
-		"executor failed this action",
+		"executor failed this action but retry is allowed",
 		"",
 	)
+
+	assertMapped(
+		"non-retryable failure",
+		readyPlan,
+		controlExecutionResult{
+			outcome:       controlExecutionOutcomeNonRetryableFailure,
+			humanMessage:  "executor failed this action and retry is not advised",
+			executionMode: types.ControlExecutionPlaceholder,
+			executionNotes: []types.ControlExecutionNote{{
+				Message: "non-retryable executor failure note",
+			}},
+		},
+		types.ControlResultRejected,
+		false,
+		true,
+		"executor failed this action and retry is not advised",
+		"",
+	)
+}
+
+func TestBuildControlActionResponseDistinguishesPolicyRejectionFromPreflightBlock(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-policy", NodeName: "node-policy", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-policy.service", "instanceProfile": "node-policy", "instanceManaged": "true"}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+
+	readySnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetNode, "node-policy", types.ControlSurfaceNodeConsole)
+	if status != http.StatusOK {
+		t.Fatalf("expected ready snapshot status 200, got %d", status)
+	}
+	readyAction := findActionSnapshot(readySnapshot, types.ControlActionRestartAgent)
+	if readyAction == nil {
+		t.Fatalf("expected ready action snapshot")
+	}
+	readyPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionRestartAgent, TargetKind: types.ControlTargetNode, TargetID: "node-policy", SourceSurface: types.ControlSurfaceNodeConsole, RequestedAt: time.Now().UTC()}, readySnapshot, *readyAction)
+
+	policyRejected := buildControlActionResponse(readyPlan.actionEvaluation.request, readyPlan, controlExecutionResult{
+		outcome:       controlExecutionOutcomePolicyRejected,
+		humanMessage:  "policy rejected",
+		executionMode: types.ControlExecutionPlaceholder,
+		executionNotes: []types.ControlExecutionNote{{
+			Message: "policy rejection note",
+		}},
+	})
+	if policyRejected.Result != types.ControlResultRejected || len(policyRejected.Preflight.BlockedReasons) != 0 || policyRejected.HumanMessage != "policy rejected" {
+		t.Fatalf("expected policy rejection to stay distinct from preflight block, got %+v", policyRejected)
+	}
+
+	blockedAction := *readyAction
+	blockedAction.response.Preflight.Allowed = false
+	blockedAction.response.Preflight.BlockedReasons = []types.ControlBlockedReason{{Code: types.ControlReasonNodeOffline, Message: "node offline"}}
+	blockedPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionRestartAgent, TargetKind: types.ControlTargetNode, TargetID: "node-policy", SourceSurface: types.ControlSurfaceNodeConsole, RequestedAt: time.Now().UTC()}, readySnapshot, blockedAction)
+	blocked := buildControlActionResponse(blockedPlan.actionEvaluation.request, blockedPlan, blockedExecutionResult(blockedPlan))
+	if blocked.Result != types.ControlResultBlocked || len(blocked.Preflight.BlockedReasons) == 0 || blocked.Preflight.BlockedReasons[0].Code != types.ControlReasonNodeOffline {
+		t.Fatalf("expected blocked preflight to remain distinct, got %+v", blocked)
+	}
 }

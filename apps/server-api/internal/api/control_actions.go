@@ -61,8 +61,9 @@ type controlExecutionOutcome string
 const (
 	controlExecutionOutcomeAcceptedPlaceholder controlExecutionOutcome = "accepted_placeholder"
 	controlExecutionOutcomeBlockedPreflight    controlExecutionOutcome = "blocked_preflight"
-	controlExecutionOutcomeExecutorRejected    controlExecutionOutcome = "executor_rejected"
-	controlExecutionOutcomeExecutorFailed      controlExecutionOutcome = "executor_failed"
+	controlExecutionOutcomePolicyRejected      controlExecutionOutcome = "policy_rejected"
+	controlExecutionOutcomeRetryableFailure    controlExecutionOutcome = "retryable_failure"
+	controlExecutionOutcomeNonRetryableFailure controlExecutionOutcome = "non_retryable_failure"
 )
 
 type controlExecutionResult struct {
@@ -75,8 +76,8 @@ type controlExecutionResult struct {
 type controlExecutor interface {
 	// execute only handles already-allowed execute paths. Blocked and dry-run
 	// requests are resolved in evaluateControlAction before the executor seam.
-	// Executors may still classify allowed executions as accepted, rejected, or
-	// failed without changing the external HTTP response schema.
+	// Executors may still classify allowed executions as accepted, policy-
+	// rejected, or failed without changing the external HTTP response schema.
 	execute(ctx context.Context, plan controlExecutionPlan) controlExecutionResult
 }
 
@@ -401,16 +402,21 @@ func buildControlActionResponse(req types.ControlActionRequest, plan controlExec
 		resp.HumanMessage = defaultControlMessage(result.humanMessage, "execute 已被预检阻断。")
 		resp.PlaceholderOnly = false
 		resp.ExecutionNotes = cloneExecutionNotes(result.executionNotes)
-	case controlExecutionOutcomeExecutorRejected:
+	case controlExecutionOutcomePolicyRejected:
 		resp.Result = types.ControlResultRejected
-		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器拒绝了当前动作。")
+		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行策略拒绝了当前动作。")
 		resp.PlaceholderOnly = false
-		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行器拒绝执行当前动作。"}})
-	case controlExecutionOutcomeExecutorFailed:
+		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行策略拒绝执行当前动作。"}})
+	case controlExecutionOutcomeRetryableFailure:
 		resp.Result = types.ControlResultRejected
-		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器在处理当前动作时失败。")
+		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器处理当前动作失败，但可稍后重试。")
 		resp.PlaceholderOnly = false
-		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行器在处理当前动作时失败。"}})
+		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行器处理失败，建议稍后重试。"}})
+	case controlExecutionOutcomeNonRetryableFailure:
+		resp.Result = types.ControlResultRejected
+		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器处理当前动作失败，当前不建议重试。")
+		resp.PlaceholderOnly = false
+		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行器处理失败，当前不建议重试。"}})
 	default:
 		resp.Result = types.ControlResultRejected
 		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器返回了未知结果。")
