@@ -56,8 +56,16 @@ type controlExecutionPlan struct {
 	actionEvaluation  evaluatedControlAction
 }
 
+type controlExecutionResult struct {
+	result          types.ControlResult
+	humanMessage    string
+	executionMode   types.ControlExecutionMode
+	placeholderOnly bool
+	executionNotes  []types.ControlExecutionNote
+}
+
 type controlExecutor interface {
-	execute(ctx context.Context, plan controlExecutionPlan) types.ControlActionResponse
+	execute(ctx context.Context, plan controlExecutionPlan) controlExecutionResult
 }
 
 type placeholderControlExecutor struct{}
@@ -66,31 +74,26 @@ func newPlaceholderControlExecutor() controlExecutor {
 	return placeholderControlExecutor{}
 }
 
-func (placeholderControlExecutor) execute(_ context.Context, plan controlExecutionPlan) types.ControlActionResponse {
-	resp := cloneControlActionResponse(plan.actionEvaluation.response)
-	resp.DryRunOnly = false
-	resp.ExecutionMode = plan.executionMode
-	resp.PlaceholderOnly = false
-	resp.ExecutionNotes = []types.ControlExecutionNote{}
-	resp.Preflight = clonePreflightSummary(resp.Preflight)
-	resp.Facts = cloneFacts(plan.targetFacts)
-	resp.SourceSurface = plan.sourceSurface
-	resp.TargetID = plan.targetID
-	resp.TargetKind = plan.targetKind
-	resp.ActionKind = plan.actionKind
-	if !resp.Preflight.Allowed {
-		resp.Result = types.ControlResultBlocked
-		resp.HumanMessage = "execute 已被预检阻断。"
-		return resp
+func (placeholderControlExecutor) execute(_ context.Context, plan controlExecutionPlan) controlExecutionResult {
+	if !plan.preflight.Allowed {
+		return controlExecutionResult{
+			result:          types.ControlResultBlocked,
+			humanMessage:    "execute 已被预检阻断。",
+			executionMode:   plan.executionMode,
+			placeholderOnly: false,
+			executionNotes:  []types.ControlExecutionNote{},
+		}
 	}
-	resp.Result = types.ControlResultAccepted
-	resp.HumanMessage = "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。"
-	resp.PlaceholderOnly = true
-	resp.ExecutionNotes = append(resp.ExecutionNotes, types.ControlExecutionNote{
-		Code:    types.ControlReasonPlaceholderOnly,
-		Message: "当前还没有接入真实系统执行器。",
-	})
-	return resp
+	return controlExecutionResult{
+		result:          types.ControlResultAccepted,
+		humanMessage:    "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。",
+		executionMode:   plan.executionMode,
+		placeholderOnly: true,
+		executionNotes: []types.ControlExecutionNote{{
+			Code:    types.ControlReasonPlaceholderOnly,
+			Message: "当前还没有接入真实系统执行器。",
+		}},
+	}
 }
 
 func newControlPreflightBuilder() *controlPreflightBuilder {
@@ -298,7 +301,9 @@ func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlAct
 		resp.ExecutionMode = snapshot.executionMode
 		return resp, http.StatusOK
 	}
-	return s.controlExecutor.execute(ctx, buildExecutionPlan(req, snapshot, *actionSnapshot)), http.StatusOK
+	plan := buildExecutionPlan(req, snapshot, *actionSnapshot)
+	result := s.controlExecutor.execute(ctx, plan)
+	return buildControlActionResponse(req, plan, result), http.StatusOK
 }
 
 func newControlActionResponse(req types.ControlActionRequest) types.ControlActionResponse {
@@ -373,6 +378,23 @@ func buildExecutionPlan(req types.ControlActionRequest, snapshot controlTargetSn
 		actionEvaluation:  action,
 	}
 	return plan
+}
+
+func buildControlActionResponse(req types.ControlActionRequest, plan controlExecutionPlan, result controlExecutionResult) types.ControlActionResponse {
+	resp := cloneControlActionResponse(plan.actionEvaluation.response)
+	resp.Result = result.result
+	resp.ActionKind = req.ActionKind
+	resp.TargetKind = req.TargetKind
+	resp.TargetID = req.TargetID
+	resp.SourceSurface = req.SourceSurface
+	resp.HumanMessage = result.humanMessage
+	resp.DryRunOnly = false
+	resp.ExecutionMode = result.executionMode
+	resp.PlaceholderOnly = result.placeholderOnly
+	resp.ExecutionNotes = append([]types.ControlExecutionNote{}, result.executionNotes...)
+	resp.Facts = cloneFacts(plan.targetFacts)
+	resp.Preflight = clonePreflightSummary(plan.preflight)
+	return resp
 }
 
 func (s *Server) buildControlActionOptions(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (types.ControlActionOptionsResponse, int) {

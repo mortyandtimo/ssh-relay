@@ -2966,4 +2966,22 @@ func TestControlExecuteConsistencyWithOptionsAndPanels(t *testing.T) {
 	if blockedTunnelPlan.readinessState != types.ControlReadinessReady || blockedTunnelPlan.primaryReasonCode != types.ControlReasonTunnelStateConflict || len(blockedTunnelPlan.blockingReasons) == 0 {
 		t.Fatalf("unexpected blocked tunnel execution plan: %+v", blockedTunnelPlan)
 	}
+
+	readyExecResult := server.controlExecutor.execute(context.Background(), readyPlan)
+	readyTranslated := buildControlActionResponse(readyPlan.actionEvaluation.request, readyPlan, readyExecResult)
+	if readyTranslated.Result != types.ControlResultAccepted || !readyTranslated.PlaceholderOnly || readyTranslated.ExecutionMode != types.ControlExecutionPlaceholder || len(readyTranslated.ExecutionNotes) == 0 {
+		t.Fatalf("unexpected translated ready execute response: %+v", readyTranslated)
+	}
+	if readyTranslated.ActionKind != readyPlan.actionKind || readyTranslated.TargetKind != readyPlan.targetKind || readyTranslated.TargetID != readyPlan.targetID || readyTranslated.SourceSurface != readyPlan.sourceSurface {
+		t.Fatalf("translator dropped identity fields: %+v", readyTranslated)
+	}
+	if readyTranslated.Facts["nodeStatus"] == "" {
+		t.Fatalf("translator dropped target facts: %+v", readyTranslated.Facts)
+	}
+
+	blockedExecResult := server.controlExecutor.execute(context.Background(), blockedPlan)
+	blockedTranslated := buildControlActionResponse(blockedPlan.actionEvaluation.request, blockedPlan, blockedExecResult)
+	if blockedTranslated.Result != types.ControlResultBlocked || blockedTranslated.PlaceholderOnly || len(blockedTranslated.Preflight.BlockedReasons) == 0 || blockedTranslated.Preflight.BlockedReasons[0].Code != types.ControlReasonNodeIsolated {
+		t.Fatalf("unexpected translated blocked execute response: %+v", blockedTranslated)
+	}
 }
