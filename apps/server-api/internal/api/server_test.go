@@ -2558,12 +2558,12 @@ func TestControlActionTunnelPreflightAndPlaceholderExecute(t *testing.T) {
 	}
 
 	assertTunnel("tunnel target missing", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "missing-tunnel", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTargetNotFound, types.ControlExecutionPlaceholder, true, false, false, true)
-	assertTunnel("active pause accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultAccepted, "", types.ControlExecutionPlaceholder, true, false, false, false)
-	assertTunnel("paused resume accepted", map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultAccepted, "", types.ControlExecutionPlaceholder, true, false, false, false)
-	assertTunnel("paused pause blocked", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, true, false, false, true)
-	assertTunnel("active resume blocked", map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, true, false, false, true)
-	assertTunnel("execute placeholder accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultAccepted, types.ControlReasonPlaceholderOnly, types.ControlExecutionPlaceholder, false, true, true, false)
-	assertTunnel("execute blocked when conflict", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionPlaceholder, false, false, false, true)
+	assertTunnel("active pause accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultAccepted, "", types.ControlExecutionReal, true, false, false, false)
+	assertTunnel("paused resume accepted", map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "node_console", "dryRun": true}, types.ControlResultAccepted, "", types.ControlExecutionReal, true, false, false, false)
+	assertTunnel("paused pause blocked", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionReal, true, false, false, true)
+	assertTunnel("active resume blocked", map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": true}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionReal, true, false, false, true)
+	assertTunnel("execute real pause accepted", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultAccepted, "", types.ControlExecutionReal, false, false, true, false)
+	assertTunnel("execute blocked when conflict", map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused", "sourceSurface": "operator_console", "dryRun": false}, types.ControlResultBlocked, types.ControlReasonTunnelStateConflict, types.ControlExecutionReal, false, false, false, true)
 }
 
 func TestControlActionOptionsNodeAndTunnel(t *testing.T) {
@@ -2643,7 +2643,7 @@ func TestControlActionOptionsNodeAndTunnel(t *testing.T) {
 				releaseOpt = item
 			}
 		}
-		if !releaseOpt.Available || releaseOpt.AvailabilityState != types.ControlAvailabilityPlaceholderOnly {
+		if !releaseOpt.Available || releaseOpt.AvailabilityState != types.ControlAvailabilityAvailable || releaseOpt.ExecutionMode != types.ControlExecutionReal || releaseOpt.PlaceholderOnly {
 			t.Fatalf("expected release_node available on isolated node, got %+v", releaseOpt)
 		}
 	})
@@ -2670,14 +2670,14 @@ func TestControlActionOptionsNodeAndTunnel(t *testing.T) {
 		if len(out.Items) != 2 {
 			t.Fatalf("expected 2 tunnel action options, got %d", len(out.Items))
 		}
-		if out.Items[0].ActionKind != types.ControlActionPauseTunnel || !out.Items[0].Available || out.Items[0].AvailabilityState != types.ControlAvailabilityPlaceholderOnly {
+		if out.Items[0].ActionKind != types.ControlActionPauseTunnel || !out.Items[0].Available || out.Items[0].AvailabilityState != types.ControlAvailabilityAvailable {
 			t.Fatalf("unexpected pause_tunnel option: %+v", out.Items[0])
 		}
-		if !out.Items[0].PlaceholderOnly || len(out.Items[0].ExecutionNotes) == 0 {
-			t.Fatalf("expected placeholder-only pause option, got %+v", out.Items[0])
+		if out.Items[0].PlaceholderOnly || out.Items[0].ExecutionMode != types.ControlExecutionReal || len(out.Items[0].ExecutionNotes) == 0 {
+			t.Fatalf("expected real pause option, got %+v", out.Items[0])
 		}
 		if out.Items[0].Summary == "" || out.Items[0].NextStep == "" {
-			t.Fatalf("expected placeholder-only pause option to include summary and nextStep, got %+v", out.Items[0])
+			t.Fatalf("expected real pause option to include summary and nextStep, got %+v", out.Items[0])
 		}
 		if out.Items[1].ActionKind != types.ControlActionResumeTunnel || out.Items[1].Available || out.Items[1].AvailabilityState != types.ControlAvailabilityBlocked || out.Items[1].PrimaryReasonCode != types.ControlReasonTunnelStateConflict {
 			t.Fatalf("unexpected resume_tunnel option: %+v", out.Items[1])
@@ -2697,14 +2697,14 @@ func TestControlActionOptionsNodeAndTunnel(t *testing.T) {
 				resumeOpt = item
 			}
 		}
-		if !resumeOpt.Available || resumeOpt.AvailabilityState != types.ControlAvailabilityPlaceholderOnly {
+		if !resumeOpt.Available || resumeOpt.AvailabilityState != types.ControlAvailabilityAvailable {
 			t.Fatalf("expected resume_tunnel available, got %+v", resumeOpt)
 		}
-		if !resumeOpt.PlaceholderOnly || len(resumeOpt.ExecutionNotes) == 0 {
-			t.Fatalf("expected placeholder-only resume option, got %+v", resumeOpt)
+		if resumeOpt.PlaceholderOnly || resumeOpt.ExecutionMode != types.ControlExecutionReal || len(resumeOpt.ExecutionNotes) == 0 {
+			t.Fatalf("expected real resume option, got %+v", resumeOpt)
 		}
 		if resumeOpt.Summary == "" || resumeOpt.NextStep == "" {
-			t.Fatalf("expected placeholder-only resume option to include summary and nextStep, got %+v", resumeOpt)
+			t.Fatalf("expected real resume option to include summary and nextStep, got %+v", resumeOpt)
 		}
 	})
 }
@@ -2848,7 +2848,7 @@ func TestControlPanelSummaryNodeAndTunnel(t *testing.T) {
 				releaseOpt = item
 			}
 		}
-		if releaseOpt.AvailabilityState != types.ControlAvailabilityPlaceholderOnly || releaseOpt.NextStep == "" {
+		if releaseOpt.AvailabilityState != types.ControlAvailabilityAvailable || releaseOpt.ExecutionMode != types.ControlExecutionReal || releaseOpt.PlaceholderOnly || releaseOpt.NextStep == "" {
 			t.Fatalf("unexpected release option for blocked node: %+v", releaseOpt)
 		}
 	})
@@ -2925,18 +2925,44 @@ func TestControlExecuteConsistencyWithOptionsAndPanels(t *testing.T) {
 		t.Fatalf("expected partial node execute to stay blocked for missing service unit, got %+v", partialNodeExecute)
 	}
 
+	readyTunnelSnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetTunnel, "tunnel-active-exec", types.ControlSurfaceOperatorConsole)
+	if status != http.StatusOK {
+		t.Fatalf("expected ready tunnel snapshot status 200, got %d", status)
+	}
+	readyTunnelAction := findActionSnapshot(readyTunnelSnapshot, types.ControlActionPauseTunnel)
+	if readyTunnelAction == nil {
+		t.Fatalf("expected ready tunnel pause action snapshot")
+	}
+	readyTunnelPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionPauseTunnel, TargetKind: types.ControlTargetTunnel, TargetID: "tunnel-active-exec", SourceSurface: types.ControlSurfaceOperatorConsole, RequestedAt: time.Now().UTC(), Note: "ready-tunnel"}, readyTunnelSnapshot, *readyTunnelAction)
+	if readyTunnelPlan.readinessState != types.ControlReadinessReady || readyTunnelPlan.recommendedAction != types.ControlActionPauseTunnel || readyTunnelPlan.primaryReasonCode != "" {
+		t.Fatalf("unexpected ready tunnel execution plan: %+v", readyTunnelPlan)
+	}
+
 	readyTunnelExecute := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active-exec", "sourceSurface": "operator_console", "dryRun": false})
-	if readyTunnelExecute.Result != types.ControlResultAccepted || !readyTunnelExecute.PlaceholderOnly || readyTunnelExecute.ExecutionMode != types.ControlExecutionPlaceholder {
-		t.Fatalf("expected active tunnel pause execute to use placeholder path, got %+v", readyTunnelExecute)
+	if readyTunnelExecute.Result != types.ControlResultAccepted || readyTunnelExecute.PlaceholderOnly || readyTunnelExecute.ExecutionMode != types.ControlExecutionReal {
+		t.Fatalf("expected active tunnel pause execute to use real path, got %+v", readyTunnelExecute)
+	}
+
+	blockedTunnelSnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetTunnel, "tunnel-paused-exec", types.ControlSurfaceOperatorConsole)
+	if status != http.StatusOK {
+		t.Fatalf("expected blocked tunnel snapshot status 200, got %d", status)
+	}
+	blockedTunnelAction := findActionSnapshot(blockedTunnelSnapshot, types.ControlActionPauseTunnel)
+	if blockedTunnelAction == nil {
+		t.Fatalf("expected blocked tunnel pause action snapshot")
+	}
+	blockedTunnelPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionPauseTunnel, TargetKind: types.ControlTargetTunnel, TargetID: "tunnel-paused-exec", SourceSurface: types.ControlSurfaceOperatorConsole, RequestedAt: time.Now().UTC(), Note: "blocked-tunnel"}, blockedTunnelSnapshot, *blockedTunnelAction)
+	if blockedTunnelPlan.readinessState != types.ControlReadinessReady || blockedTunnelPlan.primaryReasonCode != types.ControlReasonTunnelStateConflict || len(blockedTunnelPlan.blockingReasons) == 0 {
+		t.Fatalf("unexpected blocked tunnel execution plan: %+v", blockedTunnelPlan)
 	}
 
 	blockedTunnelExecute := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused-exec", "sourceSurface": "operator_console", "dryRun": false})
 	if blockedTunnelExecute.Result != types.ControlResultBlocked || len(blockedTunnelExecute.Preflight.BlockedReasons) == 0 || blockedTunnelExecute.Preflight.BlockedReasons[0].Code != types.ControlReasonTunnelStateConflict {
 		t.Fatalf("expected paused tunnel pause execute to stay blocked, got %+v", blockedTunnelExecute)
 	}
-	if _, ok := server.controlExecutor.(placeholderControlExecutor); !ok {
-		t.Fatalf("expected default control executor to remain placeholder, got %T", server.controlExecutor)
-	}
+		if _, ok := unwrapStateMutationControlExecutor(server.controlExecutor); !ok {
+			t.Fatalf("expected default control executor to include state mutation layer, got %T", server.controlExecutor)
+		}
 
 	readySnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetNode, "node-ready-exec", types.ControlSurfaceNodeConsole)
 	if status != http.StatusOK {
@@ -2965,32 +2991,6 @@ func TestControlExecuteConsistencyWithOptionsAndPanels(t *testing.T) {
 	blockedPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionRestartAgent, TargetKind: types.ControlTargetNode, TargetID: "node-blocked-exec", SourceSurface: types.ControlSurfaceOperatorConsole, RequestedAt: time.Now().UTC(), Note: "blocked-node"}, blockedSnapshot, *blockedAction)
 	if blockedPlan.readinessState != types.ControlReadinessBlocked || blockedPlan.primaryReasonCode != types.ControlReasonNodeIsolated || len(blockedPlan.blockingReasons) == 0 {
 		t.Fatalf("unexpected blocked execution plan: %+v", blockedPlan)
-	}
-
-	readyTunnelSnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetTunnel, "tunnel-active-exec", types.ControlSurfaceOperatorConsole)
-	if status != http.StatusOK {
-		t.Fatalf("expected ready tunnel snapshot status 200, got %d", status)
-	}
-	readyTunnelAction := findActionSnapshot(readyTunnelSnapshot, types.ControlActionPauseTunnel)
-	if readyTunnelAction == nil {
-		t.Fatalf("expected ready tunnel pause action snapshot")
-	}
-	readyTunnelPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionPauseTunnel, TargetKind: types.ControlTargetTunnel, TargetID: "tunnel-active-exec", SourceSurface: types.ControlSurfaceOperatorConsole, RequestedAt: time.Now().UTC(), Note: "ready-tunnel"}, readyTunnelSnapshot, *readyTunnelAction)
-	if readyTunnelPlan.readinessState != types.ControlReadinessReady || readyTunnelPlan.recommendedAction != types.ControlActionPauseTunnel || readyTunnelPlan.primaryReasonCode != "" {
-		t.Fatalf("unexpected ready tunnel execution plan: %+v", readyTunnelPlan)
-	}
-
-	blockedTunnelSnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetTunnel, "tunnel-paused-exec", types.ControlSurfaceOperatorConsole)
-	if status != http.StatusOK {
-		t.Fatalf("expected blocked tunnel snapshot status 200, got %d", status)
-	}
-	blockedTunnelAction := findActionSnapshot(blockedTunnelSnapshot, types.ControlActionPauseTunnel)
-	if blockedTunnelAction == nil {
-		t.Fatalf("expected blocked tunnel pause action snapshot")
-	}
-	blockedTunnelPlan := buildExecutionPlan(types.ControlActionRequest{ActionKind: types.ControlActionPauseTunnel, TargetKind: types.ControlTargetTunnel, TargetID: "tunnel-paused-exec", SourceSurface: types.ControlSurfaceOperatorConsole, RequestedAt: time.Now().UTC(), Note: "blocked-tunnel"}, blockedTunnelSnapshot, *blockedTunnelAction)
-	if blockedTunnelPlan.readinessState != types.ControlReadinessReady || blockedTunnelPlan.primaryReasonCode != types.ControlReasonTunnelStateConflict || len(blockedTunnelPlan.blockingReasons) == 0 {
-		t.Fatalf("unexpected blocked tunnel execution plan: %+v", blockedTunnelPlan)
 	}
 
 	readyExecResult := server.controlExecutor.execute(context.Background(), readyPlan)
@@ -3088,8 +3088,8 @@ func TestControlExecuteOnlyCallsExecutorForAllowedNonDryRun(t *testing.T) {
 	if allowedResp.HumanMessage != "spy accepted placeholder execute" || allowedResp.ExecutionNotes[0].Message != "spy placeholder executor" {
 		t.Fatalf("expected allowed execute to use executor output, got %+v", allowedResp)
 	}
-	if _, ok := NewServer("test", store.NewInMemoryStore(), "").controlExecutor.(placeholderControlExecutor); !ok {
-		t.Fatalf("expected default control executor to remain placeholder")
+	if _, ok := unwrapStateMutationControlExecutor(NewServer("test", store.NewInMemoryStore(), "").controlExecutor); !ok {
+		t.Fatalf("expected default control executor to include state mutation layer")
 	}
 }
 
@@ -3387,7 +3387,7 @@ func TestRestartExecutorKeepsOtherActionsPlaceholderOnly(t *testing.T) {
 		t.Fatalf("expected non-restart action to avoid real restart runner, got count=%d", runner.callCount)
 	}
 	if out.Result != types.ControlResultAccepted || !out.PlaceholderOnly || out.ExecutionMode != types.ControlExecutionPlaceholder {
-		t.Fatalf("expected other actions to remain placeholder-only, got %+v", out)
+		t.Fatalf("expected restart-only executor to leave other actions placeholder-only, got %+v", out)
 	}
 }
 
@@ -3492,7 +3492,7 @@ func TestControlSnapshotReflectsRealRestartEligibility(t *testing.T) {
 	}
 }
 
-func TestControlSnapshotLeavesTunnelPlaceholderSemanticsUntouched(t *testing.T) {
+func TestControlSnapshotReflectsRealTunnelMutationSemantics(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
 	adminCookies := bootstrapAdminAndCollectCookies(t, server)
@@ -3525,7 +3525,183 @@ func TestControlSnapshotLeavesTunnelPlaceholderSemanticsUntouched(t *testing.T) 
 			pauseOpt = item
 		}
 	}
-	if pauseOpt.ExecutionMode != types.ControlExecutionPlaceholder || !pauseOpt.PlaceholderOnly || pauseOpt.AvailabilityState != types.ControlAvailabilityPlaceholderOnly {
-		t.Fatalf("expected tunnel option to remain placeholder-only, got %+v", pauseOpt)
+	if pauseOpt.ExecutionMode != types.ControlExecutionReal || pauseOpt.PlaceholderOnly || pauseOpt.AvailabilityState != types.ControlAvailabilityAvailable {
+		t.Fatalf("expected tunnel option to reflect real mutation path, got %+v", pauseOpt)
+	}
+}
+
+func TestControlStateMutationActionsExecuteAndRefreshReadiness(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-mutation-ready", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-mutation-ready.service", "instanceProfile": "node-mutation-ready", "instanceManaged": "true"})
+	registerNode("node-mutation-isolated", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-mutation-isolated.service", "instanceProfile": "node-mutation-isolated", "instanceManaged": "true", "isolated": "true"})
+	for _, item := range []types.TunnelSpec{
+		{ID: "tunnel-mutation-active", NodeID: "node-mutation-ready", Name: "tunnel-mutation-active", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 25010, Metadata: map[string]string{"nodeId": "node-mutation-ready"}},
+		{ID: "tunnel-mutation-paused", NodeID: "node-mutation-ready", Name: "tunnel-mutation-paused", Type: "tcp", Status: "paused", TargetHost: "127.0.0.1", TargetPort: 8081, PublicPort: 25011, Metadata: map[string]string{"nodeId": "node-mutation-ready"}},
+	} {
+		if _, err := server.store.CreateTunnel(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	execAction := func(payload map[string]any) types.ControlActionResponse {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+		var out types.ControlActionResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	getPanel := func(path string) types.ControlPanelSummary {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("%s: expected status 200, got %d", path, res.Code)
+		}
+		var out types.ControlPanelSummary
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("%s: decode failed: %v", path, err)
+		}
+		return out
+	}
+
+	getOptions := func(path string) types.ControlActionOptionsResponse {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("%s: expected status 200, got %d", path, res.Code)
+		}
+		var out types.ControlActionOptionsResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("%s: decode failed: %v", path, err)
+		}
+		return out
+	}
+
+	isolateResp := execAction(map[string]any{"actionKind": "isolate_node", "targetKind": "node", "targetId": "node-mutation-ready", "sourceSurface": "operator_console", "dryRun": false})
+	if isolateResp.Result != types.ControlResultAccepted || isolateResp.ExecutionMode != types.ControlExecutionReal || isolateResp.PlaceholderOnly {
+		t.Fatalf("expected isolate_node real execute, got %+v", isolateResp)
+	}
+	afterIsolatePanel := getPanel("/api/control-panels/node/node-mutation-ready/operator_console")
+	if afterIsolatePanel.RecommendedAction != types.ControlActionReleaseNode || afterIsolatePanel.PrimaryReasonCode != types.ControlReasonNodeIsolated {
+		t.Fatalf("expected isolated node panel to reflect new isolated state, got %+v", afterIsolatePanel)
+	}
+	afterIsolateOptions := getOptions("/api/control-actions/node/node-mutation-ready/operator_console/options")
+	var releaseOpt types.ControlActionOption
+	for _, item := range afterIsolateOptions.Items {
+		if item.ActionKind == types.ControlActionReleaseNode {
+			releaseOpt = item
+		}
+	}
+	if !releaseOpt.Available || releaseOpt.ExecutionMode != types.ControlExecutionReal || releaseOpt.PlaceholderOnly {
+		t.Fatalf("expected release option to become real-available after isolate, got %+v", releaseOpt)
+	}
+
+	releaseResp := execAction(map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-mutation-isolated", "sourceSurface": "operator_console", "dryRun": false})
+	if releaseResp.Result != types.ControlResultAccepted || releaseResp.ExecutionMode != types.ControlExecutionReal || releaseResp.PlaceholderOnly {
+		t.Fatalf("expected release_node real execute, got %+v", releaseResp)
+	}
+	afterReleasePanel := getPanel("/api/control-panels/node/node-mutation-isolated/operator_console")
+	if afterReleasePanel.PrimaryReasonCode != "" || afterReleasePanel.RecommendedAction != types.ControlActionIsolateNode {
+		t.Fatalf("expected released node panel to reflect non-isolated state, got %+v", afterReleasePanel)
+	}
+
+	pauseResp := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-mutation-active", "sourceSurface": "operator_console", "dryRun": false})
+	if pauseResp.Result != types.ControlResultAccepted || pauseResp.ExecutionMode != types.ControlExecutionReal || pauseResp.PlaceholderOnly {
+		t.Fatalf("expected pause_tunnel real execute, got %+v", pauseResp)
+	}
+	tunnelAfterPause, err := server.store.GetTunnel(context.Background(), "tunnel-mutation-active")
+	if err != nil || tunnelAfterPause.Status != "paused" {
+		t.Fatalf("expected paused tunnel in store, got %+v err=%v", tunnelAfterPause, err)
+	}
+	pauseListReq := httptest.NewRequest(http.MethodGet, "/api/tunnels?nodeId=node-mutation-ready", nil)
+	applyCookies(pauseListReq, adminCookies)
+	pauseListRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(pauseListRes, pauseListReq)
+	if pauseListRes.Code != http.StatusOK {
+		t.Fatalf("expected tunnel list 200, got %d", pauseListRes.Code)
+	}
+	var listOut struct {
+		Items []types.TunnelSpec `json:"items"`
+	}
+	if err := json.NewDecoder(pauseListRes.Body).Decode(&listOut); err != nil {
+		t.Fatalf("decode tunnel list failed: %v", err)
+	}
+	seenPaused := false
+	for _, item := range listOut.Items {
+		if item.ID == "tunnel-mutation-active" && item.Status == "paused" {
+			seenPaused = true
+		}
+	}
+	if !seenPaused {
+		t.Fatalf("expected tunnel list to reflect paused status, got %+v", listOut.Items)
+	}
+	pausePanel := getPanel("/api/control-panels/tunnel/tunnel-mutation-active/operator_console")
+	if pausePanel.RecommendedAction != types.ControlActionResumeTunnel || pausePanel.ExecutionMode != types.ControlExecutionReal || pausePanel.PlaceholderOnly {
+		t.Fatalf("expected tunnel panel to reflect paused real state, got %+v", pausePanel)
+	}
+	pauseOptions := getOptions("/api/control-actions/tunnel/tunnel-mutation-active/operator_console/options")
+	var resumeOpt types.ControlActionOption
+	for _, item := range pauseOptions.Items {
+		if item.ActionKind == types.ControlActionResumeTunnel {
+			resumeOpt = item
+		}
+	}
+	if !resumeOpt.Available || resumeOpt.ExecutionMode != types.ControlExecutionReal || resumeOpt.PlaceholderOnly {
+		t.Fatalf("expected resume option to become real-available after pause, got %+v", resumeOpt)
+	}
+	tcpRoutesReq := httptest.NewRequest(http.MethodGet, "/internal/routes/tcp", nil)
+	tcpRoutesRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(tcpRoutesRes, tcpRoutesReq)
+	if tcpRoutesRes.Code != http.StatusOK {
+		t.Fatalf("expected tcp routes 200, got %d", tcpRoutesRes.Code)
+	}
+	var routesOut struct {
+		Items []types.TunnelSpec `json:"items"`
+	}
+	if err := json.NewDecoder(tcpRoutesRes.Body).Decode(&routesOut); err != nil {
+		t.Fatalf("decode tcp routes failed: %v", err)
+	}
+	for _, item := range routesOut.Items {
+		if item.ID == "tunnel-mutation-active" {
+			t.Fatalf("expected paused tunnel to disappear from active tcp routes, got %+v", routesOut.Items)
+		}
+	}
+
+	resumeResp := execAction(map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-mutation-paused", "sourceSurface": "operator_console", "dryRun": false})
+	if resumeResp.Result != types.ControlResultAccepted || resumeResp.ExecutionMode != types.ControlExecutionReal || resumeResp.PlaceholderOnly {
+		t.Fatalf("expected resume_tunnel real execute, got %+v", resumeResp)
+	}
+	tunnelAfterResume, err := server.store.GetTunnel(context.Background(), "tunnel-mutation-paused")
+	if err != nil || tunnelAfterResume.Status != "active" {
+		t.Fatalf("expected resumed tunnel in store, got %+v err=%v", tunnelAfterResume, err)
+	}
+	conflictResp := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-mutation-active", "sourceSurface": "operator_console", "dryRun": false})
+	if conflictResp.Result != types.ControlResultBlocked || len(conflictResp.Preflight.BlockedReasons) == 0 || conflictResp.Preflight.BlockedReasons[0].Code != types.ControlReasonTunnelStateConflict {
+		t.Fatalf("expected illegal tunnel state transition to remain blocked, got %+v", conflictResp)
 	}
 }

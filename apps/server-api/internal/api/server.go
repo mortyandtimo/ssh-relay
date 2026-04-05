@@ -70,7 +70,7 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 		allowedOrigins:       parseAllowedOrigins(os.Getenv("SERVER_API_ALLOWED_ORIGINS")),
 		authCookiesSecure:    parseBoolEnv(os.Getenv("SERVER_API_AUTH_COOKIES_SECURE")),
 	}
-	s.controlExecutor = newConfiguredControlExecutor()
+	s.controlExecutor = newStateMutationControlExecutor(backend, newConfiguredControlExecutor())
 	s.routes()
 	return s
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/25743/cloud-relay-platform/apps/server-api/internal/store"
 	"github.com/25743/cloud-relay-platform/packages/protocol/types"
 )
 
@@ -111,6 +112,11 @@ type restartCapableControlExecutor struct {
 	restart     restartAgentExecutor
 }
 
+type stateMutationControlExecutor struct {
+	store    store.Store
+	fallback controlExecutor
+}
+
 type restartAgentExecutor struct {
 	config restartAgentExecutorConfig
 	runner restartAgentRunner
@@ -131,11 +137,11 @@ func newConfiguredControlExecutor() controlExecutor {
 		allowedServicePrefix: strings.TrimSpace(envOrDefault("SERVER_API_CONTROL_RESTART_SERVICE_PREFIX", defaultRestartServicePrefix)),
 		timeout:              time.Duration(parsePositiveInt(envOrDefault("SERVER_API_CONTROL_RESTART_TIMEOUT_SEC", "15"), 15)) * time.Second,
 	}
-	if !config.enabled {
-		return newPlaceholderControlExecutor()
+	fallback := newPlaceholderControlExecutor()
+	if config.enabled {
+		fallback = newRestartCapableControlExecutor(config, systemctlRestartRunner{})
 	}
-	return newRestartCapableControlExecutor(config, systemctlRestartRunner{})
-
+	return newStateMutationControlExecutor(nil, fallback)
 }
 
 func newRestartCapableControlExecutor(config restartAgentExecutorConfig, runner restartAgentRunner) controlExecutor {
@@ -157,11 +163,115 @@ func newRestartCapableControlExecutor(config restartAgentExecutorConfig, runner 
 	}
 }
 
+func newStateMutationControlExecutor(backend store.Store, fallback controlExecutor) controlExecutor {
+	if fallback == nil {
+		fallback = newPlaceholderControlExecutor()
+	}
+	if backend == nil {
+		return fallback
+	}
+	return stateMutationControlExecutor{store: backend, fallback: fallback}
+}
+
 func (e restartCapableControlExecutor) execute(ctx context.Context, plan controlExecutionPlan) controlExecutionResult {
 	if result, handled := e.restart.execute(ctx, plan); handled {
 		return result
 	}
 	return e.placeholder.execute(ctx, plan)
+}
+
+func (e stateMutationControlExecutor) execute(ctx context.Context, plan controlExecutionPlan) controlExecutionResult {
+	if result, handled := e.executeStateMutation(ctx, plan); handled {
+		return result
+	}
+	return e.fallback.execute(ctx, plan)
+}
+
+func (e stateMutationControlExecutor) executeStateMutation(ctx context.Context, plan controlExecutionPlan) (controlExecutionResult, bool) {
+	switch plan.actionKind {
+	case types.ControlActionIsolateNode:
+		return e.executeNodeIsolation(ctx, plan, true), true
+	case types.ControlActionReleaseNode:
+		return e.executeNodeIsolation(ctx, plan, false), true
+	case types.ControlActionPauseTunnel:
+		return e.executeTunnelStatus(ctx, plan, "paused"), true
+	case types.ControlActionResumeTunnel:
+		return e.executeTunnelStatus(ctx, plan, "active"), true
+	default:
+		return controlExecutionResult{}, false
+	}
+}
+
+func (e stateMutationControlExecutor) executeNodeIsolation(ctx context.Context, plan controlExecutionPlan, isolated bool) controlExecutionResult {
+	current, err := e.store.GetNode(ctx, plan.targetID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nonRetryableFailureExecutionResult(plan, "节点在 execute 阶段不存在，无法更新隔离状态。")
+		}
+		return retryableFailureExecutionResult(plan, "读取节点当前状态失败，可稍后重试。详情: "+err.Error())
+	}
+	if current.Isolated == isolated {
+		if isolated {
+			return policyRejectedExecutionResult(plan, "节点当前已经是 isolated 状态，不再允许重复 isolate。")
+		}
+		return policyRejectedExecutionResult(plan, "节点当前已经是 released 状态，不再允许重复 release。")
+	}
+	updated, err := e.store.UpdateNode(ctx, store.UpdateNodeParams{
+		NodeID:      current.NodeID,
+		NodeRole:    current.NodeRole,
+		Environment: current.Environment,
+		TrustLevel:  current.TrustLevel,
+		Owner:       current.Owner,
+		Location:    current.Location,
+		Tags:        current.Tags,
+		Isolated:    isolated,
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nonRetryableFailureExecutionResult(plan, "节点在更新隔离状态时丢失，无法继续执行。")
+		}
+		return retryableFailureExecutionResult(plan, "更新节点隔离状态失败，可稍后重试。详情: "+err.Error())
+	}
+	message := "已真实更新节点隔离状态。"
+	note := "节点已更新为 isolated=false。"
+	if updated.Isolated {
+		message = "已真实隔离目标节点。"
+		note = "节点已更新为 isolated=true。"
+	}
+	return acceptedStateMutationExecutionResult(message, note)
+}
+
+func (e stateMutationControlExecutor) executeTunnelStatus(ctx context.Context, plan controlExecutionPlan, status string) controlExecutionResult {
+	current, err := e.store.GetTunnel(ctx, plan.targetID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nonRetryableFailureExecutionResult(plan, "tunnel 在 execute 阶段不存在，无法更新状态。")
+		}
+		return retryableFailureExecutionResult(plan, "读取 tunnel 当前状态失败，可稍后重试。详情: "+err.Error())
+	}
+	if current.Status == status {
+		if status == "paused" {
+			return policyRejectedExecutionResult(plan, "tunnel 当前已经是 paused 状态，不再允许重复 pause。")
+		}
+		return policyRejectedExecutionResult(plan, "tunnel 当前已经是 active 状态，不再允许重复 resume。")
+	}
+	current.Status = status
+	updated, err := e.store.UpdateTunnel(ctx, current)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nonRetryableFailureExecutionResult(plan, "tunnel 在更新状态时丢失，无法继续执行。")
+		}
+		return retryableFailureExecutionResult(plan, "更新 tunnel 状态失败，可稍后重试。详情: "+err.Error())
+	}
+	message := "已真实更新 tunnel 状态。"
+	note := "tunnel status 已更新为 " + updated.Status + "。"
+	if updated.Status == "paused" {
+		message = "已真实暂停 tunnel。"
+	}
+	if updated.Status == "active" {
+		message = "已真实恢复 tunnel。"
+	}
+	return acceptedStateMutationExecutionResult(message, note)
 }
 
 func (e restartAgentExecutor) execute(ctx context.Context, plan controlExecutionPlan) (controlExecutionResult, bool) {
@@ -567,6 +677,17 @@ func acceptedRealExecutionResult(plan controlExecutionPlan, serviceUnit string) 
 	}
 }
 
+func acceptedStateMutationExecutionResult(message string, note string) controlExecutionResult {
+	return controlExecutionResult{
+		outcome:       controlExecutionOutcomeAcceptedReal,
+		humanMessage:  message,
+		executionMode: types.ControlExecutionReal,
+		executionNotes: []types.ControlExecutionNote{{
+			Message: note,
+		}},
+	}
+}
+
 func acceptedPlaceholderExecutionResult(plan controlExecutionPlan) controlExecutionResult {
 	return controlExecutionResult{
 		outcome:       controlExecutionOutcomeAcceptedPlaceholder,
@@ -807,6 +928,18 @@ func (s *Server) previewExecutionOutcome(ctx context.Context, plan controlExecut
 }
 
 func (s *Server) previewRealExecutionOutcome(_ context.Context, plan controlExecutionPlan) (controlExecutionResult, bool) {
+	if _, ok := unwrapStateMutationControlExecutor(s.controlExecutor); ok {
+		switch plan.actionKind {
+		case types.ControlActionIsolateNode:
+			return acceptedStateMutationExecutionResult("当前动作会真实更新节点隔离状态。", "节点将被更新为 isolated=true。"), true
+		case types.ControlActionReleaseNode:
+			return acceptedStateMutationExecutionResult("当前动作会真实更新节点隔离状态。", "节点将被更新为 isolated=false。"), true
+		case types.ControlActionPauseTunnel:
+			return acceptedStateMutationExecutionResult("当前动作会真实更新 tunnel 状态。", "tunnel status 将被更新为 paused。"), true
+		case types.ControlActionResumeTunnel:
+			return acceptedStateMutationExecutionResult("当前动作会真实更新 tunnel 状态。", "tunnel status 将被更新为 active。"), true
+		}
+	}
 	restartExecutor, ok := unwrapRestartAgentExecutor(s.controlExecutor)
 	if !ok {
 		return controlExecutionResult{}, false
@@ -832,12 +965,27 @@ func (s *Server) previewRealExecutionOutcome(_ context.Context, plan controlExec
 
 func unwrapRestartAgentExecutor(executor controlExecutor) (restartAgentExecutor, bool) {
 	switch value := executor.(type) {
+	case stateMutationControlExecutor:
+		return unwrapRestartAgentExecutor(value.fallback)
+	case *stateMutationControlExecutor:
+		return unwrapRestartAgentExecutor(value.fallback)
 	case restartCapableControlExecutor:
 		return value.restart, true
 	case *restartCapableControlExecutor:
 		return value.restart, true
 	default:
 		return restartAgentExecutor{}, false
+	}
+}
+
+func unwrapStateMutationControlExecutor(executor controlExecutor) (stateMutationControlExecutor, bool) {
+	switch value := executor.(type) {
+	case stateMutationControlExecutor:
+		return value, true
+	case *stateMutationControlExecutor:
+		return *value, true
+	default:
+		return stateMutationControlExecutor{}, false
 	}
 }
 
@@ -970,9 +1118,18 @@ func recommendedActionForSnapshot(targetKind types.ControlTargetKind, actions []
 	switch targetKind {
 	case types.ControlTargetNode:
 		if actionBlockedForReason(actions, types.ControlActionRestartAgent, types.ControlReasonNodeIsolated) || actionAllowed(actions, types.ControlActionReleaseNode) {
+			if actionExecutesReal(actions, types.ControlActionReleaseNode) {
+				return types.ControlActionReleaseNode
+			}
 			if hasAction(actions, types.ControlActionReleaseNode) {
 				return types.ControlActionReleaseNode
 			}
+		}
+		if actionExecutesReal(actions, types.ControlActionRestartAgent) {
+			return types.ControlActionRestartAgent
+		}
+		if actionExecutesReal(actions, types.ControlActionIsolateNode) {
+			return types.ControlActionIsolateNode
 		}
 		if actionAllowed(actions, types.ControlActionRestartAgent) {
 			return types.ControlActionRestartAgent
@@ -988,6 +1145,12 @@ func recommendedActionForSnapshot(targetKind types.ControlTargetKind, actions []
 		}
 		return types.ControlActionRestartAgent
 	case types.ControlTargetTunnel:
+		if actionExecutesReal(actions, types.ControlActionResumeTunnel) {
+			return types.ControlActionResumeTunnel
+		}
+		if actionExecutesReal(actions, types.ControlActionPauseTunnel) {
+			return types.ControlActionPauseTunnel
+		}
 		if actionAllowed(actions, types.ControlActionResumeTunnel) {
 			return types.ControlActionResumeTunnel
 		}
@@ -1020,6 +1183,15 @@ func actionBlockedForReason(actions []evaluatedControlAction, actionKind types.C
 func actionAllowed(actions []evaluatedControlAction, actionKind types.ControlActionKind) bool {
 	for _, action := range actions {
 		if action.request.ActionKind == actionKind && len(action.response.Preflight.BlockedReasons) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func actionExecutesReal(actions []evaluatedControlAction, actionKind types.ControlActionKind) bool {
+	for _, action := range actions {
+		if action.request.ActionKind == actionKind && action.execute.outcome == controlExecutionOutcomeAcceptedReal {
 			return true
 		}
 	}
@@ -1069,7 +1241,7 @@ func allowedActionsForTarget(targetKind types.ControlTargetKind) []types.Control
 func controlActionOptionFromEvaluated(evaluated evaluatedControlAction) types.ControlActionOption {
 	result := evaluated.response
 	if result.Result == types.ControlResultAccepted {
-		summary, nextStep := controlOptionSummaryAndNextStep(result, nil)
+		summary, nextStep := controlOptionSummaryAndNextStep(result, nil, evaluated.execute)
 		availabilityState := types.ControlAvailabilityPlaceholderOnly
 		placeholderOnly := true
 		executionMode := types.ControlExecutionPlaceholder
@@ -1100,7 +1272,7 @@ func controlActionOptionFromEvaluated(evaluated evaluatedControlAction) types.Co
 	if len(result.Preflight.BlockedReasons) > 0 {
 		primaryReason = result.Preflight.BlockedReasons[0].Code
 	}
-	summary, nextStep := controlOptionSummaryAndNextStep(result, result.Preflight.BlockedReasons)
+	summary, nextStep := controlOptionSummaryAndNextStep(result, result.Preflight.BlockedReasons, evaluated.execute)
 	return types.ControlActionOption{
 		ActionKind:        result.ActionKind,
 		TargetKind:        result.TargetKind,
@@ -1119,9 +1291,9 @@ func controlActionOptionFromEvaluated(evaluated evaluatedControlAction) types.Co
 	}
 }
 
-func controlOptionSummaryAndNextStep(result types.ControlActionResponse, reasons []types.ControlBlockedReason) (string, string) {
+func controlOptionSummaryAndNextStep(result types.ControlActionResponse, reasons []types.ControlBlockedReason, execution controlExecutionResult) (string, string) {
 	if result.Result == types.ControlResultAccepted {
-		if result.ExecutionMode == types.ControlExecutionReal && !result.PlaceholderOnly {
+		if execution.outcome == controlExecutionOutcomeAcceptedReal {
 			return "当前动作可以发起，并会进入真实执行路径。", "建议先执行 dry-run，再确认服务状态与节点上下文。"
 		}
 		return "当前动作可以发起，但本轮只会进入占位执行边界。", "先执行 dry-run 或占位执行确认交互，再等待后续真实执行器接入。"
