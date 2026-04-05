@@ -1,1 +1,29 @@
 @import "../../../packages/desktop-core/src/styles.css";
+
+.focus-grid {
+  margin-bottom: 16px;
+}
+
+.filter-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.filter-strip label {
+  display: grid;
+  gap: 8px;
+}
+
+.filter-strip select {
+  border-radius: 14px;
+  border: 1px solid rgba(17, 34, 56, 0.14);
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.attention-item {
+  border: 1px solid rgba(153, 55, 36, 0.24);
+  background: rgba(255, 228, 223, 0.78);
+}

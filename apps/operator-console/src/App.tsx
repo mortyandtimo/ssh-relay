@@ -4,6 +4,9 @@ import type { NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../
 import { capabilitySummary, formatDate, nodeAgentDeploymentLabel, publicEntry, runtimeLabel, statusClass, tunnelTabs } from "../../../packages/desktop-core/src/utils";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
+type RuntimeStateFilter = "all" | "pending" | "unavailable" | "reported";
+type RuntimePathFilter = "all" | "relay" | "p2p" | "reported";
+type AttentionFilter = "all" | "needs_attention" | "failure_reason" | "p2p_fallback";
 
 export default function App() {
   const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
@@ -13,6 +16,9 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TunnelTypeTab>("tcp");
   const [selectedTunnelId, setSelectedTunnelId] = useState<string | null>(null);
+  const [runtimeStateFilter, setRuntimeStateFilter] = useState<RuntimeStateFilter>("all");
+  const [runtimePathFilter, setRuntimePathFilter] = useState<RuntimePathFilter>("all");
+  const [attentionFilter, setAttentionFilter] = useState<AttentionFilter>("all");
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -82,7 +88,45 @@ export default function App() {
     if (!selectedNode) return [];
     return tunnels.filter((tunnel) => tunnel.nodeId === selectedNode.nodeId);
   }, [selectedNode, tunnels]);
-  const tabTunnels = useMemo(() => selectedNodeTunnels.filter((tunnel) => tunnel.type === activeTab), [activeTab, selectedNodeTunnels]);
+  const tabTunnels = useMemo(() => {
+    return selectedNodeTunnels.filter((tunnel) => {
+      if (tunnel.type !== activeTab) {
+        return false;
+      }
+      if (runtimeStateFilter === "pending" && tunnel.runtimeState !== "pending") {
+        return false;
+      }
+      if (runtimeStateFilter === "unavailable" && tunnel.runtimeState !== "unavailable") {
+        return false;
+      }
+      if (runtimeStateFilter === "reported" && !tunnel.runtimeState) {
+        return false;
+      }
+      if (runtimePathFilter === "relay" && tunnel.runtimePath !== "relay") {
+        return false;
+      }
+      if (runtimePathFilter === "p2p" && tunnel.runtimePath !== "p2p") {
+        return false;
+      }
+      if (runtimePathFilter === "reported" && !tunnel.runtimePath) {
+        return false;
+      }
+      if (attentionFilter === "failure_reason" && !tunnel.lastFailureReason) {
+        return false;
+      }
+      if (attentionFilter === "p2p_fallback" && !isP2PFallbackTunnel(tunnel)) {
+        return false;
+      }
+      if (attentionFilter === "needs_attention" && !needsAttention(tunnel)) {
+        return false;
+      }
+      return true;
+    });
+  }, [activeTab, attentionFilter, runtimePathFilter, runtimeStateFilter, selectedNodeTunnels]);
+
+  const unavailableCount = useMemo(() => selectedNodeTunnels.filter((tunnel) => tunnel.runtimeState === "unavailable").length, [selectedNodeTunnels]);
+  const failureReasonCount = useMemo(() => selectedNodeTunnels.filter((tunnel) => Boolean(tunnel.lastFailureReason)).length, [selectedNodeTunnels]);
+  const p2pFallbackCount = useMemo(() => selectedNodeTunnels.filter((tunnel) => isP2PFallbackTunnel(tunnel)).length, [selectedNodeTunnels]);
 
   useEffect(() => {
     if (!tabTunnels.length) {
@@ -260,6 +304,40 @@ export default function App() {
               </section>
               <section className="panel workbench-panel">
                 <div className="panel-head"><div><h2>按隧道类型切换的工作区</h2><p className="copy">进入某台机器后，复用按类型切换的工作区与 tunnel 详情区。</p></div></div>
+                <div className="hero-grid focus-grid">
+                  <Metric label="待处理 unavailable" value={String(unavailableCount)} />
+                  <Metric label="failureReason 非空" value={String(failureReasonCount)} />
+                  <Metric label="p2p 预期但仍走 relay" value={String(p2pFallbackCount)} />
+                </div>
+                <div className="filter-strip">
+                  <label>
+                    <span>runtimeState</span>
+                    <select value={runtimeStateFilter} onChange={(event) => setRuntimeStateFilter(event.target.value as RuntimeStateFilter)}>
+                      <option value="all">全部</option>
+                      <option value="pending">pending</option>
+                      <option value="unavailable">unavailable</option>
+                      <option value="reported">已上报</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>runtimePath</span>
+                    <select value={runtimePathFilter} onChange={(event) => setRuntimePathFilter(event.target.value as RuntimePathFilter)}>
+                      <option value="all">全部</option>
+                      <option value="relay">relay</option>
+                      <option value="p2p">p2p</option>
+                      <option value="reported">已上报</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>快速聚焦</span>
+                    <select value={attentionFilter} onChange={(event) => setAttentionFilter(event.target.value as AttentionFilter)}>
+                      <option value="all">全部</option>
+                      <option value="needs_attention">待处理项</option>
+                      <option value="failure_reason">failureReason 非空</option>
+                      <option value="p2p_fallback">p2p 预期但仍走 relay</option>
+                    </select>
+                  </label>
+                </div>
                 <div className="tab-row">
                   {tunnelTabs.map((tab) => (
                     <button key={tab} type="button" className={activeTab === tab ? "tab active" : "tab"} onClick={() => setActiveTab(tab)}>
@@ -272,7 +350,7 @@ export default function App() {
                     <div className="panel-head small"><h3>{activeTab.toUpperCase()} 列表</h3><span>{tabTunnels.length} 条</span></div>
                     <div className="tunnel-list">
                       {tabTunnels.length === 0 ? <div className="empty-inline">当前机器没有 {activeTab.toUpperCase()} tunnel。</div> : tabTunnels.map((tunnel) => (
-                        <button key={tunnel.id} type="button" className={selectedTunnelId === tunnel.id ? "tunnel-item active" : "tunnel-item"} onClick={() => setSelectedTunnelId(tunnel.id)}>
+                        <button key={tunnel.id} type="button" className={selectedTunnelId === tunnel.id ? tunnelItemClass(tunnel, true) : tunnelItemClass(tunnel, false)} onClick={() => setSelectedTunnelId(tunnel.id)}>
                           <strong>{tunnel.name}</strong>
                           <span>{tunnel.id}</span>
                           <span>{tunnel.transportPolicy || "relay_only"}</span>
@@ -317,4 +395,20 @@ function StateCard({ title, body }: { title: string; body: string }) {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return <div className="metric-box"><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function needsAttention(tunnel: TunnelSpec) {
+  return tunnel.runtimeState === "unavailable" || Boolean(tunnel.lastFailureReason) || isP2PFallbackTunnel(tunnel);
+}
+
+function isP2PFallbackTunnel(tunnel: TunnelSpec) {
+  return tunnel.transportPolicy === "p2p_preferred" && tunnel.runtimePath === "relay";
+}
+
+function tunnelItemClass(tunnel: TunnelSpec, selected: boolean) {
+  const classes = [selected ? "tunnel-item active" : "tunnel-item"];
+  if (!selected && needsAttention(tunnel)) {
+    classes.push("attention-item");
+  }
+  return classes.join(" ");
 }
