@@ -60,14 +60,18 @@ export function resolveLocalNodeBinding(nodes: NodeSummary[], desktopNodeId: str
     if (matched) {
       return {
         node: matched,
+        status: "success",
         sourceLabel: "VITE_DESKTOP_NODE_ID",
         reason: "已通过 VITE_DESKTOP_NODE_ID 明确绑定到本机节点 " + desktopNodeId + "。",
+        nextAction: "当前已经命中明确 nodeId，可继续使用 node-console 查看本机状态与本机隧道。",
       };
     }
     return {
       node: null,
-      sourceLabel: "VITE_DESKTOP_NODE_ID",
-      reason: "当前配置了 VITE_DESKTOP_NODE_ID=" + desktopNodeId + "，但当前节点列表中没有命中该 nodeId。",
+      status: "config_error",
+        sourceLabel: "VITE_DESKTOP_NODE_ID",
+        reason: "当前配置了 VITE_DESKTOP_NODE_ID=" + desktopNodeId + "，但当前节点列表中没有命中该 nodeId。",
+        nextAction: "请检查当前环境变量里的 nodeId 是否写对，或确认该节点已经向当前后端成功上报。",
     };
   }
 
@@ -75,20 +79,26 @@ export function resolveLocalNodeBinding(nodes: NodeSummary[], desktopNodeId: str
   if (managedLocalNodes.length === 1) {
     return {
       node: managedLocalNodes[0],
+      status: "success",
       sourceLabel: "唯一受管 local 节点",
       reason: "当前账号下只检测到一个受管 local 节点，已可确定性绑定。",
+      nextAction: "当前已经通过唯一受管 local 节点完成绑定，可继续使用 node-console。",
     };
   }
   if (managedLocalNodes.length === 0) {
     return {
       node: null,
-      sourceLabel: "尚无绑定来源",
+      status: "unbound",
+      sourceLabel: "无",
       reason: "没有检测到明确可绑定的受管 local 节点。",
+      nextAction: "请优先配置 VITE_DESKTOP_NODE_ID，或让当前账号下只有一个 instanceManaged=true 且 nodeRole=local 的节点。",
     };
   }
   return {
     node: null,
-    sourceLabel: "绑定不唯一",
+    status: "ambiguous",
+    sourceLabel: "唯一受管 local 节点",
     reason: "当前检测到 " + managedLocalNodes.length + " 个受管 local 节点，无法确定本机归属。",
+    nextAction: "请显式配置 VITE_DESKTOP_NODE_ID，避免在多本地节点账号下继续歧义绑定。",
   };
 }

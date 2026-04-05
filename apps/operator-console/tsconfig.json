@@ -18,9 +18,7 @@
   },
   "include": [
     "src",
-    "../../packages/desktop-core/src/types.ts",
-    "../../packages/desktop-core/src/api.ts",
-    "../../packages/desktop-core/src/utils.ts"
+    "../../packages/desktop-core/src"
   ],
   "references": []
 }

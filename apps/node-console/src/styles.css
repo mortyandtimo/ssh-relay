@@ -1,1 +1,14 @@
 @import "../../../packages/desktop-core/src/styles.css";
+
+.binding-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.binding-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.binding-note {
+  margin: 0;
+}

@@ -16,9 +16,6 @@
     "noEmit": true,
     "jsx": "react-jsx"
   },
-  "include": [
-    "src",
-    "../../packages/desktop-core/src"
-  ],
+  "include": ["src"],
   "references": []
 }

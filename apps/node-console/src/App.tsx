@@ -83,6 +83,8 @@ export default function App() {
     [selectedTunnelId, tabTunnels],
   );
   const boundNode = selectedNode;
+  const bindingTone = localBinding.status === "success" ? "good" : localBinding.status === "config_error" ? "danger" : localBinding.status === "ambiguous" ? "warn" : "neutral";
+  const bindingStatusLabel = localBinding.status === "success" ? "成功" : localBinding.status === "config_error" ? "配置错误" : localBinding.status === "ambiguous" ? "不唯一" : "未完成";
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -194,12 +196,26 @@ export default function App() {
               <button className="secondary" type="button" onClick={() => void handleLogout()} disabled={busy === "logout"}>{busy === "logout" ? "退出中..." : "退出"}</button>
             </div>
           </div>
+          <div className="panel binding-panel">
+            <div className="panel-head small">
+              <h2>本机绑定状态</h2>
+              <span className={"status-chip " + bindingTone}>{bindingStatusLabel}</span>
+            </div>
+            <div className="detail-stack binding-grid">
+              <Metric label="绑定来源" value={localBinding.sourceLabel} />
+              <Metric label="当前配置 nodeId" value={desktopNodeId || "未配置"} />
+              <Metric label="当前受管 local 节点数" value={String(nodes.filter((node) => node.nodeRole === "local" && node.instanceManaged).length)} />
+              <Metric label="是否命中绑定节点" value={localBinding.node ? localBinding.node.nodeId : "未命中"} />
+            </div>
+            <div className="banner info binding-note">绑定原因：{localBinding.reason}</div>
+            <div className="banner info binding-note">下一步建议：{localBinding.nextAction}</div>
+          </div>
         </aside>
         <main className="main-stage">
           {error ? <div className="banner error">{error}</div> : null}
           {message ? <div className="banner info">{message}</div> : null}
           {!localBinding.node || !boundNode ? (
-            <StateCard title="尚未完成本机绑定" body={localBinding.reason + " node-console 不允许出现机器选择器，请配置 VITE_DESKTOP_NODE_ID，或让当前账号下只保留唯一受管 local 节点。"} />
+            <StateCard title="尚未完成本机绑定" body={localBinding.reason + " " + localBinding.nextAction + " node-console 不允许出现机器选择器。"} />
           ) : (
             <>
               <section className="panel hero-panel">
