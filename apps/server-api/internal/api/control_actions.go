@@ -180,18 +180,67 @@ func decodeControlActionRequest(r *http.Request) (types.ControlActionRequest, er
 	return req, nil
 }
 
-func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlActionRequest) (types.ControlActionResponse, int) {
+func (s *Server) evaluateControlActionDryRun(ctx context.Context, req types.ControlActionRequest) (types.ControlActionResponse, int) {
 	resp := newControlActionResponse(req)
 	preflight, status := s.evaluateControlPreflight(ctx, req, &resp)
 	resp.Preflight = preflight
 	if status != http.StatusOK {
 		return resp, status
 	}
+	resp.Result = ternaryControlResult(preflight.Allowed, types.ControlResultAccepted, types.ControlResultBlocked)
+	resp.HumanMessage = ternaryString(preflight.Allowed, "preflight 已完成，当前只执行 dry-run。", "preflight 已阻断，当前不允许进入 execute。")
+	resp.DryRunOnly = true
+	resp.ExecutionMode = types.ControlExecutionPlaceholder
+	return resp, http.StatusOK
+}
+
+func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlActionRequest) (types.ControlActionResponse, int) {
+	snapshot, status := s.buildControlTargetSnapshot(ctx, req.TargetKind, req.TargetID, req.SourceSurface)
+	if status != http.StatusOK {
+		resp := newControlActionResponse(req)
+		if status == http.StatusNotFound {
+			resp.Result = types.ControlResultBlocked
+			resp.HumanMessage = targetNotFoundMessage(req.TargetKind)
+			resp.Preflight = types.ControlPreflightSummary{
+				Allowed: false,
+				Items:   []types.ControlCheckItem{},
+				BlockedReasons: []types.ControlBlockedReason{{
+					Code:    types.ControlReasonTargetNotFound,
+					Message: targetNotFoundMessage(req.TargetKind),
+				}},
+			}
+		}
+		return resp, status
+	}
+	actionSnapshot := findActionSnapshot(snapshot, req.ActionKind)
+	if actionSnapshot == nil {
+		resp := newControlActionResponse(req)
+		resp.Result = types.ControlResultBlocked
+		resp.HumanMessage = "当前动作不在本轮白名单内。"
+		resp.Preflight = types.ControlPreflightSummary{
+			Allowed: false,
+			Items:   []types.ControlCheckItem{},
+			BlockedReasons: []types.ControlBlockedReason{{
+				Code:    types.ControlReasonUnsupportedAction,
+				Message: "当前动作不在本轮白名单内。",
+			}},
+		}
+		return resp, http.StatusOK
+	}
+	resp := cloneControlActionResponse(actionSnapshot.response)
+	resp.DryRunOnly = req.DryRun
+	resp.ExecutionMode = snapshot.executionMode
+	resp.PlaceholderOnly = false
+	resp.ExecutionNotes = []types.ControlExecutionNote{}
+	resp.Facts = cloneFacts(resp.Facts)
+	resp.Preflight = clonePreflightSummary(resp.Preflight)
+	resp.SourceSurface = req.SourceSurface
+	resp.TargetID = req.TargetID
+	resp.TargetKind = req.TargetKind
+	resp.ActionKind = req.ActionKind
 	if req.DryRun {
-		resp.Result = ternaryControlResult(preflight.Allowed, types.ControlResultAccepted, types.ControlResultBlocked)
-		resp.HumanMessage = ternaryString(preflight.Allowed, "preflight 已完成，当前只执行 dry-run。", "preflight 已阻断，当前不允许进入 execute。")
 		resp.DryRunOnly = true
-		resp.ExecutionMode = types.ControlExecutionPlaceholder
+		resp.ExecutionMode = snapshot.executionMode
 		return resp, http.StatusOK
 	}
 	return s.executePlaceholderControlAction(resp), http.StatusOK
@@ -208,6 +257,46 @@ func newControlActionResponse(req types.ControlActionRequest) types.ControlActio
 		ExecutionNotes: []types.ControlExecutionNote{},
 		Facts:          map[string]string{},
 	}
+}
+
+func targetNotFoundMessage(targetKind types.ControlTargetKind) string {
+	if targetKind == types.ControlTargetTunnel {
+		return "未找到目标 tunnel。"
+	}
+	return "未找到目标节点。"
+}
+
+func cloneControlActionResponse(in types.ControlActionResponse) types.ControlActionResponse {
+	return types.ControlActionResponse{
+		Result:          in.Result,
+		ActionKind:      in.ActionKind,
+		TargetKind:      in.TargetKind,
+		TargetID:        in.TargetID,
+		SourceSurface:   in.SourceSurface,
+		Preflight:       clonePreflightSummary(in.Preflight),
+		HumanMessage:    in.HumanMessage,
+		DryRunOnly:      in.DryRunOnly,
+		ExecutionMode:   in.ExecutionMode,
+		PlaceholderOnly: in.PlaceholderOnly,
+		ExecutionNotes:  append([]types.ControlExecutionNote{}, in.ExecutionNotes...),
+		Facts:           cloneFacts(in.Facts),
+	}
+}
+
+func clonePreflightSummary(in types.ControlPreflightSummary) types.ControlPreflightSummary {
+	return types.ControlPreflightSummary{
+		Allowed:        in.Allowed,
+		Items:          append([]types.ControlCheckItem{}, in.Items...),
+		BlockedReasons: append([]types.ControlBlockedReason{}, in.BlockedReasons...),
+	}
+}
+
+func cloneFacts(in map[string]string) map[string]string {
+	out := map[string]string{}
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func (s *Server) buildControlActionOptions(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (types.ControlActionOptionsResponse, int) {
@@ -265,7 +354,7 @@ func (s *Server) buildControlTargetSnapshot(ctx context.Context, targetKind type
 		return snapshot, http.StatusBadRequest
 	}
 	for _, actionKind := range actions {
-		resp, status := s.evaluateControlAction(ctx, types.ControlActionRequest{
+		resp, status := s.evaluateControlActionDryRun(ctx, types.ControlActionRequest{
 			ActionKind:    actionKind,
 			TargetKind:    targetKind,
 			TargetID:      targetID,
@@ -475,6 +564,10 @@ func findEvaluatedAction(actions []evaluatedControlAction, actionKind types.Cont
 		}
 	}
 	return nil
+}
+
+func findActionSnapshot(snapshot controlTargetSnapshot, actionKind types.ControlActionKind) *evaluatedControlAction {
+	return findEvaluatedAction(snapshot.actions, actionKind)
 }
 
 func firstBlockedMessage(reasons []types.ControlBlockedReason) string {

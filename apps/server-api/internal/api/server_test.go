@@ -2839,3 +2839,73 @@ func TestControlPanelSummaryNodeAndTunnel(t *testing.T) {
 		}
 	})
 }
+
+func TestControlExecuteConsistencyWithOptionsAndPanels(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-ready-exec", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-ready-exec.service", "instanceProfile": "node-ready-exec", "instanceManaged": "true"})
+	registerNode("node-partial-exec", map[string]string{"deploymentMode": "managed", "instanceManaged": "true"})
+	registerNode("node-blocked-exec", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-blocked-exec.service", "instanceProfile": "node-blocked-exec", "instanceManaged": "true", "isolated": "true"})
+
+	for _, item := range []types.TunnelSpec{
+		{ID: "tunnel-active-exec", NodeID: "node-ready-exec", Name: "tunnel-active-exec", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 23010, Metadata: map[string]string{"nodeId": "node-ready-exec"}},
+		{ID: "tunnel-paused-exec", NodeID: "node-ready-exec", Name: "tunnel-paused-exec", Type: "tcp", Status: "paused", TargetHost: "127.0.0.1", TargetPort: 8081, PublicPort: 23011, Metadata: map[string]string{"nodeId": "node-ready-exec"}},
+	} {
+		if _, err := server.store.CreateTunnel(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	execAction := func(payload map[string]any) types.ControlActionResponse {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+		var out types.ControlActionResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	readyNodeExecute := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-ready-exec", "sourceSurface": "node_console", "dryRun": false})
+	if readyNodeExecute.Result != types.ControlResultAccepted || !readyNodeExecute.PlaceholderOnly || readyNodeExecute.ExecutionMode != types.ControlExecutionPlaceholder {
+		t.Fatalf("expected ready node execute to use placeholder path, got %+v", readyNodeExecute)
+	}
+
+	blockedNodeExecute := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-blocked-exec", "sourceSurface": "operator_console", "dryRun": false})
+	if blockedNodeExecute.Result != types.ControlResultBlocked || len(blockedNodeExecute.Preflight.BlockedReasons) == 0 || blockedNodeExecute.Preflight.BlockedReasons[0].Code != types.ControlReasonNodeIsolated {
+		t.Fatalf("expected isolated node execute to stay blocked, got %+v", blockedNodeExecute)
+	}
+
+	partialNodeExecute := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-partial-exec", "sourceSurface": "operator_console", "dryRun": false})
+	if partialNodeExecute.Result != types.ControlResultBlocked || len(partialNodeExecute.Preflight.BlockedReasons) == 0 || partialNodeExecute.Preflight.BlockedReasons[0].Code != types.ControlReasonMissingServiceUnit {
+		t.Fatalf("expected partial node execute to stay blocked for missing service unit, got %+v", partialNodeExecute)
+	}
+
+	readyTunnelExecute := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-active-exec", "sourceSurface": "operator_console", "dryRun": false})
+	if readyTunnelExecute.Result != types.ControlResultAccepted || !readyTunnelExecute.PlaceholderOnly || readyTunnelExecute.ExecutionMode != types.ControlExecutionPlaceholder {
+		t.Fatalf("expected active tunnel pause execute to use placeholder path, got %+v", readyTunnelExecute)
+	}
+
+	blockedTunnelExecute := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-paused-exec", "sourceSurface": "operator_console", "dryRun": false})
+	if blockedTunnelExecute.Result != types.ControlResultBlocked || len(blockedTunnelExecute.Preflight.BlockedReasons) == 0 || blockedTunnelExecute.Preflight.BlockedReasons[0].Code != types.ControlReasonTunnelStateConflict {
+		t.Fatalf("expected paused tunnel pause execute to stay blocked, got %+v", blockedTunnelExecute)
+	}
+}
