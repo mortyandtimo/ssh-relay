@@ -76,6 +76,12 @@ export function createDesktopApi(apiBaseUrl = "") {
     loadTunnels() {
       return requestJSON<TunnelListResponse>("/api/tunnels");
     },
+    updateTunnel(id: string, payload: Record<string, unknown>) {
+      return requestJSON("/api/tunnels/" + encodeURIComponent(id), {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+    },
     async loadDesktopData() {
       const [nodes, tunnels] = await Promise.all([this.loadNodes(), this.loadTunnels()]);
       return { nodes: nodes.items, tunnels: tunnels.items };
