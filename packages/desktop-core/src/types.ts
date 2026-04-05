@@ -95,3 +95,51 @@ export type BootstrapStatusResponse = {
 };
 
 export type TunnelTypeTab = "tcp" | "udp" | "http" | "https" | "socks5";
+
+export type ControlActionKind = "restart_agent" | "isolate_node" | "release_node" | "pause_tunnel" | "resume_tunnel";
+export type ControlTargetKind = "node" | "tunnel";
+export type ControlSurface = "node_console" | "operator_console";
+export type ControlResult = "accepted" | "rejected" | "blocked" | "not_supported";
+export type ControlExecutionMode = "placeholder" | "real";
+export type ControlCheckState = "pass" | "missing" | "blocked";
+
+export type ControlCheckItem = {
+  code: string;
+  label: string;
+  state: ControlCheckState;
+  message: string;
+};
+
+export type ControlBlockedReason = {
+  code: string;
+  message: string;
+};
+
+export type ControlPreflightSummary = {
+  allowed: boolean;
+  items: ControlCheckItem[];
+  blockedReasons?: ControlBlockedReason[];
+};
+
+export type ControlActionRequest = {
+  actionKind: ControlActionKind;
+  targetKind: ControlTargetKind;
+  targetId: string;
+  sourceSurface: ControlSurface;
+  dryRun: boolean;
+  note?: string;
+  requestedAt?: string;
+};
+
+export type ControlActionResponse = {
+  result: ControlResult;
+  actionKind: ControlActionKind;
+  targetKind: ControlTargetKind;
+  targetId: string;
+  sourceSurface: ControlSurface;
+  preflight: ControlPreflightSummary;
+  humanMessage: string;
+  dryRunOnly: boolean;
+  executionMode: ControlExecutionMode;
+  facts?: Record<string, string>;
+};

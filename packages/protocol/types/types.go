@@ -102,6 +102,115 @@ type TunnelProbeResult struct {
 	TargetEntry string    `json:"targetEntry"`
 }
 
+type ControlActionKind string
+
+const (
+	ControlActionRestartAgent ControlActionKind = "restart_agent"
+	ControlActionIsolateNode  ControlActionKind = "isolate_node"
+	ControlActionReleaseNode  ControlActionKind = "release_node"
+	ControlActionPauseTunnel  ControlActionKind = "pause_tunnel"
+	ControlActionResumeTunnel ControlActionKind = "resume_tunnel"
+)
+
+type ControlTargetKind string
+
+const (
+	ControlTargetNode   ControlTargetKind = "node"
+	ControlTargetTunnel ControlTargetKind = "tunnel"
+)
+
+type ControlSurface string
+
+const (
+	ControlSurfaceNodeConsole     ControlSurface = "node_console"
+	ControlSurfaceOperatorConsole ControlSurface = "operator_console"
+)
+
+type ControlResult string
+
+const (
+	ControlResultAccepted     ControlResult = "accepted"
+	ControlResultRejected     ControlResult = "rejected"
+	ControlResultBlocked      ControlResult = "blocked"
+	ControlResultNotSupported ControlResult = "not_supported"
+)
+
+type ControlExecutionMode string
+
+const (
+	ControlExecutionPlaceholder ControlExecutionMode = "placeholder"
+	ControlExecutionReal        ControlExecutionMode = "real"
+)
+
+type ControlReasonCode string
+
+const (
+	ControlReasonNodeNotBound          ControlReasonCode = "node_not_bound"
+	ControlReasonTargetNotFound        ControlReasonCode = "target_not_found"
+	ControlReasonNodeNotSelected       ControlReasonCode = "node_not_selected"
+	ControlReasonTunnelNotSelected     ControlReasonCode = "tunnel_not_selected"
+	ControlReasonNodeOffline           ControlReasonCode = "node_offline"
+	ControlReasonNodeIsolated          ControlReasonCode = "node_isolated"
+	ControlReasonNodeNotIsolated       ControlReasonCode = "node_not_isolated"
+	ControlReasonUnmanagedInstance     ControlReasonCode = "unmanaged_instance"
+	ControlReasonMissingDeploymentMode ControlReasonCode = "missing_deployment_mode"
+	ControlReasonMissingServiceUnit    ControlReasonCode = "missing_service_unit"
+	ControlReasonMissingInstanceProfile ControlReasonCode = "missing_instance_profile"
+	ControlReasonUnsupportedSurface    ControlReasonCode = "unsupported_surface"
+	ControlReasonUnsupportedAction     ControlReasonCode = "unsupported_action"
+	ControlReasonPlaceholderOnly       ControlReasonCode = "placeholder_execution_only"
+	ControlReasonTunnelStateConflict   ControlReasonCode = "tunnel_state_conflict"
+)
+
+type ControlCheckState string
+
+const (
+	ControlCheckPass    ControlCheckState = "pass"
+	ControlCheckMissing ControlCheckState = "missing"
+	ControlCheckBlocked ControlCheckState = "blocked"
+)
+
+type ControlCheckItem struct {
+	Code    string            `json:"code"`
+	Label   string            `json:"label"`
+	State   ControlCheckState `json:"state"`
+	Message string            `json:"message"`
+}
+
+type ControlBlockedReason struct {
+	Code    ControlReasonCode `json:"code"`
+	Message string            `json:"message"`
+}
+
+type ControlPreflightSummary struct {
+	Allowed        bool                   `json:"allowed"`
+	Items          []ControlCheckItem     `json:"items"`
+	BlockedReasons []ControlBlockedReason `json:"blockedReasons,omitempty"`
+}
+
+type ControlActionRequest struct {
+	ActionKind    ControlActionKind `json:"actionKind"`
+	TargetKind    ControlTargetKind `json:"targetKind"`
+	TargetID      string            `json:"targetId"`
+	SourceSurface ControlSurface    `json:"sourceSurface"`
+	DryRun        bool              `json:"dryRun"`
+	Note          string            `json:"note,omitempty"`
+	RequestedAt   time.Time         `json:"requestedAt,omitempty"`
+}
+
+type ControlActionResponse struct {
+	Result        ControlResult         `json:"result"`
+	ActionKind    ControlActionKind     `json:"actionKind"`
+	TargetKind    ControlTargetKind     `json:"targetKind"`
+	TargetID      string                `json:"targetId"`
+	SourceSurface ControlSurface        `json:"sourceSurface"`
+	Preflight     ControlPreflightSummary `json:"preflight"`
+	HumanMessage  string                `json:"humanMessage"`
+	DryRunOnly    bool                  `json:"dryRunOnly"`
+	ExecutionMode ControlExecutionMode  `json:"executionMode,omitempty"`
+	Facts         map[string]string     `json:"facts,omitempty"`
+}
+
 type TunnelSpec struct {
 	ID                   string             `json:"id"`
 	Name                 string             `json:"name"`

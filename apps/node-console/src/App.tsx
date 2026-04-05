@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
-import type { NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
+import type { ControlActionRequest, ControlActionResponse, NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
 import { capabilitySummary, checkStateLabel, checkStateTone, formatDate, nodeAgentDeploymentLabel, publicEntry, resolveLocalNodeBinding, runtimeLabel, statusClass, tunnelTabs, type SafetyCheckItem } from "../../../packages/desktop-core/src/utils";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
@@ -29,6 +29,8 @@ export default function App() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
+  const [controlNote, setControlNote] = useState("");
+  const [controlResult, setControlResult] = useState<ControlActionResponse | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState("");
   const refreshInFlightRef = useRef(false);
@@ -255,6 +257,30 @@ export default function App() {
     }
   }
 
+  async function runControlAction(actionKind: ControlActionRequest["actionKind"], targetKind: ControlActionRequest["targetKind"], targetId: string, dryRun: boolean) {
+    setBusy("control-action");
+    setError("");
+    setMessage("");
+    try {
+      const result = await api.controlAction({
+        actionKind,
+        targetKind,
+        targetId,
+        sourceSurface: "node_console",
+        dryRun,
+        note: controlNote.trim(),
+        requestedAt: new Date().toISOString(),
+      });
+      setControlResult(result);
+      setMessage(result.humanMessage);
+      await refreshConsoleData(false, "manual");
+    } catch (controlError) {
+      setError(controlError instanceof Error ? controlError.message : "控制动作请求失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
   if (bootstrapRequired === null) {
     if (error) return <Shell><StateCard title="node-console 初始化失败" body={error} /></Shell>;
     return <Shell><StateCard title="node-console 初始化中" body="正在读取现有管理面认证状态和后端基础数据。" /></Shell>;
@@ -371,8 +397,50 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+                <label className="control-note-field">
+                  <span>本机动作备注</span>
+                  <textarea value={controlNote} onChange={(event) => setControlNote(event.target.value)} placeholder="可选：记录为什么要做本机动作预检/占位执行" />
+                </label>
+                <div className="button-row">
+                  <button className="secondary" type="button" disabled={!boundNode || busy === "control-action"} onClick={() => void runControlAction("restart_agent", "node", boundNode.nodeId, true)}>{busy === "control-action" ? "处理中..." : "预检 restart_agent"}</button>
+                  <button className="secondary" type="button" disabled={!boundNode || busy === "control-action"} onClick={() => void runControlAction("restart_agent", "node", boundNode.nodeId, false)}>{busy === "control-action" ? "处理中..." : "占位执行 restart_agent"}</button>
+                </div>
                 <div className="banner info">当前为什么还不能执行未来本机控制动作：只要本机绑定、受管实例、serviceUnit、online、未隔离这几项中任一不满足，就应继续阻断。</div>
                 <div className="banner info">下一步建议：先补齐本机绑定与受管实例信息，再进入真正控制命令实现阶段；当前这轮只做确认层，不执行动作。</div>
+                {controlResult ? (
+                  <div className="control-result-card">
+                    <div className="check-head">
+                      <strong>最近一次控制契约结果</strong>
+                      <span className={"status-chip " + (controlResult.result === "accepted" ? "good" : controlResult.result === "blocked" ? "danger" : "warn")}>{controlResult.result}</span>
+                    </div>
+                    <p className="copy">{controlResult.humanMessage}</p>
+                    <p className="copy">executionMode: <code>{controlResult.executionMode}</code> / dryRunOnly: <code>{String(controlResult.dryRunOnly)}</code></p>
+                    <div className="check-list compact-check-list">
+                      {controlResult.preflight.items.map((item) => (
+                        <div key={item.code} className="check-item">
+                          <div className="check-head">
+                            <strong>{item.label}</strong>
+                            <span className={"status-chip " + checkStateTone(item.state)}>{checkStateLabel(item.state)}</span>
+                          </div>
+                          <p className="copy">{item.message}</p>
+                        </div>
+                      ))}
+                    </div>
+                    {controlResult.preflight.blockedReasons && controlResult.preflight.blockedReasons.length > 0 ? (
+                      <div className="check-list compact-check-list">
+                        {controlResult.preflight.blockedReasons.map((reason) => (
+                          <div key={reason.code} className="check-item">
+                            <div className="check-head">
+                              <strong>{reason.code}</strong>
+                              <span className="status-chip danger">阻断</span>
+                            </div>
+                            <p className="copy">{reason.message}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </section>
               <section className="panel workbench-panel">
                 <div className="panel-head">

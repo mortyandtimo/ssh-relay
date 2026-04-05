@@ -67,3 +67,35 @@
   gap: 12px;
   margin-bottom: 8px;
 }
+
+.control-note-field {
+  display: grid;
+  gap: 8px;
+}
+
+.control-note-field textarea {
+  min-height: 88px;
+  resize: vertical;
+  border-radius: 14px;
+  border: 1px solid rgba(17, 34, 56, 0.14);
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.9);
+  font: inherit;
+}
+
+.control-result-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(17, 34, 56, 0.05);
+}
+
+.compact-check-list {
+  gap: 10px;
+}
+
+.wrap-actions {
+  display: flex;
+  flex-wrap: wrap;
+}

@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
-import type { NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
+import type { ControlActionRequest, ControlActionResponse, NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "../../../packages/desktop-core/src/types";
 import { capabilitySummary, checkStateLabel, checkStateTone, formatDate, nodeAgentDeploymentLabel, publicEntry, runtimeLabel, statusClass, tunnelTabs, type SafetyCheckItem } from "../../../packages/desktop-core/src/utils";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
@@ -35,6 +35,8 @@ export default function App() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
+  const [controlNote, setControlNote] = useState("");
+  const [controlResult, setControlResult] = useState<ControlActionResponse | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState("");
   const refreshInFlightRef = useRef(false);
@@ -310,6 +312,30 @@ export default function App() {
     }
   }
 
+  async function runControlAction(actionKind: ControlActionRequest["actionKind"], targetKind: ControlActionRequest["targetKind"], targetId: string, dryRun: boolean) {
+    setBusy("control-action");
+    setError("");
+    setMessage("");
+    try {
+      const result = await api.controlAction({
+        actionKind,
+        targetKind,
+        targetId,
+        sourceSurface: "operator_console",
+        dryRun,
+        note: controlNote.trim(),
+        requestedAt: new Date().toISOString(),
+      });
+      setControlResult(result);
+      setMessage(result.humanMessage);
+      await refreshConsoleData(false, "manual");
+    } catch (controlError) {
+      setError(controlError instanceof Error ? controlError.message : "控制动作请求失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
   if (bootstrapRequired === null) {
     if (error) return <Shell><StateCard title="operator-console 初始化失败" body={error} /></Shell>;
     return <Shell><StateCard title="operator-console 初始化中" body="正在读取现有管理面认证状态和后端基础数据。" /></Shell>;
@@ -423,8 +449,52 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+                <label className="control-note-field">
+                  <span>远程动作备注</span>
+                  <textarea value={controlNote} onChange={(event) => setControlNote(event.target.value)} placeholder="可选：记录为什么要做远程动作预检/占位执行" />
+                </label>
+                <div className="button-row wrap-actions">
+                  <button className="secondary" type="button" disabled={!selectedNode || busy === "control-action"} onClick={() => void runControlAction("restart_agent", "node", selectedNode.nodeId, true)}>{busy === "control-action" ? "处理中..." : "预检 restart_agent"}</button>
+                  <button className="secondary" type="button" disabled={!selectedNode || busy === "control-action"} onClick={() => void runControlAction("restart_agent", "node", selectedNode.nodeId, false)}>{busy === "control-action" ? "处理中..." : "占位执行 restart_agent"}</button>
+                  <button className="secondary" type="button" disabled={!selectedNode || busy === "control-action"} onClick={() => void runControlAction("isolate_node", "node", selectedNode.nodeId, true)}>{busy === "control-action" ? "处理中..." : "预检 isolate_node"}</button>
+                  <button className="secondary" type="button" disabled={!selectedNode || busy === "control-action"} onClick={() => void runControlAction("release_node", "node", selectedNode.nodeId, true)}>{busy === "control-action" ? "处理中..." : "预检 release_node"}</button>
+                </div>
                 <div className="banner info">当前为什么还不能执行未来远程控制动作：只要机器未选中、offline、isolated、未受管、未上报 serviceUnit 中任一成立，就应继续阻断。</div>
                 <div className="banner info">下一步建议：先补齐机器在线性、受管实例信息和 serviceUnit 上报，再进入真正控制命令实现阶段；当前这轮只做确认层，不执行动作。</div>
+                {controlResult ? (
+                  <div className="control-result-card">
+                    <div className="check-head">
+                      <strong>最近一次控制契约结果</strong>
+                      <span className={"status-chip " + (controlResult.result === "accepted" ? "good" : controlResult.result === "blocked" ? "danger" : "warn")}>{controlResult.result}</span>
+                    </div>
+                    <p className="copy">{controlResult.humanMessage}</p>
+                    <p className="copy">executionMode: <code>{controlResult.executionMode}</code> / dryRunOnly: <code>{String(controlResult.dryRunOnly)}</code></p>
+                    <div className="check-list compact-check-list">
+                      {controlResult.preflight.items.map((item) => (
+                        <div key={item.code} className="check-item">
+                          <div className="check-head">
+                            <strong>{item.label}</strong>
+                            <span className={"status-chip " + checkStateTone(item.state)}>{checkStateLabel(item.state)}</span>
+                          </div>
+                          <p className="copy">{item.message}</p>
+                        </div>
+                      ))}
+                    </div>
+                    {controlResult.preflight.blockedReasons && controlResult.preflight.blockedReasons.length > 0 ? (
+                      <div className="check-list compact-check-list">
+                        {controlResult.preflight.blockedReasons.map((reason) => (
+                          <div key={reason.code} className="check-item">
+                            <div className="check-head">
+                              <strong>{reason.code}</strong>
+                              <span className="status-chip danger">阻断</span>
+                            </div>
+                            <p className="copy">{reason.message}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </section>
               <section className="panel workbench-panel">
                 <div className="panel-head"><div><h2>按隧道类型切换的工作区</h2><p className="copy">进入某台机器后，复用按类型切换的工作区与 tunnel 详情区。</p></div></div>
@@ -509,6 +579,11 @@ export default function App() {
                           {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>probePath</span><input value={editForm?.probePath || ""} onChange={(event) => setEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 probePath。</div>}
                           <label><span>transportPolicy</span><select value={editForm?.transportPolicy || "relay_only"} onChange={(event) => setEditForm((current) => current ? { ...current, transportPolicy: event.target.value } : current)}><option value="relay_only">relay_only</option><option value="p2p_preferred">p2p_preferred</option></select></label>
                           <div className="weak-note">transportPolicy 只代表配置意图。当前 runtimePath / runtimeState / lastFailureReason 仍然是运行事实，这轮编辑不会把它们伪装成已经改变。</div>
+                          <div className="button-row wrap-actions">
+                            <button className="secondary" type="button" disabled={busy === "control-action"} onClick={() => void runControlAction("pause_tunnel", "tunnel", selectedTunnel.id, true)}>{busy === "control-action" ? "处理中..." : "预检 pause_tunnel"}</button>
+                            <button className="secondary" type="button" disabled={busy === "control-action"} onClick={() => void runControlAction("pause_tunnel", "tunnel", selectedTunnel.id, false)}>{busy === "control-action" ? "处理中..." : "占位执行 pause_tunnel"}</button>
+                            <button className="secondary" type="button" disabled={busy === "control-action"} onClick={() => void runControlAction("resume_tunnel", "tunnel", selectedTunnel.id, true)}>{busy === "control-action" ? "处理中..." : "预检 resume_tunnel"}</button>
+                          </div>
                           <button type="submit" disabled={busy === "save-tunnel"}>{busy === "save-tunnel" ? "保存中..." : "保存当前 tunnel"}</button>
                         </form>
                       </div>
