@@ -2908,4 +2908,7 @@ func TestControlExecuteConsistencyWithOptionsAndPanels(t *testing.T) {
 	if blockedTunnelExecute.Result != types.ControlResultBlocked || len(blockedTunnelExecute.Preflight.BlockedReasons) == 0 || blockedTunnelExecute.Preflight.BlockedReasons[0].Code != types.ControlReasonTunnelStateConflict {
 		t.Fatalf("expected paused tunnel pause execute to stay blocked, got %+v", blockedTunnelExecute)
 	}
+	if _, ok := server.controlExecutor.(placeholderControlExecutor); !ok {
+		t.Fatalf("expected default control executor to remain placeholder, got %T", server.controlExecutor)
+	}
 }

@@ -38,6 +38,39 @@ type controlTargetSnapshot struct {
 	checks            []types.ControlCheckItem
 }
 
+type controlExecutor interface {
+	execute(ctx context.Context, snapshot controlTargetSnapshot, action evaluatedControlAction) types.ControlActionResponse
+}
+
+type placeholderControlExecutor struct{}
+
+func newPlaceholderControlExecutor() controlExecutor {
+	return placeholderControlExecutor{}
+}
+
+func (placeholderControlExecutor) execute(_ context.Context, snapshot controlTargetSnapshot, action evaluatedControlAction) types.ControlActionResponse {
+	resp := cloneControlActionResponse(action.response)
+	resp.DryRunOnly = false
+	resp.ExecutionMode = snapshot.executionMode
+	resp.PlaceholderOnly = false
+	resp.ExecutionNotes = []types.ControlExecutionNote{}
+	resp.Preflight = clonePreflightSummary(resp.Preflight)
+	resp.Facts = cloneFacts(resp.Facts)
+	if !resp.Preflight.Allowed {
+		resp.Result = types.ControlResultBlocked
+		resp.HumanMessage = "execute 已被预检阻断。"
+		return resp
+	}
+	resp.Result = types.ControlResultAccepted
+	resp.HumanMessage = "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。"
+	resp.PlaceholderOnly = true
+	resp.ExecutionNotes = append(resp.ExecutionNotes, types.ControlExecutionNote{
+		Code:    types.ControlReasonPlaceholderOnly,
+		Message: "当前还没有接入真实系统执行器。",
+	})
+	return resp
+}
+
 func newControlPreflightBuilder() *controlPreflightBuilder {
 	return &controlPreflightBuilder{
 		summary: types.ControlPreflightSummary{
@@ -243,7 +276,7 @@ func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlAct
 		resp.ExecutionMode = snapshot.executionMode
 		return resp, http.StatusOK
 	}
-	return s.executePlaceholderControlAction(resp), http.StatusOK
+	return s.controlExecutor.execute(ctx, snapshot, *actionSnapshot), http.StatusOK
 }
 
 func newControlActionResponse(req types.ControlActionRequest) types.ControlActionResponse {
@@ -805,27 +838,6 @@ func ternaryTunnelCheck(status string) types.ControlCheckState {
 		return types.ControlCheckMissing
 	}
 	return types.ControlCheckPass
-}
-
-func (s *Server) executePlaceholderControlAction(resp types.ControlActionResponse) types.ControlActionResponse {
-	if !resp.Preflight.Allowed {
-		resp.Result = types.ControlResultBlocked
-		resp.HumanMessage = "execute 已被预检阻断。"
-		resp.DryRunOnly = false
-		resp.ExecutionMode = types.ControlExecutionPlaceholder
-		resp.PlaceholderOnly = false
-		return resp
-	}
-	resp.Result = types.ControlResultAccepted
-	resp.HumanMessage = "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。"
-	resp.DryRunOnly = false
-	resp.ExecutionMode = types.ControlExecutionPlaceholder
-	resp.PlaceholderOnly = true
-	resp.ExecutionNotes = append(resp.ExecutionNotes, types.ControlExecutionNote{
-		Code:    types.ControlReasonPlaceholderOnly,
-		Message: "当前还没有接入真实系统执行器。",
-	})
-	return resp
 }
 
 func populateNodeControlFacts(resp *types.ControlActionResponse, node types.NodeSummary) {

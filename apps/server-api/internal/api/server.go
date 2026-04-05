@@ -41,6 +41,7 @@ type Server struct {
 	version              string
 	startedAt            time.Time
 	store                store.Store
+	controlExecutor      controlExecutor
 	relayTCPRuntimeURL   string
 	httpClient           *http.Client
 	mux                  *http.ServeMux
@@ -69,6 +70,7 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 		allowedOrigins:       parseAllowedOrigins(os.Getenv("SERVER_API_ALLOWED_ORIGINS")),
 		authCookiesSecure:    parseBoolEnv(os.Getenv("SERVER_API_AUTH_COOKIES_SECURE")),
 	}
+	s.controlExecutor = newPlaceholderControlExecutor()
 	s.routes()
 	return s
 }
