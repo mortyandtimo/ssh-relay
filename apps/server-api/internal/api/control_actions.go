@@ -65,6 +65,8 @@ type controlExecutionResult struct {
 }
 
 type controlExecutor interface {
+	// execute only handles already-allowed execute paths. Blocked and dry-run
+	// requests are resolved in evaluateControlAction before the executor seam.
 	execute(ctx context.Context, plan controlExecutionPlan) controlExecutionResult
 }
 
@@ -75,15 +77,6 @@ func newPlaceholderControlExecutor() controlExecutor {
 }
 
 func (placeholderControlExecutor) execute(_ context.Context, plan controlExecutionPlan) controlExecutionResult {
-	if !plan.preflight.Allowed {
-		return controlExecutionResult{
-			result:          types.ControlResultBlocked,
-			humanMessage:    "execute 已被预检阻断。",
-			executionMode:   plan.executionMode,
-			placeholderOnly: false,
-			executionNotes:  []types.ControlExecutionNote{},
-		}
-	}
 	return controlExecutionResult{
 		result:          types.ControlResultAccepted,
 		humanMessage:    "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。",
@@ -302,6 +295,9 @@ func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlAct
 		return resp, http.StatusOK
 	}
 	plan := buildExecutionPlan(req, snapshot, *actionSnapshot)
+	if !plan.preflight.Allowed {
+		return buildControlActionResponse(req, plan, blockedExecutionResult(plan)), http.StatusOK
+	}
 	result := s.controlExecutor.execute(ctx, plan)
 	return buildControlActionResponse(req, plan, result), http.StatusOK
 }
@@ -395,6 +391,16 @@ func buildControlActionResponse(req types.ControlActionRequest, plan controlExec
 	resp.Facts = cloneFacts(plan.targetFacts)
 	resp.Preflight = clonePreflightSummary(plan.preflight)
 	return resp
+}
+
+func blockedExecutionResult(plan controlExecutionPlan) controlExecutionResult {
+	return controlExecutionResult{
+		result:          types.ControlResultBlocked,
+		humanMessage:    "execute 已被预检阻断。",
+		executionMode:   plan.executionMode,
+		placeholderOnly: false,
+		executionNotes:  []types.ControlExecutionNote{},
+	}
 }
 
 func (s *Server) buildControlActionOptions(ctx context.Context, targetKind types.ControlTargetKind, targetID string, surface types.ControlSurface) (types.ControlActionOptionsResponse, int) {

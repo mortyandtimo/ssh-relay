@@ -18,6 +18,20 @@ import (
 	"github.com/25743/cloud-relay-platform/packages/protocol/types"
 )
 
+type spyControlExecutor struct {
+	callCount   int
+	lastPlan    controlExecutionPlan
+	hasLastPlan bool
+	result      controlExecutionResult
+}
+
+func (s *spyControlExecutor) execute(_ context.Context, plan controlExecutionPlan) controlExecutionResult {
+	s.callCount++
+	s.lastPlan = plan
+	s.hasLastPlan = true
+	return s.result
+}
+
 func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
@@ -2979,9 +2993,91 @@ func TestControlExecuteConsistencyWithOptionsAndPanels(t *testing.T) {
 		t.Fatalf("translator dropped target facts: %+v", readyTranslated.Facts)
 	}
 
-	blockedExecResult := server.controlExecutor.execute(context.Background(), blockedPlan)
-	blockedTranslated := buildControlActionResponse(blockedPlan.actionEvaluation.request, blockedPlan, blockedExecResult)
+	blockedTranslated := buildControlActionResponse(blockedPlan.actionEvaluation.request, blockedPlan, blockedExecutionResult(blockedPlan))
 	if blockedTranslated.Result != types.ControlResultBlocked || blockedTranslated.PlaceholderOnly || len(blockedTranslated.Preflight.BlockedReasons) == 0 || blockedTranslated.Preflight.BlockedReasons[0].Code != types.ControlReasonNodeIsolated {
 		t.Fatalf("unexpected translated blocked execute response: %+v", blockedTranslated)
+	}
+}
+
+func TestControlExecuteOnlyCallsExecutorForAllowedNonDryRun(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-exec-ready", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-exec-ready.service", "instanceProfile": "node-exec-ready", "instanceManaged": "true"})
+	registerNode("node-exec-blocked", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-exec-blocked.service", "instanceProfile": "node-exec-blocked", "instanceManaged": "true", "isolated": "true"})
+
+	spy := &spyControlExecutor{result: controlExecutionResult{
+		result:          types.ControlResultAccepted,
+		humanMessage:    "spy accepted placeholder execute",
+		executionMode:   types.ControlExecutionPlaceholder,
+		placeholderOnly: true,
+		executionNotes: []types.ControlExecutionNote{{
+			Code:    types.ControlReasonPlaceholderOnly,
+			Message: "spy placeholder executor",
+		}},
+	}}
+	server.controlExecutor = spy
+
+	execAction := func(payload map[string]any) types.ControlActionResponse {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+		var out types.ControlActionResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	dryRunResp := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-exec-ready", "sourceSurface": "node_console", "dryRun": true})
+	if spy.callCount != 0 {
+		t.Fatalf("expected dry-run to skip executor, got %d calls", spy.callCount)
+	}
+	if dryRunResp.Result != types.ControlResultAccepted || !dryRunResp.DryRunOnly || dryRunResp.PlaceholderOnly || len(dryRunResp.ExecutionNotes) != 0 {
+		t.Fatalf("unexpected dry-run response: %+v", dryRunResp)
+	}
+
+	blockedResp := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-exec-blocked", "sourceSurface": "operator_console", "dryRun": false})
+	if spy.callCount != 0 {
+		t.Fatalf("expected blocked execute to skip executor, got %d calls", spy.callCount)
+	}
+	if blockedResp.Result != types.ControlResultBlocked || blockedResp.PlaceholderOnly || len(blockedResp.ExecutionNotes) != 0 {
+		t.Fatalf("unexpected blocked execute response: %+v", blockedResp)
+	}
+	if len(blockedResp.Preflight.BlockedReasons) == 0 || blockedResp.Preflight.BlockedReasons[0].Code != types.ControlReasonNodeIsolated {
+		t.Fatalf("expected blocked execute to preserve stable blocked reasons, got %+v", blockedResp.Preflight.BlockedReasons)
+	}
+
+	allowedResp := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-exec-ready", "sourceSurface": "node_console", "dryRun": false})
+	if spy.callCount != 1 {
+		t.Fatalf("expected allowed execute to call executor once, got %d calls", spy.callCount)
+	}
+	if !spy.hasLastPlan || !spy.lastPlan.preflight.Allowed || spy.lastPlan.actionKind != types.ControlActionRestartAgent {
+		t.Fatalf("expected executor to receive allowed restart plan, got %+v", spy.lastPlan)
+	}
+	if allowedResp.Result != types.ControlResultAccepted || !allowedResp.PlaceholderOnly || allowedResp.ExecutionMode != types.ControlExecutionPlaceholder || len(allowedResp.ExecutionNotes) == 0 {
+		t.Fatalf("unexpected allowed execute response: %+v", allowedResp)
+	}
+	if allowedResp.HumanMessage != "spy accepted placeholder execute" || allowedResp.ExecutionNotes[0].Message != "spy placeholder executor" {
+		t.Fatalf("expected allowed execute to use executor output, got %+v", allowedResp)
+	}
+	if _, ok := NewServer("test", store.NewInMemoryStore(), "").controlExecutor.(placeholderControlExecutor); !ok {
+		t.Fatalf("expected default control executor to remain placeholder")
 	}
 }
