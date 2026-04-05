@@ -21,6 +21,7 @@ type controlPreflightBuilder struct {
 type evaluatedControlAction struct {
 	request  types.ControlActionRequest
 	response types.ControlActionResponse
+	execute  controlExecutionResult
 	status   int
 }
 
@@ -746,34 +747,116 @@ func (s *Server) buildControlTargetSnapshot(ctx context.Context, targetKind type
 		return snapshot, http.StatusBadRequest
 	}
 	for _, actionKind := range actions {
-		resp, status := s.evaluateControlActionDryRun(ctx, types.ControlActionRequest{
+		req := types.ControlActionRequest{
 			ActionKind:    actionKind,
 			TargetKind:    targetKind,
 			TargetID:      targetID,
 			SourceSurface: surface,
 			DryRun:        true,
 			RequestedAt:   time.Now().UTC(),
-		})
+		}
+		resp, status := s.evaluateControlActionDryRun(ctx, req)
 		if status != http.StatusOK {
 			return snapshot, status
 		}
-		snapshot.actions = append(snapshot.actions, evaluatedControlAction{
-			request: types.ControlActionRequest{
+		evaluated := evaluatedControlAction{
+			request:  req,
+			response: resp,
+			status:   status,
+		}
+		if resp.Preflight.Allowed {
+			plan := buildExecutionPlan(types.ControlActionRequest{
 				ActionKind:    actionKind,
 				TargetKind:    targetKind,
 				TargetID:      targetID,
 				SourceSurface: surface,
-				DryRun:        true,
-			},
-			response: resp,
-			status:   status,
+				RequestedAt:   req.RequestedAt,
+			}, snapshot, evaluated)
+			evaluated.execute = s.previewExecutionOutcome(ctx, plan)
+		} else {
+			plan := buildExecutionPlan(types.ControlActionRequest{
+				ActionKind:    actionKind,
+				TargetKind:    targetKind,
+				TargetID:      targetID,
+				SourceSurface: surface,
+				RequestedAt:   req.RequestedAt,
+			}, snapshot, evaluated)
+			evaluated.execute = blockedExecutionResult(plan)
+		}
+		snapshot.actions = append(snapshot.actions, evaluatedControlAction{
+			request:  evaluated.request,
+			response: evaluated.response,
+			execute:  evaluated.execute,
+			status:   evaluated.status,
 		})
 	}
+	snapshot.executionMode, snapshot.placeholderOnly = snapshotExecutionSemantics(snapshot.actions, snapshot.recommendedAction)
 	snapshot.recommendedAction = recommendedActionForSnapshot(targetKind, snapshot.actions)
+	snapshot.executionMode, snapshot.placeholderOnly = snapshotExecutionSemantics(snapshot.actions, snapshot.recommendedAction)
 	snapshot.checks, snapshot.blockedReasons = aggregateTargetChecks(targetKind, snapshot.actions, snapshot.recommendedAction)
 	snapshot.primaryReasonCode = firstPrimaryReason(snapshot.blockedReasons)
 	snapshot.headline, snapshot.summary, snapshot.nextStep, snapshot.readinessState = summarizeSnapshot(snapshot)
 	return snapshot, http.StatusOK
+}
+
+func (s *Server) previewExecutionOutcome(ctx context.Context, plan controlExecutionPlan) controlExecutionResult {
+	if preview, ok := s.previewRealExecutionOutcome(ctx, plan); ok {
+		return preview
+	}
+	return acceptedPlaceholderExecutionResult(plan)
+}
+
+func (s *Server) previewRealExecutionOutcome(_ context.Context, plan controlExecutionPlan) (controlExecutionResult, bool) {
+	restartExecutor, ok := unwrapRestartAgentExecutor(s.controlExecutor)
+	if !ok {
+		return controlExecutionResult{}, false
+	}
+	if plan.actionKind != types.ControlActionRestartAgent || plan.targetKind != types.ControlTargetNode {
+		return controlExecutionResult{}, false
+	}
+	if !restartExecutor.config.enabled {
+		return controlExecutionResult{}, false
+	}
+	if plan.sourceSurface != types.ControlSurfaceNodeConsole {
+		return controlExecutionResult{}, false
+	}
+	if strings.TrimSpace(restartExecutor.config.localNodeID) == "" || plan.targetID != restartExecutor.config.localNodeID {
+		return controlExecutionResult{}, false
+	}
+	serviceUnit := strings.TrimSpace(plan.targetFacts["serviceUnit"])
+	if rejected, blocked := validateRestartAgentExecutionPolicy(plan, restartExecutor.config.allowedServicePrefix, serviceUnit); blocked {
+		return rejected, true
+	}
+	return acceptedRealExecutionResult(plan, serviceUnit), true
+}
+
+func unwrapRestartAgentExecutor(executor controlExecutor) (restartAgentExecutor, bool) {
+	switch value := executor.(type) {
+	case restartCapableControlExecutor:
+		return value.restart, true
+	case *restartCapableControlExecutor:
+		return value.restart, true
+	default:
+		return restartAgentExecutor{}, false
+	}
+}
+
+func snapshotExecutionSemantics(actions []evaluatedControlAction, recommendedAction types.ControlActionKind) (types.ControlExecutionMode, bool) {
+	recommended := findEvaluatedAction(actions, recommendedAction)
+	if recommended != nil {
+		if recommended.execute.executionMode == types.ControlExecutionReal {
+			return types.ControlExecutionReal, false
+		}
+		if recommended.execute.outcome == controlExecutionOutcomeAcceptedPlaceholder {
+			return types.ControlExecutionPlaceholder, true
+		}
+	}
+	for _, action := range actions {
+		if action.execute.executionMode == types.ControlExecutionReal && action.execute.outcome == controlExecutionOutcomeAcceptedReal {
+			return types.ControlExecutionReal, false
+		}
+	}
+	return types.ControlExecutionPlaceholder, true
 }
 
 func summarizeSnapshot(snapshot controlTargetSnapshot) (string, string, string, types.ControlReadinessState) {
@@ -781,6 +864,9 @@ func summarizeSnapshot(snapshot controlTargetSnapshot) (string, string, string, 
 		return "当前控制前提已阻断。", "当前没有可用的控制检查。", "请重新读取控制摘要。", types.ControlReadinessBlocked
 	}
 	if snapshot.primaryReasonCode == "" {
+		if snapshot.executionMode == types.ControlExecutionReal && !snapshot.placeholderOnly {
+			return "当前控制前提已满足。", "当前主要控制前提已经满足，推荐动作可以进入真实执行路径。", "可先执行 dry-run，再按需触发真实执行。", types.ControlReadinessReady
+		}
 		return "当前控制前提已满足。", "当前主要控制前提已经满足，推荐动作仍然只会进入 placeholder execute。", "可先执行 dry-run 或占位执行，确认交互边界。", types.ControlReadinessReady
 	}
 	primaryMessage := firstBlockedMessage(snapshot.blockedReasons)
@@ -984,20 +1070,30 @@ func controlActionOptionFromEvaluated(evaluated evaluatedControlAction) types.Co
 	result := evaluated.response
 	if result.Result == types.ControlResultAccepted {
 		summary, nextStep := controlOptionSummaryAndNextStep(result, nil)
+		availabilityState := types.ControlAvailabilityPlaceholderOnly
+		placeholderOnly := true
+		executionMode := types.ControlExecutionPlaceholder
+		executionNotes := []types.ControlExecutionNote{{Code: types.ControlReasonPlaceholderOnly, Message: "当前只会进入 placeholder execute。"}}
+		if evaluated.execute.outcome == controlExecutionOutcomeAcceptedReal {
+			availabilityState = types.ControlAvailabilityAvailable
+			placeholderOnly = false
+			executionMode = types.ControlExecutionReal
+			executionNotes = cloneExecutionNotes(evaluated.execute.executionNotes)
+		}
 		return types.ControlActionOption{
 			ActionKind:        result.ActionKind,
 			TargetKind:        result.TargetKind,
 			TargetID:          result.TargetID,
 			SourceSurface:     result.SourceSurface,
 			Available:         true,
-			AvailabilityState: types.ControlAvailabilityPlaceholderOnly,
+			AvailabilityState: availabilityState,
 			Label:             controlActionLabel(result.ActionKind),
 			Message:           result.HumanMessage,
 			Summary:           summary,
 			NextStep:          nextStep,
-			ExecutionMode:     types.ControlExecutionPlaceholder,
-			PlaceholderOnly:   true,
-			ExecutionNotes:    []types.ControlExecutionNote{{Code: types.ControlReasonPlaceholderOnly, Message: "当前只会进入 placeholder execute。"}},
+			ExecutionMode:     executionMode,
+			PlaceholderOnly:   placeholderOnly,
+			ExecutionNotes:    executionNotes,
 		}
 	}
 	var primaryReason types.ControlReasonCode
@@ -1017,7 +1113,7 @@ func controlActionOptionFromEvaluated(evaluated evaluatedControlAction) types.Co
 		Summary:           summary,
 		NextStep:          nextStep,
 		PrimaryReasonCode: primaryReason,
-		ExecutionMode:     types.ControlExecutionPlaceholder,
+		ExecutionMode:     evaluated.execute.executionMode,
 		PlaceholderOnly:   false,
 		ReasonHints:       append([]types.ControlBlockedReason{}, result.Preflight.BlockedReasons...),
 	}
@@ -1025,6 +1121,9 @@ func controlActionOptionFromEvaluated(evaluated evaluatedControlAction) types.Co
 
 func controlOptionSummaryAndNextStep(result types.ControlActionResponse, reasons []types.ControlBlockedReason) (string, string) {
 	if result.Result == types.ControlResultAccepted {
+		if result.ExecutionMode == types.ControlExecutionReal && !result.PlaceholderOnly {
+			return "当前动作可以发起，并会进入真实执行路径。", "建议先执行 dry-run，再确认服务状态与节点上下文。"
+		}
 		return "当前动作可以发起，但本轮只会进入占位执行边界。", "先执行 dry-run 或占位执行确认交互，再等待后续真实执行器接入。"
 	}
 	if len(reasons) == 0 {

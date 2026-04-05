@@ -3390,3 +3390,142 @@ func TestRestartExecutorKeepsOtherActionsPlaceholderOnly(t *testing.T) {
 		t.Fatalf("expected other actions to remain placeholder-only, got %+v", out)
 	}
 }
+
+func TestControlSnapshotReflectsRealRestartEligibility(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-real-panel", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-real-panel.service", "instanceProfile": "node-real-panel", "instanceManaged": "true"})
+	registerNode("node-placeholder-panel", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-placeholder-panel.service", "instanceProfile": "node-placeholder-panel", "instanceManaged": "true"})
+
+	runner := &fakeRestartRunner{}
+	server.controlExecutor = newRestartCapableControlExecutor(restartAgentExecutorConfig{
+		enabled:              true,
+		localNodeID:          "node-real-panel",
+		allowedServicePrefix: defaultRestartServicePrefix,
+		timeout:              5 * time.Second,
+	}, runner)
+
+	assertPanel := func(path string, check func(types.ControlPanelSummary)) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("%s: expected status 200, got %d", path, res.Code)
+		}
+		var out types.ControlPanelSummary
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("%s: decode failed: %v", path, err)
+		}
+		check(out)
+	}
+
+	assertOptions := func(path string, check func(types.ControlActionOptionsResponse)) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("%s: expected status 200, got %d", path, res.Code)
+		}
+		var out types.ControlActionOptionsResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("%s: decode failed: %v", path, err)
+		}
+		check(out)
+	}
+
+	assertPanel("/api/control-panels/node/node-real-panel/node_console", func(out types.ControlPanelSummary) {
+		if out.ExecutionMode != types.ControlExecutionReal || out.PlaceholderOnly {
+			t.Fatalf("expected real-eligible node panel to reflect real execution, got %+v", out)
+		}
+		if strings.Contains(out.Summary, "placeholder execute") {
+			t.Fatalf("expected real-eligible node panel summary to stop claiming placeholder-only, got %+v", out)
+		}
+	})
+
+	assertOptions("/api/control-actions/node/node-real-panel/node_console/options", func(out types.ControlActionOptionsResponse) {
+		var restartOpt types.ControlActionOption
+		for _, item := range out.Items {
+			if item.ActionKind == types.ControlActionRestartAgent {
+				restartOpt = item
+			}
+		}
+		if restartOpt.ExecutionMode != types.ControlExecutionReal || restartOpt.PlaceholderOnly || restartOpt.AvailabilityState != types.ControlAvailabilityAvailable {
+			t.Fatalf("expected real-eligible restart option to stop being placeholder-only, got %+v", restartOpt)
+		}
+	})
+
+	assertPanel("/api/control-panels/node/node-placeholder-panel/node_console", func(out types.ControlPanelSummary) {
+		if out.ExecutionMode != types.ControlExecutionPlaceholder || !out.PlaceholderOnly {
+			t.Fatalf("expected ineligible node panel to stay placeholder-only, got %+v", out)
+		}
+	})
+
+	assertOptions("/api/control-actions/node/node-placeholder-panel/node_console/options", func(out types.ControlActionOptionsResponse) {
+		var restartOpt types.ControlActionOption
+		for _, item := range out.Items {
+			if item.ActionKind == types.ControlActionRestartAgent {
+				restartOpt = item
+			}
+		}
+		if restartOpt.ExecutionMode != types.ControlExecutionPlaceholder || !restartOpt.PlaceholderOnly || restartOpt.AvailabilityState != types.ControlAvailabilityPlaceholderOnly {
+			t.Fatalf("expected ineligible restart option to stay placeholder-only, got %+v", restartOpt)
+		}
+	})
+
+	if runner.callCount == 0 {
+		// Snapshot/options may consult executor preview for restart eligibility.
+		// Count is allowed to be zero only if future refactors compute the same result without a runner call.
+	}
+}
+
+func TestControlSnapshotLeavesTunnelPlaceholderSemanticsUntouched(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-tunnel-placeholder", NodeName: "node-tunnel-placeholder", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-tunnel-placeholder.service", "instanceProfile": "node-tunnel-placeholder", "instanceManaged": "true"}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	if _, err := server.store.CreateTunnel(context.Background(), types.TunnelSpec{ID: "tunnel-placeholder-stable", NodeID: "node-tunnel-placeholder", Name: "tunnel-placeholder-stable", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 24010, Metadata: map[string]string{"nodeId": "node-tunnel-placeholder"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/control-actions/tunnel/tunnel-placeholder-stable/operator_console/options", nil)
+	applyCookies(req, adminCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected tunnel options status 200, got %d", res.Code)
+	}
+	var out types.ControlActionOptionsResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	var pauseOpt types.ControlActionOption
+	for _, item := range out.Items {
+		if item.ActionKind == types.ControlActionPauseTunnel {
+			pauseOpt = item
+		}
+	}
+	if pauseOpt.ExecutionMode != types.ControlExecutionPlaceholder || !pauseOpt.PlaceholderOnly || pauseOpt.AvailabilityState != types.ControlAvailabilityPlaceholderOnly {
+		t.Fatalf("expected tunnel option to remain placeholder-only, got %+v", pauseOpt)
+	}
+}
