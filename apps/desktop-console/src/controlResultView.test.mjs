@@ -106,6 +106,9 @@ assert.equal(nonRetryableView.rejectionKind, "");
 assert.equal(nonRetryableView.nextStep, "当前不建议直接重试；请先修正环境或策略条件。");
 assert.equal(nonRetryableView.executionNotes[0]?.message, "执行器处理失败，当前不建议重试。");
 
+assert.equal(retryableView.summaryItems.find((item) => item.label === "executeOutcome")?.value, "retryable_failure");
+assert.equal(nonRetryableView.summaryItems.find((item) => item.label === "executeOutcome")?.value, "non_retryable_failure");
+
 for (const view of [staleView, inflightView, handledView, retryableView, nonRetryableView]) {
   const labels = view.summaryItems.map((item) => item.label);
   assert.ok(labels.includes("category label"));
