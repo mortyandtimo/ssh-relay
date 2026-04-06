@@ -56,6 +56,30 @@ const handledView = buildDesktopControlResultView({
   executionNotes: [{ code: "", message: "该上下文动作已经处理完成，避免重复执行。请刷新控制摘要后再决定下一步。" }],
 });
 
+const retryableView = buildDesktopControlResultView({
+  ...base,
+  actionKind: "restart_agent",
+  targetKind: "node",
+  targetId: "node-3",
+  sourceSurface: "node_console",
+  executeOutcome: "retryable_failure",
+  rejectionKind: "",
+  nextStep: "可稍后重试；若连续失败，请结合审计与执行说明排查。",
+  executionNotes: [{ code: "", message: "执行器处理失败，建议稍后重试。" }],
+});
+
+const nonRetryableView = buildDesktopControlResultView({
+  ...base,
+  actionKind: "restart_agent",
+  targetKind: "node",
+  targetId: "node-4",
+  sourceSurface: "node_console",
+  executeOutcome: "non_retryable_failure",
+  rejectionKind: "",
+  nextStep: "当前不建议直接重试；请先修正环境或策略条件。",
+  executionNotes: [{ code: "", message: "执行器处理失败，当前不建议重试。" }],
+});
+
 assert.equal(staleView.categoryLabel, "上下文已过期");
 assert.equal(staleView.rejectionKind, "state_drift");
 assert.equal(staleView.nextStep, "请先刷新控制面板或动作列表，再基于新的上下文重新发起动作。");
@@ -72,7 +96,17 @@ assert.equal(handledView.rejectionKind, "duplicate_handled");
 assert.equal(handledView.blockedReasons[0]?.code, "node_isolated");
 assert.equal(handledView.executionNotes[0]?.message, "该上下文动作已经处理完成，避免重复执行。请刷新控制摘要后再决定下一步。");
 
-for (const view of [staleView, inflightView, handledView]) {
+assert.equal(retryableView.categoryLabel, "可重试失败");
+assert.equal(retryableView.rejectionKind, "");
+assert.equal(retryableView.nextStep, "可稍后重试；若连续失败，请结合审计与执行说明排查。");
+assert.equal(retryableView.executionNotes[0]?.message, "执行器处理失败，建议稍后重试。");
+
+assert.equal(nonRetryableView.categoryLabel, "不可重试失败");
+assert.equal(nonRetryableView.rejectionKind, "");
+assert.equal(nonRetryableView.nextStep, "当前不建议直接重试；请先修正环境或策略条件。");
+assert.equal(nonRetryableView.executionNotes[0]?.message, "执行器处理失败，当前不建议重试。");
+
+for (const view of [staleView, inflightView, handledView, retryableView, nonRetryableView]) {
   const labels = view.summaryItems.map((item) => item.label);
   assert.ok(labels.includes("category label"));
   assert.ok(labels.includes("executeOutcome"));
