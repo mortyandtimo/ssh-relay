@@ -234,8 +234,11 @@ type AuditLogListResponse = {
 
 type AuditFilterState = {
   action: string;
+  actionPrefix: string;
+  outcome: string;
   actorType: string;
   resourceType: string;
+  resourceID: string;
   actorID: string;
   startAt: string;
   endAt: string;
@@ -263,8 +266,11 @@ const initialTunnelForm: TunnelForm = {
 
 const initialAuditFilter: AuditFilterState = {
   action: "",
+  actionPrefix: "",
+  outcome: "",
   actorType: "",
   resourceType: "",
+  resourceID: "",
   actorID: "",
   startAt: "",
   endAt: "",
@@ -536,8 +542,11 @@ export default function App() {
     query.set("limit", String(filter.limit));
     query.set("offset", String(filter.offset));
     if (filter.action) query.set("action", filter.action);
+    if (filter.actionPrefix) query.set("actionPrefix", filter.actionPrefix);
+    if (filter.outcome) query.set("outcome", filter.outcome);
     if (filter.actorType) query.set("actorType", filter.actorType);
     if (filter.resourceType) query.set("resourceType", filter.resourceType);
+    if (filter.resourceID) query.set("resourceID", filter.resourceID);
     if (filter.actorID) query.set("actorID", filter.actorID);
     if (filter.startAt) query.set("startAt", new Date(filter.startAt).toISOString());
     if (filter.endAt) query.set("endAt", new Date(filter.endAt).toISOString());
@@ -2069,14 +2078,23 @@ export default function App() {
               <h3>筛选栏</h3>
               <form className="form-grid" onSubmit={submitAuditFilters}>
                 <label><span>动作</span><input value={auditFilter.action} onChange={(event) => setAuditFilter((current) => ({ ...current, action: event.target.value }))} /></label>
+                <label><span>动作前缀</span><input value={auditFilter.actionPrefix} onChange={(event) => setAuditFilter((current) => ({ ...current, actionPrefix: event.target.value }))} placeholder="control_execute_" /></label>
+                <label><span>结果分类</span><input value={auditFilter.outcome} onChange={(event) => setAuditFilter((current) => ({ ...current, outcome: event.target.value }))} placeholder="accepted_real / policy_rejected" /></label>
                 <label><span>执行者类型</span><input value={auditFilter.actorType} onChange={(event) => setAuditFilter((current) => ({ ...current, actorType: event.target.value }))} /></label>
                 <label><span>资源类型</span><input value={auditFilter.resourceType} onChange={(event) => setAuditFilter((current) => ({ ...current, resourceType: event.target.value }))} /></label>
+                <label><span>资源 ID</span><input value={auditFilter.resourceID} onChange={(event) => setAuditFilter((current) => ({ ...current, resourceID: event.target.value }))} /></label>
                 <label><span>执行者 ID</span><input value={auditFilter.actorID} onChange={(event) => setAuditFilter((current) => ({ ...current, actorID: event.target.value }))} /></label>
                 <label><span>开始时间</span><input type="datetime-local" value={auditFilter.startAt} onChange={(event) => setAuditFilter((current) => ({ ...current, startAt: event.target.value }))} /></label>
                 <label><span>结束时间</span><input type="datetime-local" value={auditFilter.endAt} onChange={(event) => setAuditFilter((current) => ({ ...current, endAt: event.target.value }))} /></label>
                 <div className="form-actions">
                   <button type="submit">应用筛选</button>
                   <button type="button" className="secondary" onClick={clearAuditFilters}>清空筛选</button>
+                  <button type="button" className="secondary" onClick={() => {
+                    const nextFilter = { ...auditFilter, action: "", actionPrefix: "control_execute_", outcome: "", actorType: "", resourceType: "", resourceID: "", actorID: "", startAt: "", endAt: "", offset: 0 };
+                    setAuditFilter(nextFilter);
+                    auditFilterRef.current = nextFilter;
+                    void refreshDashboard(false, currentUser, false, nextFilter, nodeFilterRef.current);
+                  }}>仅看 control execute</button>
                   <span className="inline-note">清空后回到第一页，自动刷新继续沿用当前筛选。</span>
                 </div>
               </form>

@@ -41,6 +41,8 @@ export default function App() {
   const [tunnelActionOptions, setTunnelActionOptions] = useState<ControlActionOption[]>([]);
   const [nodeControlPanel, setNodeControlPanel] = useState<ControlPanelSummary | null>(null);
   const [tunnelControlPanel, setTunnelControlPanel] = useState<ControlPanelSummary | null>(null);
+  const [nodeControlContextAt, setNodeControlContextAt] = useState("");
+  const [tunnelControlContextAt, setTunnelControlContextAt] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState("");
   const refreshInFlightRef = useRef(false);
@@ -171,6 +173,7 @@ export default function App() {
         const response = await api.loadNodeControlActionOptions(selectedNode.nodeId, "operator_console");
         if (!cancelled) {
           setNodeActionOptions(response.items);
+          setNodeControlContextAt(new Date().toISOString());
         }
       } catch (actionError) {
         if (!cancelled) {
@@ -195,6 +198,7 @@ export default function App() {
         const response = await api.loadNodeControlPanel(selectedNode.nodeId, "operator_console");
         if (!cancelled) {
           setNodeControlPanel(response);
+          setNodeControlContextAt(new Date().toISOString());
         }
       } catch (panelError) {
         if (!cancelled) {
@@ -220,6 +224,7 @@ export default function App() {
         const response = await api.loadTunnelControlActionOptions(selectedTunnel.id, "operator_console");
         if (!cancelled) {
           setTunnelActionOptions(response.items);
+          setTunnelControlContextAt(new Date().toISOString());
         }
       } catch (actionError) {
         if (!cancelled) {
@@ -244,6 +249,7 @@ export default function App() {
         const response = await api.loadTunnelControlPanel(selectedTunnel.id, "operator_console");
         if (!cancelled) {
           setTunnelControlPanel(response);
+          setTunnelControlContextAt(new Date().toISOString());
         }
       } catch (panelError) {
         if (!cancelled) {
@@ -371,6 +377,13 @@ export default function App() {
     }
   }
 
+  function currentControlContextAt(targetKind: ControlActionRequest["targetKind"]) {
+    if (targetKind === "tunnel") {
+      return tunnelControlContextAt || new Date().toISOString();
+    }
+    return nodeControlContextAt || new Date().toISOString();
+  }
+
   async function runControlAction(actionKind: ControlActionRequest["actionKind"], targetKind: ControlActionRequest["targetKind"], targetId: string, dryRun: boolean) {
     setBusy("control-action");
     setError("");
@@ -383,7 +396,7 @@ export default function App() {
         sourceSurface: "operator_console",
         dryRun,
         note: controlNote.trim(),
-        requestedAt: new Date().toISOString(),
+        requestedAt: currentControlContextAt(targetKind),
       });
       setControlResult(result);
       setMessage(result.humanMessage);
@@ -527,7 +540,7 @@ export default function App() {
                       {option.primaryReasonCode ? <p className="copy">primaryReason: <code>{option.primaryReasonCode}</code></p> : null}
                       <div className="button-row wrap-actions">
                         <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
-                        {option.placeholderOnly ? <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : "占位执行 " + option.label}</button> : null}
+                        <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : (option.placeholderOnly ? "占位执行 " : "执行 ") + option.label}</button>
                       </div>
                     </div>
                   ))}
@@ -644,7 +657,7 @@ export default function App() {
                                 {option.primaryReasonCode ? <p className="copy">primaryReason: <code>{option.primaryReasonCode}</code></p> : null}
                                 <div className="button-row wrap-actions">
                                   <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
-                                  {option.placeholderOnly ? <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : "占位执行 " + option.label}</button> : null}
+                                  <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : (option.placeholderOnly ? "占位执行 " : "执行 ") + option.label}</button>
                                 </div>
                               </div>
                             ))}

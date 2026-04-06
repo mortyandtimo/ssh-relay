@@ -33,6 +33,7 @@ export default function App() {
   const [controlResult, setControlResult] = useState<ControlActionResponse | null>(null);
   const [nodeActionOptions, setNodeActionOptions] = useState<ControlActionOption[]>([]);
   const [nodeControlPanel, setNodeControlPanel] = useState<ControlPanelSummary | null>(null);
+  const [nodeControlContextAt, setNodeControlContextAt] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState("");
   const refreshInFlightRef = useRef(false);
@@ -127,6 +128,7 @@ export default function App() {
         const response = await api.loadNodeControlActionOptions(boundNode.nodeId, "node_console");
         if (!cancelled) {
           setNodeActionOptions(response.items);
+          setNodeControlContextAt(new Date().toISOString());
         }
       } catch (actionError) {
         if (!cancelled) {
@@ -151,6 +153,7 @@ export default function App() {
         const response = await api.loadNodeControlPanel(boundNode.nodeId, "node_console");
         if (!cancelled) {
           setNodeControlPanel(response);
+          setNodeControlContextAt(new Date().toISOString());
         }
       } catch (panelError) {
         if (!cancelled) {
@@ -274,7 +277,7 @@ export default function App() {
         sourceSurface: "node_console",
         dryRun,
         note: controlNote.trim(),
-        requestedAt: new Date().toISOString(),
+        requestedAt: nodeControlContextAt || new Date().toISOString(),
       });
       setControlResult(result);
       setMessage(result.humanMessage);
@@ -421,7 +424,7 @@ export default function App() {
                       {option.primaryReasonCode ? <p className="copy">primaryReason: <code>{option.primaryReasonCode}</code></p> : null}
                       <div className="button-row wrap-actions">
                         <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
-                        {option.placeholderOnly ? <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : "占位执行 " + option.label}</button> : null}
+                        <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : (option.placeholderOnly ? "占位执行 " : "执行 ") + option.label}</button>
                       </div>
                     </div>
                   ))}
