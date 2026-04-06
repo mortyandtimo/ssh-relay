@@ -1,5 +1,7 @@
 # Control V1 Productization Hardening
 
+Operational reference: see [`docs/operations/control-v1-operator-guide.md`](../operations/control-v1-operator-guide.md).
+
 ## Action Matrix
 
 | Action          | Target | Execute mode                                                                           | Real side effect                          |
