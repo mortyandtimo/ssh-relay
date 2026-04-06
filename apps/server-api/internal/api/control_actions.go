@@ -536,7 +536,9 @@ func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlAct
 		return buildControlActionResponse(req, plan, blockedExecutionResult(plan)), http.StatusOK
 	}
 	result := s.controlExecutor.execute(ctx, plan)
-	return buildControlActionResponse(req, plan, result), http.StatusOK
+	resp = buildControlActionResponse(req, plan, result)
+	s.writeControlExecutionAudit(ctx, req, plan, result, resp)
+	return resp, http.StatusOK
 }
 
 func newControlActionResponse(req types.ControlActionRequest) types.ControlActionResponse {
@@ -786,6 +788,92 @@ func restartCommandDetail(result controlCommandResult) string {
 		return result.err.Error()
 	}
 	return "no command detail"
+}
+
+func (s *Server) writeControlExecutionAudit(ctx context.Context, req types.ControlActionRequest, plan controlExecutionPlan, result controlExecutionResult, resp types.ControlActionResponse) {
+	if result.outcome == controlExecutionOutcomeBlockedPreflight || req.DryRun {
+		return
+	}
+	resourceType := string(req.TargetKind)
+	if resourceType == "" {
+		resourceType = "control_target"
+	}
+	action := "control_execute_rejected"
+	switch result.outcome {
+	case controlExecutionOutcomeAcceptedReal, controlExecutionOutcomeAcceptedPlaceholder:
+		action = "control_execute_accepted"
+	case controlExecutionOutcomePolicyRejected:
+		action = "control_execute_policy_rejected"
+	case controlExecutionOutcomeRetryableFailure:
+		action = "control_execute_retryable_failure"
+	case controlExecutionOutcomeNonRetryableFailure:
+		action = "control_execute_non_retryable_failure"
+	}
+	actorType, actorID := s.currentActorFromContext(ctx)
+	payload := map[string]string{
+		"actionKind":         string(req.ActionKind),
+		"sourceSurface":      string(req.SourceSurface),
+		"executionMode":      string(resp.ExecutionMode),
+		"placeholderOnly":    strconv.FormatBool(resp.PlaceholderOnly),
+		"result":             string(resp.Result),
+		"outcome":            string(result.outcome),
+		"note":               strings.TrimSpace(req.Note),
+		"recommendedAction":  string(plan.recommendedAction),
+		"readinessState":     string(plan.readinessState),
+		"targetStateBefore":  controlAuditBeforeState(req, plan),
+		"targetStateAfter":   controlAuditAfterState(req, resp),
+		"primaryReasonCode":  string(plan.primaryReasonCode),
+		"humanMessage":       resp.HumanMessage,
+	}
+	_, _ = s.store.WriteAuditLog(ctx, store.AuditLogParams{
+		ActorType:    actorType,
+		ActorID:      actorID,
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   req.TargetID,
+		Payload:      payload,
+	})
+}
+
+func (s *Server) currentActorFromContext(ctx context.Context) (string, string) {
+	if user, ok := authUserFromContext(ctx); ok {
+		return "user", user.ID
+	}
+	return "system", ""
+}
+
+func controlAuditBeforeState(req types.ControlActionRequest, plan controlExecutionPlan) string {
+	if req.TargetKind == types.ControlTargetNode {
+		return "isolated=" + plan.targetFacts["isolated"]
+	}
+	if req.TargetKind == types.ControlTargetTunnel {
+		return "status=" + plan.targetFacts["tunnelStatus"]
+	}
+	return ""
+}
+
+func controlAuditAfterState(req types.ControlActionRequest, resp types.ControlActionResponse) string {
+	if req.TargetKind == types.ControlTargetNode {
+		switch req.ActionKind {
+		case types.ControlActionIsolateNode:
+			return "isolated=true"
+		case types.ControlActionReleaseNode:
+			return "isolated=false"
+		default:
+			return "isolated=" + resp.Facts["isolated"]
+		}
+	}
+	if req.TargetKind == types.ControlTargetTunnel {
+		switch req.ActionKind {
+		case types.ControlActionPauseTunnel:
+			return "status=paused"
+		case types.ControlActionResumeTunnel:
+			return "status=active"
+		default:
+			return "status=" + resp.Facts["tunnelStatus"]
+		}
+	}
+	return ""
 }
 
 func placeholderExecutionNotes() []types.ControlExecutionNote {

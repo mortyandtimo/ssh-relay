@@ -3705,3 +3705,104 @@ func TestControlStateMutationActionsExecuteAndRefreshReadiness(t *testing.T) {
 		t.Fatalf("expected illegal tunnel state transition to remain blocked, got %+v", conflictResp)
 	}
 }
+
+func TestControlExecuteWritesAuditLogsForRealPaths(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-audit-restart", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-audit-restart.service", "instanceProfile": "node-audit-restart", "instanceManaged": "true"})
+	registerNode("node-audit-blocked", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-audit-blocked.service", "instanceProfile": "node-audit-blocked", "instanceManaged": "true", "isolated": "true"})
+	registerNode("node-audit-isolated", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-audit-isolated.service", "instanceProfile": "node-audit-isolated", "instanceManaged": "true", "isolated": "true"})
+	for _, item := range []types.TunnelSpec{
+		{ID: "tunnel-audit-active", NodeID: "node-audit-restart", Name: "tunnel-audit-active", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 26010, Metadata: map[string]string{"nodeId": "node-audit-restart"}},
+		{ID: "tunnel-audit-paused", NodeID: "node-audit-restart", Name: "tunnel-audit-paused", Type: "tcp", Status: "paused", TargetHost: "127.0.0.1", TargetPort: 8081, PublicPort: 26011, Metadata: map[string]string{"nodeId": "node-audit-restart"}},
+	} {
+		if _, err := server.store.CreateTunnel(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := &fakeRestartRunner{result: controlCommandResult{}}
+	server.controlExecutor = newStateMutationControlExecutor(server.store, newRestartCapableControlExecutor(restartAgentExecutorConfig{
+		enabled:              true,
+		localNodeID:          "node-audit-restart",
+		allowedServicePrefix: defaultRestartServicePrefix,
+		timeout:              5 * time.Second,
+	}, runner))
+
+	execAction := func(payload map[string]any) {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+	}
+
+	execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-restart", "sourceSurface": "node_console", "dryRun": false})
+	execAction(map[string]any{"actionKind": "isolate_node", "targetKind": "node", "targetId": "node-audit-restart", "sourceSurface": "operator_console", "dryRun": false})
+	execAction(map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-audit-isolated", "sourceSurface": "operator_console", "dryRun": false})
+	execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-audit-active", "sourceSurface": "operator_console", "dryRun": false})
+	execAction(map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-audit-paused", "sourceSurface": "operator_console", "dryRun": false})
+	execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-blocked", "sourceSurface": "operator_console", "dryRun": false})
+
+	auditReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs?limit=50", nil)
+	applyCookies(auditReq, adminCookies)
+	auditRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(auditRes, auditReq)
+	if auditRes.Code != http.StatusOK {
+		t.Fatalf("expected audit logs 200, got %d", auditRes.Code)
+	}
+	var auditOut struct {
+		Items []types.AuditLogEntry `json:"items"`
+	}
+	if err := json.NewDecoder(auditRes.Body).Decode(&auditOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	findAudit := func(action, resourceID, actionKind, before, after string) *types.AuditLogEntry {
+		for idx := range auditOut.Items {
+			item := &auditOut.Items[idx]
+			if item.Action == action && item.ResourceID == resourceID && item.Payload["actionKind"] == actionKind && item.Payload["targetStateBefore"] == before && item.Payload["targetStateAfter"] == after {
+				return item
+			}
+		}
+		return nil
+	}
+
+	assertAudit := func(action, resourceID, resourceType, actionKind, executionMode, before, after string) {
+		item := findAudit(action, resourceID, actionKind, before, after)
+		if item == nil {
+			t.Fatalf("expected audit action=%s resourceID=%s, got %+v", action, resourceID, auditOut.Items)
+		}
+		if item.ResourceType != resourceType || item.Payload["executionMode"] != executionMode || item.Payload["targetStateBefore"] != before || item.Payload["targetStateAfter"] != after {
+			t.Fatalf("unexpected audit payload for %s/%s: %+v", action, resourceID, item)
+		}
+		if item.ActorType != "user" || item.ActorID == "" {
+			t.Fatalf("expected audit actor for %s/%s, got %+v", action, resourceID, item)
+		}
+	}
+
+	assertAudit("control_execute_accepted", "node-audit-restart", "node", "restart_agent", "real", "isolated=false", "isolated=false")
+	assertAudit("control_execute_accepted", "node-audit-restart", "node", "isolate_node", "real", "isolated=false", "isolated=true")
+	assertAudit("control_execute_accepted", "node-audit-isolated", "node", "release_node", "real", "isolated=true", "isolated=false")
+	assertAudit("control_execute_accepted", "tunnel-audit-active", "tunnel", "pause_tunnel", "real", "status=active", "status=paused")
+	assertAudit("control_execute_accepted", "tunnel-audit-paused", "tunnel", "resume_tunnel", "real", "status=paused", "status=active")
+
+	if item := findAudit("control_execute_accepted", "node-audit-blocked", "restart_agent", "isolated=true", "isolated=true"); item != nil {
+		t.Fatalf("blocked preflight must not write success audit, got %+v", item)
+	}
+}
