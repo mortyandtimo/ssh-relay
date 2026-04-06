@@ -52,6 +52,7 @@ type controlExecutionPlan struct {
 	placeholderOnly   bool
 	requestedAt       time.Time
 	note              string
+	previewFacts      map[string]string
 	targetFacts       map[string]string
 	preflight         types.ControlPreflightSummary
 	primaryReasonCode types.ControlReasonCode
@@ -59,6 +60,20 @@ type controlExecutionPlan struct {
 	readinessState    types.ControlReadinessState
 	recommendedAction types.ControlActionKind
 	actionEvaluation  evaluatedControlAction
+}
+
+type controlExecutionRevalidation struct {
+	allowed           bool
+	outcome           controlExecutionOutcome
+	humanMessage      string
+	executionMode     types.ControlExecutionMode
+	executionNotes    []types.ControlExecutionNote
+	blockingReasons   []types.ControlBlockedReason
+	primaryReason     types.ControlReasonCode
+	targetFacts       map[string]string
+	preflight         types.ControlPreflightSummary
+	recommendedAction types.ControlActionKind
+	readinessState    types.ControlReadinessState
 }
 
 type controlExecutionOutcome string
@@ -97,6 +112,7 @@ type controlExecutionResult struct {
 	humanMessage   string
 	executionMode  types.ControlExecutionMode
 	executionNotes []types.ControlExecutionNote
+	auditHint      string
 }
 
 type controlExecutor interface {
@@ -532,6 +548,19 @@ func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlAct
 		return resp, http.StatusOK
 	}
 	plan := buildExecutionPlan(req, snapshot, *actionSnapshot)
+	if revalidated := revalidateRequestedControlContext(plan); !revalidated.allowed {
+		plan = applyExecutionRevalidation(plan, revalidated)
+		result := controlExecutionResult{
+			outcome:        revalidated.outcome,
+			humanMessage:   revalidated.humanMessage,
+			executionMode:  revalidated.executionMode,
+			executionNotes: cloneExecutionNotes(revalidated.executionNotes),
+			auditHint:      "state_drift",
+		}
+		resp = buildControlActionResponse(req, plan, result)
+		s.writeControlExecutionAudit(ctx, req, plan, result, resp)
+		return resp, http.StatusOK
+	}
 	if !plan.preflight.Allowed {
 		return buildControlActionResponse(req, plan, blockedExecutionResult(plan)), http.StatusOK
 	}
@@ -604,6 +633,7 @@ func buildExecutionPlan(req types.ControlActionRequest, snapshot controlTargetSn
 		placeholderOnly:   snapshot.placeholderOnly,
 		requestedAt:       req.RequestedAt,
 		note:              req.Note,
+		previewFacts:      cloneFacts(action.response.Facts),
 		targetFacts:       cloneFacts(action.response.Facts),
 		preflight:         clonePreflightSummary(action.response.Preflight),
 		primaryReasonCode: firstPrimaryReason(action.response.Preflight.BlockedReasons),
@@ -613,6 +643,109 @@ func buildExecutionPlan(req types.ControlActionRequest, snapshot controlTargetSn
 		actionEvaluation:  action,
 	}
 	return plan
+}
+
+func applyExecutionRevalidation(plan controlExecutionPlan, revalidated controlExecutionRevalidation) controlExecutionPlan {
+	plan.executionMode = revalidated.executionMode
+	plan.placeholderOnly = false
+	plan.targetFacts = cloneFacts(revalidated.targetFacts)
+	plan.preflight = clonePreflightSummary(revalidated.preflight)
+	plan.primaryReasonCode = revalidated.primaryReason
+	plan.blockingReasons = append([]types.ControlBlockedReason{}, revalidated.blockingReasons...)
+	plan.recommendedAction = revalidated.recommendedAction
+	plan.readinessState = revalidated.readinessState
+	updated := cloneControlActionResponse(plan.actionEvaluation.response)
+	updated.Result = types.ControlResultBlocked
+	updated.HumanMessage = revalidated.humanMessage
+	updated.Facts = cloneFacts(revalidated.targetFacts)
+	updated.Preflight = clonePreflightSummary(revalidated.preflight)
+	updated.ExecutionMode = revalidated.executionMode
+	updated.PlaceholderOnly = false
+	updated.ExecutionNotes = cloneExecutionNotes(revalidated.executionNotes)
+	plan.actionEvaluation.response = updated
+	return plan
+}
+
+func effectiveExecutionModeForPlan(plan controlExecutionPlan) types.ControlExecutionMode {
+	if plan.actionEvaluation.execute.executionMode != "" {
+		return plan.actionEvaluation.execute.executionMode
+	}
+	if plan.executionMode != "" {
+		return plan.executionMode
+	}
+	return types.ControlExecutionPlaceholder
+}
+
+func inferRecommendedActionFromPreflight(targetKind types.ControlTargetKind, actionKind types.ControlActionKind, preflight types.ControlPreflightSummary, facts map[string]string) types.ControlActionKind {
+	if targetKind == types.ControlTargetNode {
+		if strings.TrimSpace(facts["isolated"]) == "true" {
+			return types.ControlActionReleaseNode
+		}
+		if actionKind == types.ControlActionReleaseNode {
+			return types.ControlActionIsolateNode
+		}
+		return actionKind
+	}
+	if targetKind == types.ControlTargetTunnel {
+		if strings.TrimSpace(facts["tunnelStatus"]) == "paused" {
+			return types.ControlActionResumeTunnel
+		}
+		return types.ControlActionPauseTunnel
+	}
+	if len(preflight.BlockedReasons) > 0 {
+		return actionKind
+	}
+	return actionKind
+}
+
+func revalidateRequestedControlContext(plan controlExecutionPlan) controlExecutionRevalidation {
+	updatedAt, ok := parseControlStateTimestamp(plan.targetFacts["controlStateUpdatedAt"])
+	if !ok || plan.requestedAt.IsZero() || !updatedAt.After(plan.requestedAt.UTC()) {
+		return controlExecutionRevalidation{allowed: true}
+	}
+	message := "目标状态已变化，请刷新后重试。"
+	if len(plan.preflight.BlockedReasons) > 0 {
+		message = "目标状态已变化，请刷新后重试。当前原因: " + plan.preflight.BlockedReasons[0].Message
+	}
+	return controlExecutionRevalidation{
+		allowed:       false,
+		outcome:       controlExecutionOutcomePolicyRejected,
+		humanMessage:  message,
+		executionMode: effectiveExecutionModeForPlan(plan),
+		executionNotes: []types.ControlExecutionNote{{
+			Message: "执行前发现控制上下文已经过期，目标状态已变化，请刷新控制摘要后重试。",
+		}},
+		blockingReasons:   append([]types.ControlBlockedReason{}, plan.preflight.BlockedReasons...),
+		primaryReason:     plan.primaryReasonCode,
+		targetFacts:       cloneFacts(plan.targetFacts),
+		preflight:         clonePreflightSummary(plan.preflight),
+		recommendedAction: plan.recommendedAction,
+		readinessState:    plan.readinessState,
+	}
+}
+
+func parseControlStateTimestamp(raw string) (time.Time, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		parsed, err := time.Parse(layout, trimmed)
+		if err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func readinessStateFromPreflight(preflight types.ControlPreflightSummary) types.ControlReadinessState {
+	if preflight.Allowed {
+		return types.ControlReadinessReady
+	}
+	if containsMissingCheck(preflight.Items) {
+		return types.ControlReadinessPartial
+	}
+	return types.ControlReadinessBlocked
 }
 
 func buildControlActionResponse(req types.ControlActionRequest, plan controlExecutionPlan, result controlExecutionResult) types.ControlActionResponse {
@@ -822,10 +955,13 @@ func (s *Server) writeControlExecutionAudit(ctx context.Context, req types.Contr
 		"note":              strings.TrimSpace(req.Note),
 		"recommendedAction": string(plan.recommendedAction),
 		"readinessState":    string(plan.readinessState),
-		"targetStateBefore": controlAuditBeforeState(req, plan),
+		"targetStateBefore": controlAuditBeforeState(req, plan, result),
 		"targetStateAfter":  controlAuditAfterState(req, resp),
 		"primaryReasonCode": string(plan.primaryReasonCode),
 		"humanMessage":      resp.HumanMessage,
+	}
+	if strings.TrimSpace(result.auditHint) != "" {
+		payload["rejectionKind"] = result.auditHint
 	}
 	_, _ = s.store.WriteAuditLog(ctx, store.AuditLogParams{
 		ActorType:    actorType,
@@ -844,17 +980,62 @@ func (s *Server) currentActorFromContext(ctx context.Context) (string, string) {
 	return "system", ""
 }
 
-func controlAuditBeforeState(req types.ControlActionRequest, plan controlExecutionPlan) string {
+func controlAuditBeforeState(req types.ControlActionRequest, plan controlExecutionPlan, result controlExecutionResult) string {
+	if result.auditHint == "state_drift" {
+		if inferred := inferredDriftBeforeState(req.ActionKind, req.TargetKind); inferred != "" {
+			return inferred
+		}
+	}
+	facts := plan.previewFacts
+	if len(facts) == 0 {
+		facts = plan.actionEvaluation.response.Facts
+	}
+	if len(facts) == 0 {
+		facts = plan.targetFacts
+	}
 	if req.TargetKind == types.ControlTargetNode {
-		return "isolated=" + plan.targetFacts["isolated"]
+		return "isolated=" + facts["isolated"]
 	}
 	if req.TargetKind == types.ControlTargetTunnel {
-		return "status=" + plan.targetFacts["tunnelStatus"]
+		return "status=" + facts["tunnelStatus"]
+	}
+	return ""
+}
+
+func inferredDriftBeforeState(actionKind types.ControlActionKind, targetKind types.ControlTargetKind) string {
+	if targetKind == types.ControlTargetNode {
+		switch actionKind {
+		case types.ControlActionIsolateNode, types.ControlActionRestartAgent:
+			return "isolated=false"
+		case types.ControlActionReleaseNode:
+			return "isolated=true"
+		default:
+			return ""
+		}
+	}
+	if targetKind == types.ControlTargetTunnel {
+		switch actionKind {
+		case types.ControlActionPauseTunnel:
+			return "status=active"
+		case types.ControlActionResumeTunnel:
+			return "status=paused"
+		default:
+			return ""
+		}
 	}
 	return ""
 }
 
 func controlAuditAfterState(req types.ControlActionRequest, resp types.ControlActionResponse) string {
+	if resp.Result != types.ControlResultAccepted {
+		if req.TargetKind == types.ControlTargetNode {
+			return "isolated=" + resp.Facts["isolated"]
+		}
+		if req.TargetKind == types.ControlTargetTunnel {
+			return "status=" + resp.Facts["tunnelStatus"]
+		}
+		return ""
+	}
 	if req.TargetKind == types.ControlTargetNode {
 		switch req.ActionKind {
 		case types.ControlActionIsolateNode:
@@ -1567,6 +1748,11 @@ func populateNodeControlFacts(resp *types.ControlActionResponse, node types.Node
 	resp.Facts["instanceProfile"] = node.InstanceProfile
 	resp.Facts["instanceManaged"] = strconv.FormatBool(node.InstanceManaged)
 	resp.Facts["isolated"] = strconv.FormatBool(node.Isolated)
+	if value := strings.TrimSpace(node.Metadata["controlStateUpdatedAt"]); value != "" {
+		resp.Facts["controlStateUpdatedAt"] = value
+	} else {
+		resp.Facts["controlStateUpdatedAt"] = node.LastSeenAt.UTC().Format(time.RFC3339Nano)
+	}
 }
 
 func populateTunnelControlFacts(resp *types.ControlActionResponse, tunnel types.TunnelSpec) {
@@ -1574,6 +1760,9 @@ func populateTunnelControlFacts(resp *types.ControlActionResponse, tunnel types.
 	resp.Facts["runtimeState"] = tunnel.RuntimeState
 	resp.Facts["runtimePath"] = tunnel.RuntimePath
 	resp.Facts["transportPolicy"] = tunnel.TransportPolicy
+	if !tunnel.UpdatedAt.IsZero() {
+		resp.Facts["controlStateUpdatedAt"] = tunnel.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
 }
 
 func addNodeSurfaceCheck(req types.ControlActionRequest, builder *controlPreflightBuilder) {

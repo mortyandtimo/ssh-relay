@@ -3936,3 +3936,143 @@ func TestControlExecuteAuditOutcomeSemantics(t *testing.T) {
 		t.Fatalf("blocked preflight must not add execute audit rows, got %+v", auditOut.Items)
 	}
 }
+
+func TestControlExecuteRejectsDriftedStateBeforeExecutor(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-drift-active", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-drift-active.service", "instanceProfile": "node-drift-active", "instanceManaged": "true"})
+	registerNode("node-drift-restart", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-drift-restart.service", "instanceProfile": "node-drift-restart", "instanceManaged": "true"})
+	if _, err := server.store.CreateTunnel(context.Background(), types.TunnelSpec{ID: "tunnel-drift-active", NodeID: "node-drift-active", Name: "tunnel-drift-active", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 27010, Metadata: map[string]string{"nodeId": "node-drift-active"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	spy := &spyControlExecutor{result: acceptedPlaceholderExecutionResult(controlExecutionPlan{executionMode: types.ControlExecutionPlaceholder})}
+	server.controlExecutor = newStateMutationControlExecutor(server.store, spy)
+
+	execAction := func(payload map[string]any) types.ControlActionResponse {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+		var out types.ControlActionResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	preview := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-drift-active", "sourceSurface": "operator_console", "dryRun": true})
+	if preview.Result != types.ControlResultAccepted {
+		t.Fatalf("expected dry-run preview accepted, got %+v", preview)
+	}
+	tunnelContextAt := preview.Facts["controlStateUpdatedAt"]
+	if tunnelContextAt == "" {
+		t.Fatalf("expected dry-run preview to carry controlStateUpdatedAt, got %+v", preview.Facts)
+	}
+	currentTunnel, err := server.store.GetTunnel(context.Background(), "tunnel-drift-active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentTunnel.Status = "paused"
+	if _, err := server.store.UpdateTunnel(context.Background(), currentTunnel); err != nil {
+		t.Fatal(err)
+	}
+	tunnelExecute := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-drift-active", "sourceSurface": "operator_console", "dryRun": false, "requestedAt": tunnelContextAt})
+	if spy.callCount != 0 {
+		t.Fatalf("expected drifted tunnel execute to skip executor, got %d calls", spy.callCount)
+	}
+	if tunnelExecute.Result != types.ControlResultRejected || !strings.Contains(tunnelExecute.HumanMessage, "状态已变化") {
+		t.Fatalf("expected drifted tunnel execute to be policy rejected, got %+v", tunnelExecute)
+	}
+	if len(tunnelExecute.ExecutionNotes) == 0 || !strings.Contains(tunnelExecute.ExecutionNotes[0].Message, "刷新") {
+		t.Fatalf("expected drifted tunnel execute notes to explain refresh, got %+v", tunnelExecute.ExecutionNotes)
+	}
+	if len(tunnelExecute.Preflight.BlockedReasons) == 0 || tunnelExecute.Preflight.BlockedReasons[0].Code != types.ControlReasonTunnelStateConflict {
+		t.Fatalf("expected drifted tunnel execute to preserve new preflight reason, got %+v", tunnelExecute.Preflight.BlockedReasons)
+	}
+
+	previewRestart := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-drift-restart", "sourceSurface": "node_console", "dryRun": true})
+	if previewRestart.Result != types.ControlResultAccepted {
+		t.Fatalf("expected restart dry-run accepted, got %+v", previewRestart)
+	}
+	restartContextAt := previewRestart.Facts["controlStateUpdatedAt"]
+	if restartContextAt == "" {
+		t.Fatalf("expected restart dry-run to carry controlStateUpdatedAt, got %+v", previewRestart.Facts)
+	}
+	currentNode, err := server.store.GetNode(context.Background(), "node-drift-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = server.store.UpdateNode(context.Background(), store.UpdateNodeParams{
+		NodeID:      currentNode.NodeID,
+		NodeRole:    currentNode.NodeRole,
+		Environment: currentNode.Environment,
+		TrustLevel:  currentNode.TrustLevel,
+		Owner:       currentNode.Owner,
+		Location:    currentNode.Location,
+		Tags:        currentNode.Tags,
+		Isolated:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartExecute := execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-drift-restart", "sourceSurface": "node_console", "dryRun": false, "requestedAt": restartContextAt})
+	if spy.callCount != 0 {
+		t.Fatalf("expected drifted restart execute to skip executor, got %d calls", spy.callCount)
+	}
+	if restartExecute.Result != types.ControlResultRejected || len(restartExecute.Preflight.BlockedReasons) == 0 || restartExecute.Preflight.BlockedReasons[0].Code != types.ControlReasonNodeIsolated {
+		t.Fatalf("expected drifted restart execute to be rejected with isolated reason, got %+v", restartExecute)
+	}
+
+	auditReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs?actionPrefix=control_execute_&outcome=policy_rejected&resourceID=tunnel-drift-active", nil)
+	applyCookies(auditReq, adminCookies)
+	auditRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(auditRes, auditReq)
+	if auditRes.Code != http.StatusOK {
+		t.Fatalf("expected audit logs 200, got %d", auditRes.Code)
+	}
+	var auditOut types.AuditLogListResponse
+	if err := json.NewDecoder(auditRes.Body).Decode(&auditOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if len(auditOut.Items) != 1 {
+		t.Fatalf("expected exactly one drift rejection audit for tunnel, got %+v", auditOut.Items)
+	}
+	if auditOut.Items[0].Payload["rejectionKind"] != "state_drift" || auditOut.Items[0].Payload["outcome"] != string(controlExecutionOutcomePolicyRejected) {
+		t.Fatalf("expected drift audit payload markers, got %+v", auditOut.Items[0])
+	}
+	if auditOut.Items[0].Payload["targetStateBefore"] != "status=active" || auditOut.Items[0].Payload["targetStateAfter"] != "status=paused" {
+		t.Fatalf("expected drift audit before/after states, got %+v", auditOut.Items[0])
+	}
+
+	allDriftReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs?actionPrefix=control_execute_&outcome=policy_rejected", nil)
+	applyCookies(allDriftReq, adminCookies)
+	allDriftRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(allDriftRes, allDriftReq)
+	if allDriftRes.Code != http.StatusOK {
+		t.Fatalf("expected audit logs 200, got %d", allDriftRes.Code)
+	}
+	var allDriftOut types.AuditLogListResponse
+	if err := json.NewDecoder(allDriftRes.Body).Decode(&allDriftOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if len(allDriftOut.Items) < 2 {
+		t.Fatalf("expected both drift rejections in filtered audit view, got %+v", allDriftOut.Items)
+	}
+}

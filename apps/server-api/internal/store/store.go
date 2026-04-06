@@ -97,6 +97,8 @@ type UpdateUserParams struct {
 
 type AuditLogFilter struct {
 	Action       string
+	ActionPrefix string
+	Outcome      string
 	ActorType    string
 	ActorID      string
 	ResourceType string

@@ -55,6 +55,7 @@ func (s *PostgresStore) RegisterNode(ctx context.Context, req types.NodeRegister
 		return types.NodeSummary{}, err
 	}
 	mergedMeta := mergeAgentMetadata(existingMeta, req.Metadata)
+	mergedMeta = withControlStateTimestamp(mergedMeta, now)
 	meta, err := marshalMap(mergedMeta)
 	if err != nil {
 		return types.NodeSummary{}, err
@@ -104,6 +105,18 @@ func (s *PostgresStore) HeartbeatNode(ctx context.Context, req types.NodeHeartbe
 	if err := row.Scan(&name, &agentVersion, &capabilitiesJSON, &metadataJSON); err != nil {
 		return types.NodeSummary{}, ErrNotFound
 	}
+	metadata, err := unmarshalMap(metadataJSON)
+	if err != nil {
+		return types.NodeSummary{}, err
+	}
+	metadata = withControlStateTimestamp(metadata, now)
+	metaJSON, err := marshalMap(metadata)
+	if err != nil {
+		return types.NodeSummary{}, err
+	}
+	if _, err := s.pool.Exec(ctx, `update nodes set metadata = $2 where id = $1`, req.NodeID, metaJSON); err != nil {
+		return types.NodeSummary{}, err
+	}
 	_, err = s.pool.Exec(ctx, `
 		insert into node_metrics (node_id, payload, observed_at)
 		values ($1, $2, $3)
@@ -112,10 +125,6 @@ func (s *PostgresStore) HeartbeatNode(ctx context.Context, req types.NodeHeartbe
 		return types.NodeSummary{}, err
 	}
 	capabilities, err := unmarshalCapabilities(capabilitiesJSON)
-	if err != nil {
-		return types.NodeSummary{}, err
-	}
-	metadata, err := unmarshalMap(metadataJSON)
 	if err != nil {
 		return types.NodeSummary{}, err
 	}
@@ -261,6 +270,7 @@ func (s *PostgresStore) UpdateNode(ctx context.Context, params UpdateNodeParams)
 		return types.NodeSummary{}, err
 	}
 	metadata := mergeNodeMetadata(current.Metadata, params)
+	metadata = withControlStateTimestamp(metadata, time.Now().UTC())
 	metaJSON, err := marshalMap(metadata)
 	if err != nil {
 		return types.NodeSummary{}, err
@@ -820,13 +830,15 @@ func (s *PostgresStore) ListAuditLogs(ctx context.Context, filter AuditLogFilter
 		select count(*)
 		from audit_logs
 		where ($1 = '' or action = $1)
-		  and ($2 = '' or actor_type = $2)
-		  and ($3 = '' or coalesce(actor_id, '') = $3)
-		  and ($4 = '' or resource_type = $4)
-		  and ($5 = '' or coalesce(resource_id, '') = $5)
-		  and ($6::timestamptz is null or created_at >= $6)
-		  and ($7::timestamptz is null or created_at <= $7)
-	`, filter.Action, filter.ActorType, filter.ActorID, filter.ResourceType, filter.ResourceID, filter.StartAt, filter.EndAt).Scan(&total)
+		  and ($2 = '' or action like $2 || '%')
+		  and ($3 = '' or coalesce(payload->>'outcome', '') = $3)
+		  and ($4 = '' or actor_type = $4)
+		  and ($5 = '' or coalesce(actor_id, '') = $5)
+		  and ($6 = '' or resource_type = $6)
+		  and ($7 = '' or coalesce(resource_id, '') = $7)
+		  and ($8::timestamptz is null or created_at >= $8)
+		  and ($9::timestamptz is null or created_at <= $9)
+	`, filter.Action, filter.ActionPrefix, filter.Outcome, filter.ActorType, filter.ActorID, filter.ResourceType, filter.ResourceID, filter.StartAt, filter.EndAt).Scan(&total)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -834,15 +846,17 @@ func (s *PostgresStore) ListAuditLogs(ctx context.Context, filter AuditLogFilter
 		select id, actor_type, coalesce(actor_id, ''), action, resource_type, coalesce(resource_id, ''), payload, created_at
 		from audit_logs
 		where ($1 = '' or action = $1)
-		  and ($2 = '' or actor_type = $2)
-		  and ($3 = '' or coalesce(actor_id, '') = $3)
-		  and ($4 = '' or resource_type = $4)
-		  and ($5 = '' or coalesce(resource_id, '') = $5)
-		  and ($6::timestamptz is null or created_at >= $6)
-		  and ($7::timestamptz is null or created_at <= $7)
+		  and ($2 = '' or action like $2 || '%')
+		  and ($3 = '' or coalesce(payload->>'outcome', '') = $3)
+		  and ($4 = '' or actor_type = $4)
+		  and ($5 = '' or coalesce(actor_id, '') = $5)
+		  and ($6 = '' or resource_type = $6)
+		  and ($7 = '' or coalesce(resource_id, '') = $7)
+		  and ($8::timestamptz is null or created_at >= $8)
+		  and ($9::timestamptz is null or created_at <= $9)
 		order by created_at desc, id desc
-		limit $8 offset $9
-	`, filter.Action, filter.ActorType, filter.ActorID, filter.ResourceType, filter.ResourceID, filter.StartAt, filter.EndAt, limit, offset)
+		limit $10 offset $11
+	`, filter.Action, filter.ActionPrefix, filter.Outcome, filter.ActorType, filter.ActorID, filter.ResourceType, filter.ResourceID, filter.StartAt, filter.EndAt, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}

@@ -62,7 +62,7 @@ func (s *InMemoryStore) RegisterNode(_ context.Context, req types.NodeRegisterRe
 		ActiveTunnels:  s.countActiveTunnelsForNode(nodeID),
 		RuntimeSummary: s.buildNodeRuntimeSummaryLocked(nodeID),
 		LastSeenAt:     now,
-		Metadata:       mergeAgentMetadata(existing.Summary.Metadata, req.Metadata),
+		Metadata:       withControlStateTimestamp(mergeAgentMetadata(existing.Summary.Metadata, req.Metadata), now),
 	}
 	summary = hydrateNodeSummary(summary)
 	s.nodes[nodeID] = nodeRecord{Summary: summary, Metrics: map[string]string{}}
@@ -80,6 +80,7 @@ func (s *InMemoryStore) HeartbeatNode(_ context.Context, req types.NodeHeartbeat
 	}
 	record.Summary.Status = "online"
 	record.Summary.LastSeenAt = now
+	record.Summary.Metadata = withControlStateTimestamp(record.Summary.Metadata, now)
 	record.Summary.ActiveTunnels = req.ActiveTunnels
 	record.Summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(req.NodeID)
 	record.Metrics = req.Metrics
@@ -139,7 +140,7 @@ func (s *InMemoryStore) UpdateNode(_ context.Context, params UpdateNodeParams) (
 	if !ok {
 		return types.NodeSummary{}, ErrNotFound
 	}
-	record.Summary.Metadata = mergeNodeMetadata(record.Summary.Metadata, params)
+	record.Summary.Metadata = withControlStateTimestamp(mergeNodeMetadata(record.Summary.Metadata, params), time.Now().UTC())
 	record.Summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(params.NodeID)
 	record.Summary = hydrateNodeSummary(record.Summary)
 	s.nodes[params.NodeID] = record
@@ -649,6 +650,17 @@ func mergeAgentMetadata(existing, incoming map[string]string) map[string]string 
 	return merged
 }
 
+func withControlStateTimestamp(metadata map[string]string, observedAt time.Time) map[string]string {
+	merged := map[string]string{}
+	for key, value := range metadata {
+		merged[key] = value
+	}
+	if !observedAt.IsZero() {
+		merged["controlStateUpdatedAt"] = observedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return merged
+}
+
 func matchesNodeFilter(summary types.NodeSummary, filter NodeFilter) bool {
 	if filter.NodeRole != "" && string(summary.NodeRole) != filter.NodeRole {
 		return false
@@ -741,6 +753,12 @@ func (s *InMemoryStore) ListAuditLogs(_ context.Context, filter AuditLogFilter) 
 	items := make([]types.AuditLogEntry, 0, len(s.auditLogs))
 	for _, item := range s.auditLogs {
 		if filter.Action != "" && item.Action != filter.Action {
+			continue
+		}
+		if filter.ActionPrefix != "" && !strings.HasPrefix(item.Action, filter.ActionPrefix) {
+			continue
+		}
+		if filter.Outcome != "" && item.Payload["outcome"] != filter.Outcome {
 			continue
 		}
 		if filter.ActorType != "" && item.ActorType != filter.ActorType {

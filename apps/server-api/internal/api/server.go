@@ -973,6 +973,8 @@ func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	filter := store.AuditLogFilter{
 		Action:       strings.TrimSpace(r.URL.Query().Get("action")),
+		ActionPrefix: strings.TrimSpace(r.URL.Query().Get("actionPrefix")),
+		Outcome:      strings.TrimSpace(r.URL.Query().Get("outcome")),
 		ActorType:    strings.TrimSpace(r.URL.Query().Get("actorType")),
 		ActorID:      strings.TrimSpace(r.URL.Query().Get("actorID")),
 		ResourceType: strings.TrimSpace(r.URL.Query().Get("resourceType")),
