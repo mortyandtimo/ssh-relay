@@ -1137,6 +1137,7 @@ func (s *Server) writeControlExecutionAudit(ctx context.Context, req types.Contr
 		"placeholderOnly":   strconv.FormatBool(resp.PlaceholderOnly),
 		"result":            string(resp.Result),
 		"outcome":           string(result.outcome),
+		"nextStep":          resp.NextStep,
 		"note":              strings.TrimSpace(req.Note),
 		"recommendedAction": string(plan.recommendedAction),
 		"readinessState":    string(plan.readinessState),

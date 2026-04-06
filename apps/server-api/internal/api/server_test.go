@@ -3985,12 +3985,113 @@ func TestControlExecuteAuditOutcomeSemantics(t *testing.T) {
 	if !hasAudit("control_execute_non_retryable_failure", "node-audit-nonretryable", "restart_agent") {
 		t.Fatalf("expected non-retryable failure audit, got %+v", auditOut.Items)
 	}
+	for _, item := range auditOut.Items {
+		if !strings.HasPrefix(item.Action, "control_execute_") {
+			continue
+		}
+		if item.Payload["nextStep"] == "" {
+			t.Fatalf("expected control execute audit payload to include nextStep, got %+v", item)
+		}
+	}
 	if countExecuteAudits("node-audit-policy") != 1 {
 		t.Fatalf("dry-run must not add execute audit rows; expected exactly 1 execute audit for node-audit-policy, got %+v", auditOut.Items)
 	}
 	if countExecuteAudits("node-audit-blocked-preflight") != 0 {
 		t.Fatalf("blocked preflight must not add execute audit rows, got %+v", auditOut.Items)
 	}
+}
+
+func TestAuditLogFilterSupportsCombinedControlExecuteQueries(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-audit-filter", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-audit-filter.service", "instanceProfile": "node-audit-filter", "instanceManaged": "true"})
+	registerNode("node-audit-filter-stale", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-audit-filter-stale.service", "instanceProfile": "node-audit-filter-stale", "instanceManaged": "true"})
+	if _, err := server.store.CreateTunnel(context.Background(), types.TunnelSpec{ID: "tunnel-audit-filter", NodeID: "node-audit-filter", Name: "tunnel-audit-filter", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 28200, Metadata: map[string]string{"nodeId": "node-audit-filter"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	execAction := func(payload map[string]any) {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+	}
+
+	optionsReq := httptest.NewRequest(http.MethodGet, "/api/control-actions/tunnel/tunnel-audit-filter/operator_console/options", nil)
+	applyCookies(optionsReq, adminCookies)
+	optionsRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(optionsRes, optionsReq)
+	if optionsRes.Code != http.StatusOK {
+		t.Fatalf("expected options 200, got %d", optionsRes.Code)
+	}
+	var optionsOut types.ControlActionOptionsResponse
+	if err := json.NewDecoder(optionsRes.Body).Decode(&optionsOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-audit-filter", "sourceSurface": "operator_console", "dryRun": false, "requestedAt": optionsOut.ContextVersion})
+	execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-audit-filter", "sourceSurface": "operator_console", "dryRun": false, "requestedAt": optionsOut.ContextVersion})
+
+	nodePreviewReq := httptest.NewRequest(http.MethodPost, "/api/control-actions", mustJSON(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-filter-stale", "sourceSurface": "node_console", "dryRun": true}))
+	applyCookies(nodePreviewReq, adminCookies)
+	nodePreviewRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(nodePreviewRes, nodePreviewReq)
+	if nodePreviewRes.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d", nodePreviewRes.Code)
+	}
+	var previewOut types.ControlActionResponse
+	if err := json.NewDecoder(nodePreviewRes.Body).Decode(&previewOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	node, err := server.store.GetNode(context.Background(), "node-audit-filter-stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = server.store.UpdateNode(context.Background(), store.UpdateNodeParams{NodeID: node.NodeID, NodeRole: node.NodeRole, Environment: node.Environment, TrustLevel: node.TrustLevel, Owner: node.Owner, Location: node.Location, Tags: node.Tags, Isolated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-filter-stale", "sourceSurface": "node_console", "dryRun": false, "requestedAt": previewOut.Facts["controlStateUpdatedAt"]})
+
+	query := "/api/audit-logs?actionPrefix=control_execute_&outcome=policy_rejected&resourceID=node-audit-filter-stale"
+	req := httptest.NewRequest(http.MethodGet, query, nil)
+	applyCookies(req, adminCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected audit logs 200, got %d", res.Code)
+	}
+	var out types.AuditLogListResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if len(out.Items) != 1 {
+		t.Fatalf("expected combined filter to return exactly one stale rejection audit, got %+v", out.Items)
+	}
+	if out.Items[0].Payload["rejectionKind"] != "state_drift" || out.Items[0].Payload["nextStep"] == "" {
+		t.Fatalf("expected filtered audit payload to preserve stable triage fields, got %+v", out.Items[0])
+	}
+}
+
+func mustJSON(value any) *bytes.Reader {
+	encoded, _ := json.Marshal(value)
+	return bytes.NewReader(encoded)
 }
 
 func TestControlExecuteRejectsDriftedStateBeforeExecutor(t *testing.T) {
