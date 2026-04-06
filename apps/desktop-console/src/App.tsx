@@ -1,9 +1,47 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { loadBootstrapStatus, loadCurrentUser, loadDesktopData, login, logout } from "./api";
-import type { DesktopMode, NodeCapabilities, NodeSummary, TunnelSpec, TunnelTypeTab, UserSummary } from "./types";
+import { createDesktopApi } from "../../../packages/desktop-core/src/api";
+import type {
+  ControlActionOption,
+  ControlActionRequest,
+  ControlActionResponse,
+  ControlPanelSummary,
+  ControlSurface,
+  NodeSummary,
+  TunnelSpec,
+  TunnelTypeTab,
+  UserSummary,
+} from "../../../packages/desktop-core/src/types";
+import {
+  capabilitySummary,
+  checkStateLabel,
+  checkStateTone,
+  controlOptionStateLabel,
+  controlOptionTone,
+  formatControlResultDisplay,
+  formatDate,
+  nodeAgentDeploymentLabel,
+  publicEntry,
+  resolveLocalNodeBinding,
+  runtimeLabel,
+  statusClass,
+  tunnelTabs,
+} from "../../../packages/desktop-core/src/utils";
 
-const tunnelTabs: TunnelTypeTab[] = ["tcp", "udp", "http", "https", "socks5"];
+const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
+
+type DesktopMode = "local-node" | "operator";
+
+type TunnelEditForm = {
+  name: string;
+  status: "active" | "paused";
+  targetHost: string;
+  targetPort: string;
+  publicPort: string;
+  domain: string;
+  probePath: string;
+  transportPolicy: string;
+};
 
 export default function App() {
   const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
@@ -14,12 +52,21 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TunnelTypeTab>("tcp");
   const [selectedTunnelId, setSelectedTunnelId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<TunnelEditForm | null>(null);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState("");
+  const [controlNote, setControlNote] = useState("");
+  const [controlResult, setControlResult] = useState<ControlActionResponse | null>(null);
+  const [nodeActionOptions, setNodeActionOptions] = useState<ControlActionOption[]>([]);
+  const [tunnelActionOptions, setTunnelActionOptions] = useState<ControlActionOption[]>([]);
+  const [nodeControlPanel, setNodeControlPanel] = useState<ControlPanelSummary | null>(null);
+  const [tunnelControlPanel, setTunnelControlPanel] = useState<ControlPanelSummary | null>(null);
+  const [nodeControlContextAt, setNodeControlContextAt] = useState("");
+  const [tunnelControlContextAt, setTunnelControlContextAt] = useState("");
   const refreshInFlightRef = useRef(false);
 
   useEffect(() => {
@@ -27,17 +74,17 @@ export default function App() {
 
     async function init() {
       try {
-        const status = await loadBootstrapStatus();
+        const status = await api.loadBootstrapStatus();
         if (cancelled) return;
         setBootstrapRequired(status.required);
         if (status.required) {
-          setError("当前仍需要先完成管理面 bootstrap，本轮桌面端骨架不处理 bootstrap 流程。");
+          setError("当前仍需要先完成管理面 bootstrap，本轮桌面端不处理 bootstrap 流程。");
           return;
         }
-        const me = await loadCurrentUser();
+        const me = await api.loadCurrentUser();
         if (cancelled) return;
         setCurrentUser(me.user);
-        const payload = await loadDesktopData();
+        const payload = await api.loadDesktopData();
         if (cancelled) return;
         setNodes(payload.nodes);
         setTunnels(payload.tunnels);
@@ -56,16 +103,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!currentUser) {
-      return;
-    }
+    if (!currentUser) return;
     const timer = window.setInterval(() => {
       void refreshConsoleData(false, "auto");
     }, 10000);
     return () => window.clearInterval(timer);
   }, [currentUser]);
 
-  const localBinding = useMemo(() => resolveLocalNodeBinding(nodes), [nodes]);
+  const localBinding = useMemo(() => resolveLocalNodeBinding(nodes, desktopNodeId), [nodes]);
+  const bindingTone = localBinding.status === "success" ? "good" : localBinding.status === "config_error" ? "danger" : localBinding.status === "ambiguous" ? "warn" : "neutral";
+  const bindingStatusLabel = localBinding.status === "success" ? "成功" : localBinding.status === "config_error" ? "配置错误" : localBinding.status === "ambiguous" ? "不唯一" : "未完成";
 
   useEffect(() => {
     if (!mode) {
@@ -84,17 +131,20 @@ export default function App() {
     });
   }, [localBinding.node, mode, nodes]);
 
-  const selectedNode = useMemo(
-    () => (selectedNodeId ? nodes.find((node) => node.nodeId === selectedNodeId) ?? null : null),
-    [nodes, selectedNodeId],
-  );
+  const activeSurface: ControlSurface = mode === "operator" ? "operator_console" : "node_console";
+  const selectedNode = useMemo(() => {
+    if (mode === "local-node") {
+      return localBinding.node;
+    }
+    return selectedNodeId ? nodes.find((node) => node.nodeId === selectedNodeId) ?? null : null;
+  }, [localBinding.node, mode, nodes, selectedNodeId]);
 
   const selectedNodeTunnels = useMemo(() => {
     if (!selectedNode) return [];
     return tunnels.filter((tunnel) => tunnel.nodeId === selectedNode.nodeId);
   }, [selectedNode, tunnels]);
 
-  const tabTunnels = useMemo(() => selectedNodeTunnels.filter((tunnel) => tunnel.type === activeTab), [selectedNodeTunnels, activeTab]);
+  const tabTunnels = useMemo(() => selectedNodeTunnels.filter((tunnel) => tunnel.type === activeTab), [activeTab, selectedNodeTunnels]);
 
   useEffect(() => {
     if (!tabTunnels.length) {
@@ -111,19 +161,98 @@ export default function App() {
     [selectedTunnelId, tabTunnels],
   );
 
+  useEffect(() => {
+    if (!selectedTunnel) {
+      setEditForm(null);
+      return;
+    }
+    setEditForm({
+      name: selectedTunnel.name,
+      status: selectedTunnel.status === "paused" ? "paused" : "active",
+      targetHost: selectedTunnel.targetHost || "",
+      targetPort: String(selectedTunnel.targetPort || ""),
+      publicPort: String(selectedTunnel.publicPort || ""),
+      domain: selectedTunnel.domain || "",
+      probePath: selectedTunnel.probePath || "",
+      transportPolicy: selectedTunnel.transportPolicy || "relay_only",
+    });
+  }, [selectedTunnel]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadNodeControls() {
+      if (!selectedNode || !currentUser) {
+        setNodeActionOptions([]);
+        setNodeControlPanel(null);
+        return;
+      }
+      try {
+        const [options, panel] = await Promise.all([
+          api.loadNodeControlActionOptions(selectedNode.nodeId, activeSurface),
+          api.loadNodeControlPanel(selectedNode.nodeId, activeSurface),
+        ]);
+        if (cancelled) return;
+        setNodeActionOptions(options.items);
+        setNodeControlPanel(panel);
+        setNodeControlContextAt(panel.contextVersion || options.contextVersion || options.items[0]?.contextVersion || "");
+      } catch (controlError) {
+        if (!cancelled) {
+          setNodeActionOptions([]);
+          setNodeControlPanel(null);
+          setError(controlError instanceof Error ? controlError.message : "读取节点控制摘要失败");
+        }
+      }
+    }
+    void loadNodeControls();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSurface, currentUser, selectedNode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadTunnelControls() {
+      if (!selectedTunnel || !currentUser) {
+        setTunnelActionOptions([]);
+        setTunnelControlPanel(null);
+        return;
+      }
+      try {
+        const [options, panel] = await Promise.all([
+          api.loadTunnelControlActionOptions(selectedTunnel.id, activeSurface),
+          api.loadTunnelControlPanel(selectedTunnel.id, activeSurface),
+        ]);
+        if (cancelled) return;
+        setTunnelActionOptions(options.items);
+        setTunnelControlPanel(panel);
+        setTunnelControlContextAt(panel.contextVersion || options.contextVersion || options.items[0]?.contextVersion || "");
+      } catch (controlError) {
+        if (!cancelled) {
+          setTunnelActionOptions([]);
+          setTunnelControlPanel(null);
+          setError(controlError instanceof Error ? controlError.message : "读取 tunnel 控制摘要失败");
+        }
+      }
+    }
+    void loadTunnelControls();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSurface, currentUser, selectedTunnel]);
+
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy("login");
     setError("");
     setMessage("");
     try {
-      const auth = await login(loginForm.email, loginForm.password);
+      const auth = await api.login(loginForm.email, loginForm.password);
       setCurrentUser(auth.user);
-      const payload = await loadDesktopData();
+      const payload = await api.loadDesktopData();
       setNodes(payload.nodes);
       setTunnels(payload.tunnels);
       setLastRefreshAt(new Date().toISOString());
-      setMessage("桌面端骨架已接入当前管理面数据。请选择模式继续。");
+      setMessage("desktop-console 已接入当前管理面数据，可在本机模式和运维模式之间切换。");
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "登录失败");
     } finally {
@@ -136,15 +265,21 @@ export default function App() {
     setError("");
     setMessage("");
     try {
-      await logout();
+      await api.logout();
       setCurrentUser(null);
       setMode(null);
       setNodes([]);
       setTunnels([]);
       setSelectedNodeId(null);
       setSelectedTunnelId(null);
+      setNodeActionOptions([]);
+      setTunnelActionOptions([]);
+      setNodeControlPanel(null);
+      setTunnelControlPanel(null);
+      setControlResult(null);
+      setControlNote("");
       setLastRefreshAt("");
-      setMessage("已退出桌面端骨架会话。");
+      setMessage("已退出 desktop-console。");
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "退出失败");
     } finally {
@@ -153,22 +288,18 @@ export default function App() {
   }
 
   async function refreshConsoleData(showNotice: boolean, source: "manual" | "auto") {
-    if (!currentUser || refreshInFlightRef.current) {
-      return;
-    }
+    if (!currentUser || refreshInFlightRef.current) return;
     refreshInFlightRef.current = true;
     setRefreshing(true);
-    if (showNotice) {
-      setMessage("");
-    }
+    if (showNotice) setMessage("");
     try {
-      const payload = await loadDesktopData();
+      const payload = await api.loadDesktopData();
       setNodes(payload.nodes);
       setTunnels(payload.tunnels);
       setLastRefreshAt(new Date().toISOString());
       setError("");
       if (showNotice) {
-        setMessage("桌面端数据已刷新，当前模式和选择上下文已尽量保留。");
+        setMessage("desktop-console 数据已刷新，当前模式与控制上下文已尽量保留。");
       }
     } catch (refreshError) {
       const prefix = source === "auto" ? "自动刷新失败，已保留当前页面数据。" : "手动刷新失败，已保留当前页面数据。";
@@ -180,12 +311,78 @@ export default function App() {
     }
   }
 
+  async function handleTunnelSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedTunnel || !selectedNode || !editForm) {
+      return;
+    }
+    setBusy("save-tunnel");
+    setError("");
+    setMessage("");
+    try {
+      await api.updateTunnel(selectedTunnel.id, {
+        id: selectedTunnel.id,
+        nodeId: selectedNode.nodeId,
+        name: editForm.name.trim(),
+        type: selectedTunnel.type,
+        status: editForm.status,
+        targetHost: editForm.targetHost.trim(),
+        targetPort: Number(editForm.targetPort),
+        publicPort: Number(editForm.publicPort),
+        domain: selectedTunnel.type === "http" || selectedTunnel.type === "https" ? editForm.domain.trim() : "",
+        probePath: selectedTunnel.type === "http" || selectedTunnel.type === "https" ? editForm.probePath.trim() : "",
+        transportPolicy: editForm.transportPolicy,
+        tlsMode: selectedTunnel.tlsMode || "",
+      });
+      await refreshConsoleData(false, "manual");
+      setMessage("当前 tunnel 的最小配置字段已提交，列表和详情已刷新。transportPolicy 仍只代表配置意图，不代表当前 runtime facts 已改变。");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "保存 tunnel 失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function currentControlContextAt(targetKind: ControlActionRequest["targetKind"]) {
+    if (targetKind === "tunnel") {
+      return tunnelControlPanel?.contextVersion || tunnelActionOptions[0]?.contextVersion || tunnelControlContextAt || undefined;
+    }
+    return nodeControlPanel?.contextVersion || nodeActionOptions[0]?.contextVersion || nodeControlContextAt || undefined;
+  }
+
+  async function runControlAction(actionKind: ControlActionRequest["actionKind"], targetKind: ControlActionRequest["targetKind"], targetId: string, dryRun: boolean) {
+    setBusy("control-action");
+    setError("");
+    setMessage("");
+    try {
+      const result = await api.controlAction({
+        actionKind,
+        targetKind,
+        targetId,
+        sourceSurface: activeSurface,
+        dryRun,
+        note: controlNote.trim(),
+        requestedAt: currentControlContextAt(targetKind),
+      });
+      setControlResult(result);
+      setMessage(result.humanMessage);
+      await refreshConsoleData(false, "manual");
+    } catch (controlError) {
+      setError(controlError instanceof Error ? controlError.message : "控制动作请求失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
   if (bootstrapRequired === null) {
+    if (error) {
+      return <Shell><StateCard title="桌面端骨架初始化失败" body={error} /></Shell>;
+    }
     return <Shell><StateCard title="桌面端骨架初始化中" body="正在读取现有管理面认证状态和后端基础数据。" /></Shell>;
   }
 
   if (bootstrapRequired) {
-    return <Shell><StateCard title="当前环境仍需 bootstrap" body="这轮桌面端第一版骨架不处理 bootstrap 流程，请先通过现有管理面完成初始化。" /></Shell>;
+    return <Shell><StateCard title="当前环境仍需 bootstrap" body="这轮桌面端不处理 bootstrap 流程，请先通过现有管理面完成初始化。" /></Shell>;
   }
 
   if (!currentUser) {
@@ -193,8 +390,8 @@ export default function App() {
       <Shell>
         <div className="login-card">
           <p className="eyebrow">Desktop Console V1</p>
-          <h1>统一桌面端骨架</h1>
-          <p className="copy">这轮只接现有管理面认证和真实后端数据，不实现 desktop-console 正式打包，也不实现 P2P 数据面。</p>
+          <h1>统一桌面控制台</h1>
+          <p className="copy">本轮接入与 node/operator 一致的 control-v1 合同，包括 contextVersion、稳定 executeOutcome 分类和真实刷新闭环。</p>
           <form className="login-form" onSubmit={handleLogin}>
             <label>
               <span>邮箱</span>
@@ -204,7 +401,7 @@ export default function App() {
               <span>密码</span>
               <input type="password" value={loginForm.password} onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))} required />
             </label>
-            <button type="submit" disabled={busy === "login"}>{busy === "login" ? "登录中..." : "进入桌面端骨架"}</button>
+            <button type="submit" disabled={busy === "login"}>{busy === "login" ? "登录中..." : "进入 desktop-console"}</button>
           </form>
           {error ? <div className="banner error">{error}</div> : null}
           {message ? <div className="banner info">{message}</div> : null}
@@ -219,12 +416,12 @@ export default function App() {
         <div className="mode-grid">
           <ModeCard
             title="本机模式"
-            description="围绕当前机器工作，进入后默认直达当前机器首页，适合作为 24h Windows 机器上的 local-node mode 基线。"
+            description="映射到 node_console 语义：围绕当前机器和本机隧道工作，使用同一套 contextVersion / executeOutcome 合同。"
             onClick={() => setMode("local-node")}
           />
           <ModeCard
             title="运维模式"
-            description="先进入机器列表，再选定机器进入同一套工作流。相比本机模式，这轮唯一新增入口就是选择机器。"
+            description="映射到 operator_console 语义：先选机器，再对节点和隧道执行同一套控制动作，不再形成独立合同。"
             onClick={() => setMode("operator")}
           />
         </div>
@@ -239,14 +436,14 @@ export default function App() {
           <div className="panel brand-panel">
             <p className="eyebrow">Desktop Console</p>
             <h1>{mode === "local-node" ? "本机模式" : "运维模式"}</h1>
-            <p className="copy">统一桌面端第一版骨架：共用同一套主工作流，operator mode 只多一个机器选择入口。</p>
+            <p className="copy">统一桌面控制台：本机模式使用 node-console 语义，运维模式使用 operator-console 语义，控制结果分类完全由稳定机器字段驱动。</p>
           </div>
 
           <div className="panel user-panel">
             <strong>{currentUser.displayName}</strong>
             <span className="muted-line">{currentUser.email}</span>
             <span className="status-chip neutral">{currentUser.role}</span>
-            <span className="muted-line">自动刷新 10s{lastRefreshAt ? " / 上次成功 " + formatDate(lastRefreshAt) : " / 尚无成功刷新"}</span>
+            <span className="muted-line">surface: {activeSurface} / 自动刷新 10s{lastRefreshAt ? " / 上次成功 " + formatDate(lastRefreshAt) : " / 尚无成功刷新"}</span>
             <div className="button-row">
               <button className="secondary" type="button" onClick={() => void refreshConsoleData(true, "manual")} disabled={refreshing}>{refreshing ? "刷新中..." : "手动刷新"}</button>
               <button className="secondary" type="button" onClick={() => setMode(null)}>切换模式</button>
@@ -254,9 +451,24 @@ export default function App() {
             </div>
           </div>
 
-          {mode === "operator" ? (
+          {mode === "local-node" ? (
+            <div className="panel binding-panel">
+              <div className="panel-head small">
+                <h2>本机绑定状态</h2>
+                <span className={"status-chip " + bindingTone}>{bindingStatusLabel}</span>
+              </div>
+              <div className="detail-stack binding-grid">
+                <Metric label="绑定来源" value={localBinding.sourceLabel} />
+                <Metric label="当前配置 nodeId" value={desktopNodeId || "未配置"} />
+                <Metric label="当前受管 local 节点数" value={String(nodes.filter((node) => node.nodeRole === "local" && node.instanceManaged).length)} />
+                <Metric label="是否命中绑定节点" value={localBinding.node ? localBinding.node.nodeId : "未命中"} />
+              </div>
+              <div className="banner info binding-note">绑定原因：{localBinding.reason}</div>
+              <div className="banner info binding-note">下一步建议：{localBinding.nextAction}</div>
+            </div>
+          ) : (
             <div className="panel machine-panel">
-              <div className="panel-head">
+              <div className="panel-head small">
                 <h2>机器列表</h2>
                 <span>{nodes.length} 台</span>
               </div>
@@ -280,7 +492,7 @@ export default function App() {
                 ))}
               </div>
             </div>
-          ) : null}
+          )}
         </aside>
 
         <main className="main-stage">
@@ -288,7 +500,7 @@ export default function App() {
           {message ? <div className="banner info">{message}</div> : null}
 
           {mode === "local-node" && !localBinding.node ? (
-            <StateCard title="尚未完成本机绑定" body={localBinding.reason + " 本机模式这轮不再 fallback 到 third_party、cloud 或首个节点。请配置 VITE_DESKTOP_NODE_ID，或让当前账号下只保留唯一受管 local 节点。"} />
+            <StateCard title="尚未完成本机绑定" body={localBinding.reason + " " + localBinding.nextAction + " 本机模式不会 fallback 到 operator 机器列表。"} />
           ) : !selectedNode ? (
             <StateCard title="当前没有可展示的机器" body={mode === "local-node" ? "本机模式尚未选中绑定机器。" : "请在左侧机器列表中选择一台机器。"} />
           ) : (
@@ -304,7 +516,7 @@ export default function App() {
                     <span className={statusClass(selectedNode.status)}>{selectedNode.status}</span>
                     <span className={selectedNode.isolated ? "status-chip danger" : "status-chip good"}>{selectedNode.isolated ? "已隔离" : "未隔离"}</span>
                     <span className="status-chip neutral">{selectedNode.agentVersion || "agent 未上报"}</span>
-                    {mode === "local-node" ? <span className="status-chip neutral">绑定来源: {localBinding.sourceLabel}</span> : null}
+                    <span className="status-chip neutral">surface: {activeSurface}</span>
                   </div>
                 </div>
                 <div className="hero-grid">
@@ -323,11 +535,55 @@ export default function App() {
                 </div>
               </section>
 
+              <section className="panel preflight-panel">
+                <div className="panel-head small">
+                  <div>
+                    <h2>节点控制区</h2>
+                    <p className="copy">panel、options、dry-run、execute 都走与 node/operator 一致的 control-v1 主链，并使用同一个 contextVersion/requestedAt 合同。</p>
+                  </div>
+                </div>
+                {nodeControlPanel ? <div className="banner info">{nodeControlPanel.headline} {nodeControlPanel.summary} 下一步：{nodeControlPanel.nextStep}</div> : null}
+                <div className="check-list">
+                  {(nodeControlPanel?.checks || []).map((item) => (
+                    <div key={item.code} className="check-item">
+                      <div className="check-head">
+                        <strong>{item.label}</strong>
+                        <span className={"status-chip " + checkStateTone(item.state)}>{checkStateLabel(item.state)}</span>
+                      </div>
+                      <p className="copy">{item.message}</p>
+                    </div>
+                  ))}
+                </div>
+                <label className="control-note-field">
+                  <span>控制动作备注</span>
+                  <textarea value={controlNote} onChange={(event) => setControlNote(event.target.value)} placeholder="可选：记录为什么要做这次控制动作" />
+                </label>
+                <div className="check-list compact-check-list">
+                  {nodeActionOptions.map((option) => (
+                    <div key={option.actionKind} className="check-item">
+                      <div className="check-head">
+                        <strong>{option.label}</strong>
+                        <span className={"status-chip " + controlOptionTone(option)}>{controlOptionStateLabel(option)}</span>
+                      </div>
+                      {nodeControlPanel?.recommendedAction === option.actionKind ? <p className="copy">推荐动作</p> : null}
+                      <p className="copy">{option.message}</p>
+                      {option.summary ? <p className="copy">{option.summary}</p> : null}
+                      {option.nextStep ? <p className="copy">下一步：{option.nextStep}</p> : null}
+                      <p className="copy">executionMode: <code>{option.executionMode}</code> / placeholderOnly: <code>{String(Boolean(option.placeholderOnly))}</code> / contextVersion: <code>{option.contextVersion || nodeControlPanel?.contextVersion || nodeControlContextAt || "-"}</code></p>
+                      <div className="button-row wrap-actions">
+                        <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
+                        <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : (option.placeholderOnly ? "占位执行 " : "执行 ") + option.label}</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
               <section className="panel workbench-panel">
                 <div className="panel-head">
                   <div>
                     <h2>按隧道类型切换的工作区</h2>
-                    <p className="copy">这轮先把 TCP / UDP / HTTP / HTTPS / SOCKS5 的真实列表和当前选中项工作区搭起来，不做每个类型的深度定制交互。</p>
+                    <p className="copy">当前选中隧道的详情、最小编辑入口和 tunnel control panel/options/result 全部在同一个工作区里闭环。</p>
                   </div>
                 </div>
 
@@ -364,26 +620,76 @@ export default function App() {
 
                   <div className="panel tunnel-detail-panel">
                     <div className="panel-head small">
-                      <h3>当前隧道详情 / 编辑区</h3>
+                      <h3>当前隧道详情 / 控制区</h3>
                     </div>
                     {!selectedTunnel ? (
-                      <div className="empty-inline">请先在左侧选择一个 tunnel。当前类型工作区只做最小真实字段展示，不扩大量新表单逻辑。</div>
+                      <div className="empty-inline">请先在左侧选择一个 tunnel。</div>
                     ) : (
-                      <div className="detail-stack">
-                        <Metric label="name" value={selectedTunnel.name} />
-                        <Metric label="type" value={selectedTunnel.type} />
-                        <Metric label="transportPolicy" value={selectedTunnel.transportPolicy || "relay_only"} />
-                        <Metric label="runtimePath" value={selectedTunnel.runtimePath || "尚无运行态上报"} />
-                        <Metric label="runtimeState" value={selectedTunnel.runtimeState || "尚无运行态上报"} />
-                        <Metric label="lastFailureReason" value={selectedTunnel.lastFailureReason || "尚无运行态上报"} />
-                        <Metric label="public entry" value={publicEntry(selectedTunnel)} />
-                        <Metric label="target" value={selectedTunnel.targetHost + ":" + selectedTunnel.targetPort} />
-                        <Metric label="status" value={selectedTunnel.status} />
+                      <div className="detail-column">
+                        <div className="detail-stack">
+                          <Metric label="name" value={selectedTunnel.name} />
+                          <Metric label="type" value={selectedTunnel.type} />
+                          <Metric label="transportPolicy" value={selectedTunnel.transportPolicy || "relay_only"} />
+                          <Metric label="runtimePath" value={selectedTunnel.runtimePath || "尚无运行态上报"} />
+                          <Metric label="runtimeState" value={selectedTunnel.runtimeState || "尚无运行态上报"} />
+                          <Metric label="lastFailureReason" value={selectedTunnel.lastFailureReason || "尚无运行态上报"} />
+                          <Metric label="public entry" value={publicEntry(selectedTunnel)} />
+                          <Metric label="target" value={selectedTunnel.targetHost + ":" + selectedTunnel.targetPort} />
+                          <Metric label="status" value={selectedTunnel.status} />
+                        </div>
+
+                        <form className="edit-form" onSubmit={handleTunnelSave}>
+                          <div className="panel-head small"><h3>最小编辑入口</h3></div>
+                          <label><span>tunnel 名称</span><input value={editForm?.name || ""} onChange={(event) => setEditForm((current) => current ? { ...current, name: event.target.value } : current)} /></label>
+                          <label><span>status</span><select value={editForm?.status || "active"} onChange={(event) => setEditForm((current) => current ? { ...current, status: event.target.value as "active" | "paused" } : current)}><option value="active">active</option><option value="paused">paused</option></select></label>
+                          <label><span>targetHost</span><input value={editForm?.targetHost || ""} onChange={(event) => setEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} /></label>
+                          <label><span>targetPort</span><input value={editForm?.targetPort || ""} onChange={(event) => setEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} /></label>
+                          <label><span>publicPort</span><input value={editForm?.publicPort || ""} onChange={(event) => setEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} /></label>
+                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>domain</span><input value={editForm?.domain || ""} onChange={(event) => setEditForm((current) => current ? { ...current, domain: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 domain。</div>}
+                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>probePath</span><input value={editForm?.probePath || ""} onChange={(event) => setEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 probePath。</div>}
+                          <label><span>transportPolicy</span><select value={editForm?.transportPolicy || "relay_only"} onChange={(event) => setEditForm((current) => current ? { ...current, transportPolicy: event.target.value } : current)}><option value="relay_only">relay_only</option><option value="p2p_preferred">p2p_preferred</option></select></label>
+                          <div className="weak-note">transportPolicy 只代表配置意图。当前 runtimePath / runtimeState / lastFailureReason 仍然是运行事实，这轮编辑不会把它们伪装成已经改变。</div>
+
+                          {tunnelControlPanel ? <div className="banner info">{tunnelControlPanel.headline} {tunnelControlPanel.summary} 下一步：{tunnelControlPanel.nextStep}</div> : null}
+                          <div className="check-list compact-check-list">
+                            {(tunnelControlPanel?.checks || []).map((item) => (
+                              <div key={item.code} className="check-item">
+                                <div className="check-head">
+                                  <strong>{item.label}</strong>
+                                  <span className={"status-chip " + checkStateTone(item.state)}>{checkStateLabel(item.state)}</span>
+                                </div>
+                                <p className="copy">{item.message}</p>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="check-list compact-check-list">
+                            {tunnelActionOptions.map((option) => (
+                              <div key={option.actionKind} className="check-item">
+                                <div className="check-head">
+                                  <strong>{option.label}</strong>
+                                  <span className={"status-chip " + controlOptionTone(option)}>{controlOptionStateLabel(option)}</span>
+                                </div>
+                                {tunnelControlPanel?.recommendedAction === option.actionKind ? <p className="copy">推荐动作</p> : null}
+                                <p className="copy">{option.message}</p>
+                                {option.summary ? <p className="copy">{option.summary}</p> : null}
+                                {option.nextStep ? <p className="copy">下一步：{option.nextStep}</p> : null}
+                                <p className="copy">executionMode: <code>{option.executionMode}</code> / placeholderOnly: <code>{String(Boolean(option.placeholderOnly))}</code> / contextVersion: <code>{option.contextVersion || tunnelControlPanel?.contextVersion || tunnelControlContextAt || "-"}</code></p>
+                                <div className="button-row wrap-actions">
+                                  <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
+                                  <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : (option.placeholderOnly ? "占位执行 " : "执行 ") + option.label}</button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <button type="submit" disabled={busy === "save-tunnel"}>{busy === "save-tunnel" ? "保存中..." : "保存当前 tunnel"}</button>
+                        </form>
                       </div>
                     )}
                   </div>
                 </div>
               </section>
+
+              {controlResult ? <ControlResultBlock result={controlResult} /> : null}
             </>
           )}
         </main>
@@ -424,93 +730,44 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function resolveLocalNodeBinding(nodes: NodeSummary[]) {
-  if (desktopNodeId) {
-    const matched = nodes.find((node) => node.nodeId === desktopNodeId) ?? null;
-    if (matched) {
-      return {
-        node: matched,
-        sourceLabel: "VITE_DESKTOP_NODE_ID",
-        reason: "已通过 VITE_DESKTOP_NODE_ID 明确绑定到本机节点 " + desktopNodeId + "。",
-      };
-    }
-    return {
-      node: null,
-      sourceLabel: "VITE_DESKTOP_NODE_ID",
-      reason: "当前配置了 VITE_DESKTOP_NODE_ID=" + desktopNodeId + "，但当前节点列表中没有命中该 nodeId。",
-    };
-  }
-
-  const managedLocalNodes = nodes.filter((node) => node.nodeRole === "local" && node.instanceManaged);
-  if (managedLocalNodes.length === 1) {
-    return {
-      node: managedLocalNodes[0],
-      sourceLabel: "唯一受管 local 节点",
-      reason: "当前账号下只检测到一个受管 local 节点，已可确定性绑定。",
-    };
-  }
-  if (managedLocalNodes.length === 0) {
-    return {
-      node: null,
-      sourceLabel: "尚无绑定来源",
-      reason: "没有检测到明确可绑定的受管 local 节点。",
-    };
-  }
-  return {
-    node: null,
-    sourceLabel: "绑定不唯一",
-    reason: "当前检测到 " + managedLocalNodes.length + " 个受管 local 节点，无法确定本机归属。",
-  };
-}
-
-function capabilitySummary(capabilities: NodeCapabilities) {
-  const active = [] as string[];
-  if (capabilities.tcpRelay) active.push("TCP");
-  if (capabilities.udpRelay) active.push("UDP");
-  if (capabilities.httpRelay) active.push("HTTP");
-  if (capabilities.httpsRelay || capabilities.httpRelay) active.push("HTTPS");
-  if (capabilities.socks5Connect) active.push("SOCKS5");
-  if (capabilities.p2pAssist) active.push("P2P assist");
-  return active.length > 0 ? active.join(" / ") : "无能力上报";
-}
-
-function nodeAgentDeploymentLabel(node: NodeSummary) {
-  const mode = (node.deploymentMode || "").trim();
-  const unit = (node.serviceUnit || "").trim();
-  const managed = Boolean(node.instanceManaged);
-  if (mode === "managed" || managed) {
-    return unit ? "受管运行 / " + unit : "受管运行 / service unit 尚未上报";
-  }
-  if (mode) {
-    return mode + " / 未托管";
-  }
-  return "尚未上报 / 未托管";
-}
-
-function statusClass(status: string) {
-  return status === "online" ? "status-chip good" : "status-chip danger";
-}
-
-function formatDate(value: string) {
-  if (!value) return "-";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString();
-}
-
-function publicEntry(tunnel: TunnelSpec) {
-  if (tunnel.type === "http" || tunnel.type === "https") {
-    return tunnel.domain || "尚未配置域名";
-  }
-  if (tunnel.publicPort) {
-    return String(tunnel.publicPort);
-  }
-  return "-";
-}
-
-function runtimeLabel(tunnel: TunnelSpec) {
-  if (tunnel.runtimePath || tunnel.runtimeState) {
-    return [tunnel.runtimePath || "尚无", tunnel.runtimeState || "尚无"].join(" / ");
-  }
-  return "尚无运行态上报";
+function ControlResultBlock({ result }: { result: ControlActionResponse }) {
+  const display = formatControlResultDisplay(result);
+  return (
+    <section className="panel result-panel">
+      <div className="panel-head small">
+        <h2>最近一次控制结果</h2>
+        <span className={"status-chip " + display.tone}>{display.categoryLabel}</span>
+      </div>
+      <p className="copy">{display.message}</p>
+      <p className="copy">result: <code>{result.result}</code> / executeOutcome: <code>{result.executeOutcome || "-"}</code> / rejectionKind: <code>{result.rejectionKind || "-"}</code></p>
+      <p className="copy">executionMode: <code>{display.executionMode}</code> / dryRunOnly: <code>{display.dryRunOnly}</code> / placeholderOnly: <code>{String(display.placeholderOnly)}</code></p>
+      <p className="copy">下一步：{display.nextStep}</p>
+      {display.blockedReasons.length > 0 ? (
+        <div className="check-list compact-check-list">
+          {display.blockedReasons.map((reason) => (
+            <div key={reason.code} className="check-item">
+              <div className="check-head">
+                <strong>{reason.code}</strong>
+                <span className="status-chip danger">阻断</span>
+              </div>
+              <p className="copy">{reason.message}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {display.executionNotes.length > 0 ? (
+        <div className="check-list compact-check-list">
+          {display.executionNotes.map((note) => (
+            <div key={note.code || note.message} className="check-item">
+              <div className="check-head">
+                <strong>{note.code || "note"}</strong>
+                <span className="status-chip neutral">执行说明</span>
+              </div>
+              <p className="copy">{note.message}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
 }
