@@ -2107,9 +2107,9 @@ function buildAuditQuery(filter: AuditFilterState) {
               </div>
               <div className="table-wrap compact-table dense-table">
                 <table>
-                  <thead><tr><th>时间</th><th>执行者</th><th>动作</th><th>结果</th><th>模式</th><th>资源</th></tr></thead>
+                  <thead><tr><th>时间</th><th>执行者</th><th>动作</th><th>结果</th><th>模式</th><th>拒绝/原因</th><th>建议</th><th>资源</th></tr></thead>
                   <tbody>
-                    {auditLogs.length === 0 ? <tr><td colSpan={6}>暂无审计日志。</td></tr> : auditLogs.map((entry) => (
+                    {auditLogs.length === 0 ? <tr><td colSpan={8}>暂无审计日志。</td></tr> : auditLogs.map((entry) => (
                       <Fragment key={entry.id}>
                         <tr className={expandedAuditID === entry.id ? "audit-row selected-row" : "audit-row"} onClick={() => setExpandedAuditID((current) => current === entry.id ? null : entry.id)}>
                           <td>{formatDate(entry.createdAt)}</td>
@@ -2117,10 +2117,12 @@ function buildAuditQuery(filter: AuditFilterState) {
                           <td><strong>{auditActionLabel(entry)}</strong><div className="muted">{entry.action}</div></td>
                           <td>{auditOutcomeLabel(entry)}</td>
                           <td>{auditModeSummary(entry)}</td>
+                          <td>{auditRejectionLabel(entry)}</td>
+                          <td>{auditNextStep(entry)}</td>
                           <td>{entry.resourceType}:{entry.resourceId || "-"}</td>
                         </tr>
                         {expandedAuditID === entry.id ? (
-                          <tr className="audit-payload-row"><td colSpan={6}><pre className="payload-view">{JSON.stringify(entry.payload || {}, null, 2)}</pre></td></tr>
+                          <tr className="audit-payload-row"><td colSpan={8}><pre className="payload-view">{JSON.stringify(entry.payload || {}, null, 2)}</pre></td></tr>
                         ) : null}
                       </Fragment>
                     ))}
@@ -2198,6 +2200,24 @@ function auditModeSummary(entry: AuditLogEntry) {
   const mode = entry.payload?.executionMode || "-";
   const placeholder = entry.payload?.placeholderOnly === "true" ? " / placeholder" : "";
   return mode + placeholder;
+}
+
+function auditRejectionLabel(entry: AuditLogEntry) {
+  const rejectionKind = entry.payload?.rejectionKind || "";
+  if (rejectionKind === "state_drift") return "请刷新后重试";
+  if (rejectionKind === "duplicate_inflight") return "处理中勿重复提交";
+  if (rejectionKind === "duplicate_handled") return "该上下文已处理完成";
+  return entry.payload?.primaryReasonCode || "-";
+}
+
+function auditNextStep(entry: AuditLogEntry) {
+  const message = entry.payload?.humanMessage || "";
+  if ((entry.payload?.outcome || "") === "retryable_failure") return "可稍后重试";
+  if ((entry.payload?.outcome || "") === "non_retryable_failure") return "先修正环境后再试";
+  if (entry.payload?.rejectionKind === "state_drift") return "先刷新控制上下文";
+  if (entry.payload?.rejectionKind === "duplicate_inflight") return "等待当前结果";
+  if (entry.payload?.rejectionKind === "duplicate_handled") return "刷新后再决定是否重试";
+  return message || "-";
 }
 
 function MetricCard({ label, value, hint }: { label: string; value: string; hint: string }) {
