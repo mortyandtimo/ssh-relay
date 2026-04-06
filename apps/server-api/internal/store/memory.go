@@ -62,7 +62,10 @@ func (s *InMemoryStore) RegisterNode(_ context.Context, req types.NodeRegisterRe
 		ActiveTunnels:  s.countActiveTunnelsForNode(nodeID),
 		RuntimeSummary: s.buildNodeRuntimeSummaryLocked(nodeID),
 		LastSeenAt:     now,
-		Metadata:       withControlStateTimestamp(mergeAgentMetadata(existing.Summary.Metadata, req.Metadata), now),
+		Metadata:       mergeAgentMetadata(existing.Summary.Metadata, req.Metadata),
+	}
+	if existing.Summary.NodeID == "" || nodeControlRelevantMetadataChanged(existing.Summary.Metadata, summary.Metadata) {
+		summary.Metadata = withControlStateTimestamp(summary.Metadata, now)
 	}
 	summary = hydrateNodeSummary(summary)
 	s.nodes[nodeID] = nodeRecord{Summary: summary, Metrics: map[string]string{}}
@@ -80,7 +83,6 @@ func (s *InMemoryStore) HeartbeatNode(_ context.Context, req types.NodeHeartbeat
 	}
 	record.Summary.Status = "online"
 	record.Summary.LastSeenAt = now
-	record.Summary.Metadata = withControlStateTimestamp(record.Summary.Metadata, now)
 	record.Summary.ActiveTunnels = req.ActiveTunnels
 	record.Summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(req.NodeID)
 	record.Metrics = req.Metrics
@@ -157,6 +159,7 @@ func (s *InMemoryStore) CreateTunnel(_ context.Context, spec types.TunnelSpec) (
 		tunnel.Metadata = map[string]string{}
 	}
 	tunnel.Metadata["nodeId"] = tunnel.NodeID
+	tunnel.Metadata = withControlStateTimestamp(tunnel.Metadata, tunnel.UpdatedAt)
 	s.mu.Lock()
 	if s.findPublicPortConflictLocked(tunnel.ID, tunnel.Type, tunnel.Status, tunnel.PublicPort) {
 		s.mu.Unlock()
@@ -197,9 +200,15 @@ func (s *InMemoryStore) UpdateTunnel(_ context.Context, spec types.TunnelSpec) (
 	tunnel.Metadata["nodeId"] = tunnel.NodeID
 
 	s.mu.Lock()
-	if _, ok := s.tunnels[tunnel.ID]; !ok {
+	current, ok := s.tunnels[tunnel.ID]
+	if !ok {
 		s.mu.Unlock()
 		return types.TunnelSpec{}, ErrNotFound
+	}
+	if current.Status == tunnel.Status {
+		tunnel.Metadata["controlStateUpdatedAt"] = current.Metadata["controlStateUpdatedAt"]
+	} else {
+		tunnel.Metadata = withControlStateTimestamp(tunnel.Metadata, tunnel.UpdatedAt)
 	}
 	if s.findPublicPortConflictLocked(tunnel.ID, tunnel.Type, tunnel.Status, tunnel.PublicPort) {
 		s.mu.Unlock()
@@ -648,6 +657,15 @@ func mergeAgentMetadata(existing, incoming map[string]string) map[string]string 
 		merged[key] = value
 	}
 	return merged
+}
+
+func nodeControlRelevantMetadataChanged(before, after map[string]string) bool {
+	for _, key := range []string{"deploymentMode", "serviceUnit", "instanceProfile", "instanceManaged", "isolated"} {
+		if strings.TrimSpace(before[key]) != strings.TrimSpace(after[key]) {
+			return true
+		}
+	}
+	return false
 }
 
 func withControlStateTimestamp(metadata map[string]string, observedAt time.Time) map[string]string {

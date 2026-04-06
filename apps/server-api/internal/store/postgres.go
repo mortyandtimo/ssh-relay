@@ -55,7 +55,9 @@ func (s *PostgresStore) RegisterNode(ctx context.Context, req types.NodeRegister
 		return types.NodeSummary{}, err
 	}
 	mergedMeta := mergeAgentMetadata(existingMeta, req.Metadata)
-	mergedMeta = withControlStateTimestamp(mergedMeta, now)
+	if len(existingMeta) == 0 || nodeControlRelevantMetadataChanged(existingMeta, mergedMeta) {
+		mergedMeta = withControlStateTimestamp(mergedMeta, now)
+	}
 	meta, err := marshalMap(mergedMeta)
 	if err != nil {
 		return types.NodeSummary{}, err
@@ -105,18 +107,6 @@ func (s *PostgresStore) HeartbeatNode(ctx context.Context, req types.NodeHeartbe
 	if err := row.Scan(&name, &agentVersion, &capabilitiesJSON, &metadataJSON); err != nil {
 		return types.NodeSummary{}, ErrNotFound
 	}
-	metadata, err := unmarshalMap(metadataJSON)
-	if err != nil {
-		return types.NodeSummary{}, err
-	}
-	metadata = withControlStateTimestamp(metadata, now)
-	metaJSON, err := marshalMap(metadata)
-	if err != nil {
-		return types.NodeSummary{}, err
-	}
-	if _, err := s.pool.Exec(ctx, `update nodes set metadata = $2 where id = $1`, req.NodeID, metaJSON); err != nil {
-		return types.NodeSummary{}, err
-	}
 	_, err = s.pool.Exec(ctx, `
 		insert into node_metrics (node_id, payload, observed_at)
 		values ($1, $2, $3)
@@ -125,6 +115,10 @@ func (s *PostgresStore) HeartbeatNode(ctx context.Context, req types.NodeHeartbe
 		return types.NodeSummary{}, err
 	}
 	capabilities, err := unmarshalCapabilities(capabilitiesJSON)
+	if err != nil {
+		return types.NodeSummary{}, err
+	}
+	metadata, err := unmarshalMap(metadataJSON)
 	if err != nil {
 		return types.NodeSummary{}, err
 	}
@@ -295,6 +289,7 @@ func (s *PostgresStore) CreateTunnel(ctx context.Context, spec types.TunnelSpec)
 		tunnel.Metadata = map[string]string{}
 	}
 	tunnel.Metadata["nodeId"] = tunnel.NodeID
+	tunnel.Metadata = withControlStateTimestamp(tunnel.Metadata, time.Now().UTC())
 	conflict, err := s.hasPublicPortConflict(ctx, tunnel.ID, tunnel.Type, tunnel.Status, tunnel.PublicPort)
 	if err != nil {
 		return types.TunnelSpec{}, err
@@ -370,8 +365,14 @@ func (s *PostgresStore) UpdateTunnel(ctx context.Context, spec types.TunnelSpec)
 		tunnel.Metadata = map[string]string{}
 	}
 	tunnel.Metadata["nodeId"] = tunnel.NodeID
-	if _, err := s.GetTunnel(ctx, tunnel.ID); err != nil {
+	current, err := s.GetTunnel(ctx, tunnel.ID)
+	if err != nil {
 		return types.TunnelSpec{}, err
+	}
+	if current.Status == tunnel.Status {
+		tunnel.Metadata["controlStateUpdatedAt"] = current.Metadata["controlStateUpdatedAt"]
+	} else {
+		tunnel.Metadata = withControlStateTimestamp(tunnel.Metadata, time.Now().UTC())
 	}
 	conflict, err := s.hasPublicPortConflict(ctx, tunnel.ID, tunnel.Type, tunnel.Status, tunnel.PublicPort)
 	if err != nil {

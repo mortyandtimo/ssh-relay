@@ -173,7 +173,7 @@ export default function App() {
         const response = await api.loadNodeControlActionOptions(selectedNode.nodeId, "operator_console");
         if (!cancelled) {
           setNodeActionOptions(response.items);
-          setNodeControlContextAt(new Date().toISOString());
+          setNodeControlContextAt(response.contextVersion || response.items[0]?.contextVersion || "");
         }
       } catch (actionError) {
         if (!cancelled) {
@@ -198,7 +198,7 @@ export default function App() {
         const response = await api.loadNodeControlPanel(selectedNode.nodeId, "operator_console");
         if (!cancelled) {
           setNodeControlPanel(response);
-          setNodeControlContextAt(new Date().toISOString());
+          setNodeControlContextAt(response.contextVersion || "");
         }
       } catch (panelError) {
         if (!cancelled) {
@@ -224,7 +224,7 @@ export default function App() {
         const response = await api.loadTunnelControlActionOptions(selectedTunnel.id, "operator_console");
         if (!cancelled) {
           setTunnelActionOptions(response.items);
-          setTunnelControlContextAt(new Date().toISOString());
+          setTunnelControlContextAt(response.contextVersion || response.items[0]?.contextVersion || "");
         }
       } catch (actionError) {
         if (!cancelled) {
@@ -249,7 +249,7 @@ export default function App() {
         const response = await api.loadTunnelControlPanel(selectedTunnel.id, "operator_console");
         if (!cancelled) {
           setTunnelControlPanel(response);
-          setTunnelControlContextAt(new Date().toISOString());
+          setTunnelControlContextAt(response.contextVersion || "");
         }
       } catch (panelError) {
         if (!cancelled) {
@@ -379,9 +379,9 @@ export default function App() {
 
   function currentControlContextAt(targetKind: ControlActionRequest["targetKind"]) {
     if (targetKind === "tunnel") {
-      return tunnelControlContextAt || new Date().toISOString();
+      return tunnelControlPanel?.contextVersion || tunnelActionOptions[0]?.contextVersion || tunnelControlContextAt || undefined;
     }
-    return nodeControlContextAt || new Date().toISOString();
+    return nodeControlPanel?.contextVersion || nodeActionOptions[0]?.contextVersion || nodeControlContextAt || undefined;
   }
 
   async function runControlAction(actionKind: ControlActionRequest["actionKind"], targetKind: ControlActionRequest["targetKind"], targetId: string, dryRun: boolean) {

@@ -208,6 +208,7 @@ type ControlActionOption struct {
 	TargetKind        ControlTargetKind        `json:"targetKind"`
 	TargetID          string                   `json:"targetId"`
 	SourceSurface     ControlSurface           `json:"sourceSurface"`
+	ContextVersion    string                   `json:"contextVersion,omitempty"`
 	Available         bool                     `json:"available"`
 	AvailabilityState ControlAvailabilityState `json:"availabilityState"`
 	Label             string                   `json:"label"`
@@ -222,17 +223,19 @@ type ControlActionOption struct {
 }
 
 type ControlActionOptionsResponse struct {
-	TargetKind    ControlTargetKind     `json:"targetKind"`
-	TargetID      string                `json:"targetId"`
-	SourceSurface ControlSurface        `json:"sourceSurface"`
-	ExecutionMode ControlExecutionMode  `json:"executionMode"`
-	Items         []ControlActionOption `json:"items"`
+	TargetKind     ControlTargetKind     `json:"targetKind"`
+	TargetID       string                `json:"targetId"`
+	SourceSurface  ControlSurface        `json:"sourceSurface"`
+	ContextVersion string                `json:"contextVersion,omitempty"`
+	ExecutionMode  ControlExecutionMode  `json:"executionMode"`
+	Items          []ControlActionOption `json:"items"`
 }
 
 type ControlPanelSummary struct {
 	TargetKind        ControlTargetKind     `json:"targetKind"`
 	TargetID          string                `json:"targetId"`
 	SourceSurface     ControlSurface        `json:"sourceSurface"`
+	ContextVersion    string                `json:"contextVersion,omitempty"`
 	Headline          string                `json:"headline"`
 	Summary           string                `json:"summary"`
 	ReadinessState    ControlReadinessState `json:"readinessState"`

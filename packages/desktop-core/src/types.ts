@@ -127,6 +127,7 @@ export type ControlActionOption = {
   targetKind: ControlTargetKind;
   targetId: string;
   sourceSurface: ControlSurface;
+  contextVersion?: string;
   available: boolean;
   availabilityState: ControlAvailabilityState;
   label: string;
@@ -144,6 +145,7 @@ export type ControlActionOptionsResponse = {
   targetKind: ControlTargetKind;
   targetId: string;
   sourceSurface: ControlSurface;
+  contextVersion?: string;
   executionMode: ControlExecutionMode;
   items: ControlActionOption[];
 };
@@ -152,6 +154,7 @@ export type ControlPanelSummary = {
   targetKind: ControlTargetKind;
   targetId: string;
   sourceSurface: ControlSurface;
+  contextVersion?: string;
   headline: string;
   summary: string;
   readinessState: ControlReadinessState;

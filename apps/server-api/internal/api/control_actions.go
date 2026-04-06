@@ -30,6 +30,7 @@ type controlTargetSnapshot struct {
 	targetKind        types.ControlTargetKind
 	targetID          string
 	surface           types.ControlSurface
+	contextVersion    string
 	actions           []evaluatedControlAction
 	executionMode     types.ControlExecutionMode
 	placeholderOnly   bool
@@ -547,6 +548,11 @@ func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlAct
 		resp.ExecutionMode = snapshot.executionMode
 		return resp, http.StatusOK
 	}
+	if req.RequestedAt.IsZero() {
+		if requestedAt, ok := parseControlStateTimestamp(snapshot.contextVersion); ok {
+			req.RequestedAt = requestedAt
+		}
+	}
 	plan := buildExecutionPlan(req, snapshot, *actionSnapshot)
 	if revalidated := revalidateRequestedControlContext(plan); !revalidated.allowed {
 		plan = applyExecutionRevalidation(plan, revalidated)
@@ -699,9 +705,15 @@ func inferRecommendedActionFromPreflight(targetKind types.ControlTargetKind, act
 }
 
 func revalidateRequestedControlContext(plan controlExecutionPlan) controlExecutionRevalidation {
-	updatedAt, ok := parseControlStateTimestamp(plan.targetFacts["controlStateUpdatedAt"])
-	if !ok || plan.requestedAt.IsZero() || !updatedAt.After(plan.requestedAt.UTC()) {
+	currentVersion := strings.TrimSpace(plan.targetFacts["controlStateUpdatedAt"])
+	requestedVersion := requestedControlContextVersion(plan)
+	if currentVersion == "" || requestedVersion == "" || currentVersion == requestedVersion {
 		return controlExecutionRevalidation{allowed: true}
+	}
+	if currentTs, currentOk := parseControlStateTimestamp(currentVersion); currentOk {
+		if requestedTs, requestedOk := parseControlStateTimestamp(requestedVersion); requestedOk && !currentTs.After(requestedTs.UTC()) {
+			return controlExecutionRevalidation{allowed: true}
+		}
 	}
 	message := "目标状态已变化，请刷新后重试。"
 	if len(plan.preflight.BlockedReasons) > 0 {
@@ -724,6 +736,16 @@ func revalidateRequestedControlContext(plan controlExecutionPlan) controlExecuti
 	}
 }
 
+func requestedControlContextVersion(plan controlExecutionPlan) string {
+	if !plan.requestedAt.IsZero() {
+		return plan.requestedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if raw := strings.TrimSpace(plan.note); strings.HasPrefix(raw, "contextVersion=") {
+		return strings.TrimPrefix(raw, "contextVersion=")
+	}
+	return ""
+}
+
 func parseControlStateTimestamp(raw string) (time.Time, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -736,6 +758,30 @@ func parseControlStateTimestamp(raw string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+func controlContextVersionFromFacts(facts map[string]string) string {
+	if len(facts) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(facts["controlStateUpdatedAt"])
+}
+
+func snapshotContextVersion(actions []evaluatedControlAction) string {
+	var newest time.Time
+	var version string
+	for _, action := range actions {
+		candidate := controlContextVersionFromFacts(action.response.Facts)
+		parsed, ok := parseControlStateTimestamp(candidate)
+		if !ok {
+			continue
+		}
+		if newest.IsZero() || parsed.After(newest) {
+			newest = parsed
+			version = candidate
+		}
+	}
+	return version
 }
 
 func readinessStateFromPreflight(preflight types.ControlPreflightSummary) types.ControlReadinessState {
@@ -1090,11 +1136,12 @@ func (s *Server) buildControlActionOptions(ctx context.Context, targetKind types
 		return types.ControlActionOptionsResponse{}, status
 	}
 	resp := types.ControlActionOptionsResponse{
-		TargetKind:    targetKind,
-		TargetID:      targetID,
-		SourceSurface: surface,
-		ExecutionMode: snapshot.executionMode,
-		Items:         []types.ControlActionOption{},
+		TargetKind:     targetKind,
+		TargetID:       targetID,
+		SourceSurface:  surface,
+		ContextVersion: snapshot.contextVersion,
+		ExecutionMode:  snapshot.executionMode,
+		Items:          []types.ControlActionOption{},
 	}
 	for _, evaluated := range snapshot.actions {
 		resp.Items = append(resp.Items, controlActionOptionFromEvaluated(evaluated))
@@ -1111,6 +1158,7 @@ func (s *Server) buildControlPanelSummary(ctx context.Context, targetKind types.
 		TargetKind:        targetKind,
 		TargetID:          targetID,
 		SourceSurface:     surface,
+		ContextVersion:    snapshot.contextVersion,
 		Headline:          snapshot.headline,
 		Summary:           snapshot.summary,
 		ReadinessState:    snapshot.readinessState,
@@ -1182,6 +1230,7 @@ func (s *Server) buildControlTargetSnapshot(ctx context.Context, targetKind type
 			status:   evaluated.status,
 		})
 	}
+	snapshot.contextVersion = snapshotContextVersion(snapshot.actions)
 	snapshot.executionMode, snapshot.placeholderOnly = snapshotExecutionSemantics(snapshot.actions, snapshot.recommendedAction)
 	snapshot.recommendedAction = recommendedActionForSnapshot(targetKind, snapshot.actions)
 	snapshot.executionMode, snapshot.placeholderOnly = snapshotExecutionSemantics(snapshot.actions, snapshot.recommendedAction)
@@ -1511,6 +1560,7 @@ func allowedActionsForTarget(targetKind types.ControlTargetKind) []types.Control
 
 func controlActionOptionFromEvaluated(evaluated evaluatedControlAction) types.ControlActionOption {
 	result := evaluated.response
+	contextVersion := controlContextVersionFromFacts(result.Facts)
 	if result.Result == types.ControlResultAccepted {
 		summary, nextStep := controlOptionSummaryAndNextStep(result, nil, evaluated.execute)
 		availabilityState := types.ControlAvailabilityPlaceholderOnly
@@ -1528,6 +1578,7 @@ func controlActionOptionFromEvaluated(evaluated evaluatedControlAction) types.Co
 			TargetKind:        result.TargetKind,
 			TargetID:          result.TargetID,
 			SourceSurface:     result.SourceSurface,
+			ContextVersion:    contextVersion,
 			Available:         true,
 			AvailabilityState: availabilityState,
 			Label:             controlActionLabel(result.ActionKind),
@@ -1549,6 +1600,7 @@ func controlActionOptionFromEvaluated(evaluated evaluatedControlAction) types.Co
 		TargetKind:        result.TargetKind,
 		TargetID:          result.TargetID,
 		SourceSurface:     result.SourceSurface,
+		ContextVersion:    contextVersion,
 		Available:         false,
 		AvailabilityState: types.ControlAvailabilityBlocked,
 		Label:             controlActionLabel(result.ActionKind),
@@ -1750,8 +1802,6 @@ func populateNodeControlFacts(resp *types.ControlActionResponse, node types.Node
 	resp.Facts["isolated"] = strconv.FormatBool(node.Isolated)
 	if value := strings.TrimSpace(node.Metadata["controlStateUpdatedAt"]); value != "" {
 		resp.Facts["controlStateUpdatedAt"] = value
-	} else {
-		resp.Facts["controlStateUpdatedAt"] = node.LastSeenAt.UTC().Format(time.RFC3339Nano)
 	}
 }
 

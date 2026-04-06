@@ -4076,3 +4076,114 @@ func TestControlExecuteRejectsDriftedStateBeforeExecutor(t *testing.T) {
 		t.Fatalf("expected both drift rejections in filtered audit view, got %+v", allDriftOut.Items)
 	}
 }
+
+func TestControlContextVersionOnlyMovesOnControlRelevantStateChanges(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-context-version", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-context-version.service", "instanceProfile": "node-context-version", "instanceManaged": "true"})
+	if _, err := server.store.CreateTunnel(context.Background(), types.TunnelSpec{ID: "tunnel-context-version", NodeID: "node-context-version", Name: "tunnel-context-version", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 28010, Metadata: map[string]string{"nodeId": "node-context-version"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	decodeNodeOptions := func() types.ControlActionOptionsResponse {
+		req := httptest.NewRequest(http.MethodGet, "/api/control-actions/node/node-context-version/operator_console/options", nil)
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected node options 200, got %d", res.Code)
+		}
+		var out types.ControlActionOptionsResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	decodeTunnelOptions := func() types.ControlActionOptionsResponse {
+		req := httptest.NewRequest(http.MethodGet, "/api/control-actions/tunnel/tunnel-context-version/operator_console/options", nil)
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected tunnel options 200, got %d", res.Code)
+		}
+		var out types.ControlActionOptionsResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	initialNodeOptions := decodeNodeOptions()
+	initialNodeVersion := initialNodeOptions.ContextVersion
+	if initialNodeVersion == "" {
+		t.Fatalf("expected node options to expose contextVersion, got %+v", initialNodeOptions)
+	}
+	for _, item := range initialNodeOptions.Items {
+		if item.ContextVersion != initialNodeVersion {
+			t.Fatalf("expected node option contextVersion to match response contextVersion, got response=%s item=%+v", initialNodeVersion, item)
+		}
+	}
+	initialTunnelOptions := decodeTunnelOptions()
+	initialTunnelVersion := initialTunnelOptions.ContextVersion
+	if initialTunnelVersion == "" {
+		t.Fatalf("expected tunnel options to expose contextVersion, got %+v", initialTunnelOptions)
+	}
+	for _, item := range initialTunnelOptions.Items {
+		if item.ContextVersion != initialTunnelVersion {
+			t.Fatalf("expected tunnel option contextVersion to match response contextVersion, got response=%s item=%+v", initialTunnelVersion, item)
+		}
+	}
+
+	heartbeatBody, _ := json.Marshal(types.NodeHeartbeatRequest{NodeID: "node-context-version", ObservedAt: time.Now().UTC(), ActiveTunnels: 1, Metrics: map[string]string{"cpu": "7"}})
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/agent/heartbeat", bytes.NewReader(heartbeatBody))
+	heartbeatRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(heartbeatRes, heartbeatReq)
+	if heartbeatRes.Code != http.StatusOK {
+		t.Fatalf("expected heartbeat 200, got %d", heartbeatRes.Code)
+	}
+	afterHeartbeatOptions := decodeNodeOptions()
+	if afterHeartbeatOptions.ContextVersion != initialNodeVersion {
+		t.Fatalf("heartbeat must not advance node control context version: before=%s after=%s", initialNodeVersion, afterHeartbeatOptions.ContextVersion)
+	}
+
+	node, err := server.store.GetNode(context.Background(), "node-context-version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedNode, err := server.store.UpdateNode(context.Background(), store.UpdateNodeParams{NodeID: node.NodeID, NodeRole: node.NodeRole, Environment: node.Environment, TrustLevel: node.TrustLevel, Owner: node.Owner, Location: node.Location, Tags: node.Tags, Isolated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = updatedNode
+	afterIsolationOptions := decodeNodeOptions()
+	if afterIsolationOptions.ContextVersion == initialNodeVersion {
+		t.Fatalf("isolate must advance node control context version: before=%s after=%s", initialNodeVersion, afterIsolationOptions.ContextVersion)
+	}
+
+	tunnel, err := server.store.GetTunnel(context.Background(), "tunnel-context-version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnel.Status = "paused"
+	if _, err := server.store.UpdateTunnel(context.Background(), tunnel); err != nil {
+		t.Fatal(err)
+	}
+	afterTunnelUpdateOptions := decodeTunnelOptions()
+	if afterTunnelUpdateOptions.ContextVersion == initialTunnelVersion {
+		t.Fatalf("tunnel status change must advance tunnel control context version: before=%s after=%s", initialTunnelVersion, afterTunnelUpdateOptions.ContextVersion)
+	}
+}

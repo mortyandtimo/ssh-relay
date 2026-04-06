@@ -128,7 +128,7 @@ export default function App() {
         const response = await api.loadNodeControlActionOptions(boundNode.nodeId, "node_console");
         if (!cancelled) {
           setNodeActionOptions(response.items);
-          setNodeControlContextAt(new Date().toISOString());
+          setNodeControlContextAt(response.contextVersion || response.items[0]?.contextVersion || "");
         }
       } catch (actionError) {
         if (!cancelled) {
@@ -153,7 +153,7 @@ export default function App() {
         const response = await api.loadNodeControlPanel(boundNode.nodeId, "node_console");
         if (!cancelled) {
           setNodeControlPanel(response);
-          setNodeControlContextAt(new Date().toISOString());
+          setNodeControlContextAt(response.contextVersion || "");
         }
       } catch (panelError) {
         if (!cancelled) {
@@ -277,7 +277,7 @@ export default function App() {
         sourceSurface: "node_console",
         dryRun,
         note: controlNote.trim(),
-        requestedAt: nodeControlContextAt || new Date().toISOString(),
+        requestedAt: nodeControlPanel?.contextVersion || nodeActionOptions[0]?.contextVersion || nodeControlContextAt || undefined,
       });
       setControlResult(result);
       setMessage(result.humanMessage);
