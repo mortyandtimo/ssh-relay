@@ -4147,6 +4147,7 @@ func TestControlContextVersionOnlyMovesOnControlRelevantStateChanges(t *testing.
 			t.Fatalf("expected tunnel option contextVersion to match response contextVersion, got response=%s item=%+v", initialTunnelVersion, item)
 		}
 	}
+	unchangedVersion := initialTunnelVersion
 
 	heartbeatBody, _ := json.Marshal(types.NodeHeartbeatRequest{NodeID: "node-context-version", ObservedAt: time.Now().UTC(), ActiveTunnels: 1, Metrics: map[string]string{"cpu": "7"}})
 	heartbeatReq := httptest.NewRequest(http.MethodPost, "/agent/heartbeat", bytes.NewReader(heartbeatBody))
@@ -4178,6 +4179,42 @@ func TestControlContextVersionOnlyMovesOnControlRelevantStateChanges(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	tunnel.Name = "tunnel-context-version-renamed"
+	tunnel.TargetHost = "127.0.0.2"
+	tunnel.TargetPort = 8082
+	if _, err := server.store.UpdateTunnel(context.Background(), tunnel); err != nil {
+		t.Fatal(err)
+	}
+	afterNonStatusTunnelUpdateOptions := decodeTunnelOptions()
+	if afterNonStatusTunnelUpdateOptions.ContextVersion != unchangedVersion {
+		t.Fatalf("non-status tunnel update must not advance tunnel control context version: before=%s after=%s", unchangedVersion, afterNonStatusTunnelUpdateOptions.ContextVersion)
+	}
+
+	execAction := func(payload map[string]any) types.ControlActionResponse {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+		var out types.ControlActionResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	allowedAfterNonStatus := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-context-version", "sourceSurface": "operator_console", "dryRun": false, "requestedAt": unchangedVersion})
+	if allowedAfterNonStatus.Result != types.ControlResultAccepted {
+		t.Fatalf("non-status tunnel update must not trigger drift rejection, got %+v", allowedAfterNonStatus)
+	}
+
+	tunnel, err = server.store.GetTunnel(context.Background(), "tunnel-context-version")
+	if err != nil {
+		t.Fatal(err)
+	}
 	tunnel.Status = "paused"
 	if _, err := server.store.UpdateTunnel(context.Background(), tunnel); err != nil {
 		t.Fatal(err)
@@ -4185,5 +4222,9 @@ func TestControlContextVersionOnlyMovesOnControlRelevantStateChanges(t *testing.
 	afterTunnelUpdateOptions := decodeTunnelOptions()
 	if afterTunnelUpdateOptions.ContextVersion == initialTunnelVersion {
 		t.Fatalf("tunnel status change must advance tunnel control context version: before=%s after=%s", initialTunnelVersion, afterTunnelUpdateOptions.ContextVersion)
+	}
+	rejectedAfterStatusChange := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-context-version", "sourceSurface": "operator_console", "dryRun": false, "requestedAt": unchangedVersion})
+	if rejectedAfterStatusChange.Result != types.ControlResultRejected {
+		t.Fatalf("status-changing tunnel update must trigger drift rejection for stale context, got %+v", rejectedAfterStatusChange)
 	}
 }

@@ -1810,8 +1810,8 @@ func populateTunnelControlFacts(resp *types.ControlActionResponse, tunnel types.
 	resp.Facts["runtimeState"] = tunnel.RuntimeState
 	resp.Facts["runtimePath"] = tunnel.RuntimePath
 	resp.Facts["transportPolicy"] = tunnel.TransportPolicy
-	if !tunnel.UpdatedAt.IsZero() {
-		resp.Facts["controlStateUpdatedAt"] = tunnel.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	if value := strings.TrimSpace(tunnel.Metadata["controlStateUpdatedAt"]); value != "" {
+		resp.Facts["controlStateUpdatedAt"] = value
 	}
 }
 
