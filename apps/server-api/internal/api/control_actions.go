@@ -800,8 +800,10 @@ func (s *Server) writeControlExecutionAudit(ctx context.Context, req types.Contr
 	}
 	action := "control_execute_rejected"
 	switch result.outcome {
-	case controlExecutionOutcomeAcceptedReal, controlExecutionOutcomeAcceptedPlaceholder:
+	case controlExecutionOutcomeAcceptedReal:
 		action = "control_execute_accepted"
+	case controlExecutionOutcomeAcceptedPlaceholder:
+		action = "control_execute_placeholder_accepted"
 	case controlExecutionOutcomePolicyRejected:
 		action = "control_execute_policy_rejected"
 	case controlExecutionOutcomeRetryableFailure:
@@ -811,19 +813,19 @@ func (s *Server) writeControlExecutionAudit(ctx context.Context, req types.Contr
 	}
 	actorType, actorID := s.currentActorFromContext(ctx)
 	payload := map[string]string{
-		"actionKind":         string(req.ActionKind),
-		"sourceSurface":      string(req.SourceSurface),
-		"executionMode":      string(resp.ExecutionMode),
-		"placeholderOnly":    strconv.FormatBool(resp.PlaceholderOnly),
-		"result":             string(resp.Result),
-		"outcome":            string(result.outcome),
-		"note":               strings.TrimSpace(req.Note),
-		"recommendedAction":  string(plan.recommendedAction),
-		"readinessState":     string(plan.readinessState),
-		"targetStateBefore":  controlAuditBeforeState(req, plan),
-		"targetStateAfter":   controlAuditAfterState(req, resp),
-		"primaryReasonCode":  string(plan.primaryReasonCode),
-		"humanMessage":       resp.HumanMessage,
+		"actionKind":        string(req.ActionKind),
+		"sourceSurface":     string(req.SourceSurface),
+		"executionMode":     string(resp.ExecutionMode),
+		"placeholderOnly":   strconv.FormatBool(resp.PlaceholderOnly),
+		"result":            string(resp.Result),
+		"outcome":           string(result.outcome),
+		"note":              strings.TrimSpace(req.Note),
+		"recommendedAction": string(plan.recommendedAction),
+		"readinessState":    string(plan.readinessState),
+		"targetStateBefore": controlAuditBeforeState(req, plan),
+		"targetStateAfter":  controlAuditAfterState(req, resp),
+		"primaryReasonCode": string(plan.primaryReasonCode),
+		"humanMessage":      resp.HumanMessage,
 	}
 	_, _ = s.store.WriteAuditLog(ctx, store.AuditLogParams{
 		ActorType:    actorType,

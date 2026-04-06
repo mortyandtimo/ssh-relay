@@ -2960,9 +2960,9 @@ func TestControlExecuteConsistencyWithOptionsAndPanels(t *testing.T) {
 	if blockedTunnelExecute.Result != types.ControlResultBlocked || len(blockedTunnelExecute.Preflight.BlockedReasons) == 0 || blockedTunnelExecute.Preflight.BlockedReasons[0].Code != types.ControlReasonTunnelStateConflict {
 		t.Fatalf("expected paused tunnel pause execute to stay blocked, got %+v", blockedTunnelExecute)
 	}
-		if _, ok := unwrapStateMutationControlExecutor(server.controlExecutor); !ok {
-			t.Fatalf("expected default control executor to include state mutation layer, got %T", server.controlExecutor)
-		}
+	if _, ok := unwrapStateMutationControlExecutor(server.controlExecutor); !ok {
+		t.Fatalf("expected default control executor to include state mutation layer, got %T", server.controlExecutor)
+	}
 
 	readySnapshot, status := server.buildControlTargetSnapshot(context.Background(), types.ControlTargetNode, "node-ready-exec", types.ControlSurfaceNodeConsole)
 	if status != http.StatusOK {
@@ -3804,5 +3804,122 @@ func TestControlExecuteWritesAuditLogsForRealPaths(t *testing.T) {
 
 	if item := findAudit("control_execute_accepted", "node-audit-blocked", "restart_agent", "isolated=true", "isolated=true"); item != nil {
 		t.Fatalf("blocked preflight must not write success audit, got %+v", item)
+	}
+}
+
+func TestControlExecuteAuditOutcomeSemantics(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-audit-placeholder", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-audit-placeholder.service", "instanceProfile": "node-audit-placeholder", "instanceManaged": "true", "isolated": "true"})
+	registerNode("node-audit-policy", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-audit-policy.service", "instanceProfile": "node-audit-policy", "instanceManaged": "true"})
+	registerNode("node-audit-retryable", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-audit-retryable.service", "instanceProfile": "node-audit-retryable", "instanceManaged": "true"})
+	registerNode("node-audit-nonretryable", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-audit-nonretryable.service", "instanceProfile": "node-audit-nonretryable", "instanceManaged": "true"})
+	registerNode("node-audit-blocked-preflight", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-audit-blocked-preflight.service", "instanceProfile": "node-audit-blocked-preflight", "instanceManaged": "true", "isolated": "true"})
+
+	execAction := func(payload map[string]any) {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+	}
+
+	server.controlExecutor = newRestartCapableControlExecutor(restartAgentExecutorConfig{
+		enabled:              true,
+		localNodeID:          "node-audit-policy",
+		allowedServicePrefix: defaultRestartServicePrefix,
+		timeout:              5 * time.Second,
+	}, &fakeRestartRunner{result: controlCommandResult{}})
+	execAction(map[string]any{"actionKind": "release_node", "targetKind": "node", "targetId": "node-audit-placeholder", "sourceSurface": "operator_console", "dryRun": false})
+
+	server.controlExecutor = newStateMutationControlExecutor(server.store, &spyControlExecutor{result: controlExecutionResult{
+		outcome:       controlExecutionOutcomePolicyRejected,
+		humanMessage:  "policy rejected for audit",
+		executionMode: types.ControlExecutionReal,
+		executionNotes: []types.ControlExecutionNote{{
+			Message: "policy rejected note",
+		}},
+	}})
+	execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-policy", "sourceSurface": "node_console", "dryRun": false})
+
+	server.controlExecutor = newStateMutationControlExecutor(server.store, &spyControlExecutor{result: controlExecutionResult{
+		outcome:       controlExecutionOutcomeRetryableFailure,
+		humanMessage:  "retryable failure for audit",
+		executionMode: types.ControlExecutionReal,
+		executionNotes: []types.ControlExecutionNote{{
+			Message: "retryable failure note",
+		}},
+	}})
+	execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-retryable", "sourceSurface": "node_console", "dryRun": false})
+
+	server.controlExecutor = newStateMutationControlExecutor(server.store, &spyControlExecutor{result: controlExecutionResult{
+		outcome:       controlExecutionOutcomeNonRetryableFailure,
+		humanMessage:  "non-retryable failure for audit",
+		executionMode: types.ControlExecutionReal,
+		executionNotes: []types.ControlExecutionNote{{
+			Message: "non-retryable failure note",
+		}},
+	}})
+	execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-nonretryable", "sourceSurface": "node_console", "dryRun": false})
+
+	server.controlExecutor = newStateMutationControlExecutor(server.store, newPlaceholderControlExecutor())
+	execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-policy", "sourceSurface": "node_console", "dryRun": true})
+	execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-blocked-preflight", "sourceSurface": "operator_console", "dryRun": false})
+
+	auditReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs?limit=50", nil)
+	applyCookies(auditReq, adminCookies)
+	auditRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(auditRes, auditReq)
+	if auditRes.Code != http.StatusOK {
+		t.Fatalf("expected audit logs 200, got %d", auditRes.Code)
+	}
+	var auditOut struct {
+		Items []types.AuditLogEntry `json:"items"`
+	}
+	if err := json.NewDecoder(auditRes.Body).Decode(&auditOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	hasAudit := func(action, resourceID, actionKind string) bool {
+		for _, item := range auditOut.Items {
+			if item.Action == action && item.ResourceID == resourceID && item.Payload["actionKind"] == actionKind {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasAudit("control_execute_placeholder_accepted", "node-audit-placeholder", "release_node") {
+		t.Fatalf("expected placeholder accepted audit, got %+v", auditOut.Items)
+	}
+	if !hasAudit("control_execute_policy_rejected", "node-audit-policy", "restart_agent") {
+		t.Fatalf("expected policy rejected audit, got %+v", auditOut.Items)
+	}
+	if !hasAudit("control_execute_retryable_failure", "node-audit-retryable", "restart_agent") {
+		t.Fatalf("expected retryable failure audit, got %+v", auditOut.Items)
+	}
+	if !hasAudit("control_execute_non_retryable_failure", "node-audit-nonretryable", "restart_agent") {
+		t.Fatalf("expected non-retryable failure audit, got %+v", auditOut.Items)
+	}
+	if hasAudit("control_execute_placeholder_accepted", "node-audit-policy", "restart_agent") || hasAudit("control_execute_accepted", "node-audit-policy", "restart_agent") {
+		t.Fatalf("dry-run must not write execute audit, got %+v", auditOut.Items)
+	}
+	if hasAudit("control_execute_placeholder_accepted", "node-audit-blocked-preflight", "restart_agent") || hasAudit("control_execute_accepted", "node-audit-blocked-preflight", "restart_agent") || hasAudit("control_execute_policy_rejected", "node-audit-blocked-preflight", "restart_agent") {
+		t.Fatalf("blocked preflight must not write execute audit, got %+v", auditOut.Items)
 	}
 }
