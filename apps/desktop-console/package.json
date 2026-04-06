@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node src/controlResultView.test.mjs && node src/controlResultBlock.test.mjs && node src/controlResultHost.test.mjs && node src/controlResultController.test.mjs && node src/controlResultRequestFlow.test.mjs && node src/controlRequestHost.test.mjs && node src/controlServerApiFlow.test.mjs",
+    "test": "node src/controlResultView.test.mjs && node src/controlResultBlock.test.mjs && node src/controlResultHost.test.mjs && node src/controlResultController.test.mjs && node src/controlResultRequestFlow.test.mjs && node src/controlRequestHost.test.mjs && node src/controlServerApiFlow.test.mjs && node src/controlDuplicateInflightServerFlow.test.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

@@ -52,8 +52,8 @@ function getFreePort() {
   });
 }
 
-async function waitForServer(baseUrl) {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+async function waitForServer(baseUrl, getLogs) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
     try {
       const res = await fetch(baseUrl + "/healthz");
       if (res.ok) return;
@@ -62,7 +62,20 @@ async function waitForServer(baseUrl) {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("server-api did not become ready");
+  throw new Error("control fixture did not become ready\n" + getLogs());
+}
+
+async function waitForFixtureStarted(baseUrl, getLogs) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      const { payload } = await requestJSON(baseUrl + "/fixture/started");
+      if (payload.started) return;
+    } catch {
+      // keep polling
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("fixture never observed the first execute entering in-flight state\n" + getLogs());
 }
 
 function cookieHeaderFrom(response) {
@@ -87,29 +100,28 @@ async function requestJSON(url, init = {}, cookieHeader = "") {
   return { response, payload };
 }
 
-function RealServerResultHost({ baseUrl, cookieHeader, requests }) {
-  const [busy, setBusy] = useState(false);
+function RealDuplicateInflightHost({ baseUrl, cookieHeader, request }) {
+  const [busyCount, setBusyCount] = useState(0);
   const [message, setMessage] = useState("");
   const [result, setResult] = useState(null);
-  const [index, setIndex] = useState(0);
 
   async function trigger() {
-    setBusy(true);
+    setBusyCount((current) => current + 1);
     setMessage("");
     const { payload } = await requestJSON(baseUrl + "/api/control-actions", {
       method: "POST",
-      body: JSON.stringify(requests[index]),
+      body: JSON.stringify(request),
     }, cookieHeader);
     setResult(payload);
     setMessage(payload.humanMessage || "");
-    setBusy(false);
-    setIndex((current) => Math.min(current + 1, requests.length - 1));
+    setBusyCount((current) => Math.max(0, current - 1));
+    return payload;
   }
 
   return React.createElement(
     "section",
     null,
-    React.createElement("button", { type: "button", onClick: () => trigger() }, busy ? "处理中..." : "执行"),
+    React.createElement("button", { type: "button", onClick: () => trigger() }, busyCount > 0 ? "处理中..." : "执行"),
     message ? React.createElement("p", null, message) : null,
     result ? React.createElement(ControlResultBlock, { result }) : React.createElement("p", null, "暂无控制结果"),
   );
@@ -117,84 +129,55 @@ function RealServerResultHost({ baseUrl, cookieHeader, requests }) {
 
 const port = await getFreePort();
 const baseUrl = `http://127.0.0.1:${port}`;
-const child = spawn("go", ["run", "./apps/server-api/cmd/server-api"], {
+let childLogs = "";
+const child = spawn("go", ["run", "./apps/server-api/cmd/control-fixture"], {
   cwd: "/root/cloud-relay-platform",
   env: {
     ...process.env,
     SERVER_API_ADDR: `127.0.0.1:${port}`,
-    SERVER_API_ADMIN_BOOTSTRAP_SECRET: "desktop-flow-secret",
+    SERVER_API_ADMIN_BOOTSTRAP_SECRET: "duplicate-flow-secret",
     SERVER_API_ADMIN_WEB_DIR: "/tmp",
+    CONTROL_FIXTURE_NODE_ID: "node-desktop-duplicate-live",
+    CONTROL_FIXTURE_RELEASE_DELAY_MS: "600",
     GOFLAGS: "",
   },
   stdio: ["ignore", "pipe", "pipe"],
   detached: true,
 });
-
-let renderer;
+child.stdout.on("data", (chunk) => {
+  childLogs += chunk.toString();
+});
+child.stderr.on("data", (chunk) => {
+  childLogs += chunk.toString();
+});
 
 try {
-  await waitForServer(baseUrl);
-
-  await requestJSON(baseUrl + "/agent/register", {
-    method: "POST",
-    body: JSON.stringify({
-      nodeId: "node-desktop-flow",
-      nodeName: "desktop-flow",
-      agentVersion: "0.1.0",
-      capabilities: { tcpRelay: true, udpRelay: true, httpRelay: true, httpsRelay: true, p2pAssist: false, socks5Connect: true },
-      metadata: {
-        deploymentMode: "managed",
-        serviceUnit: "cloud-relay-client-agent@node-desktop-flow.service",
-        instanceProfile: "node-desktop-flow",
-        instanceManaged: "true",
-        nodeRole: "cloud",
-      },
-    }),
-  });
-
-  await requestJSON(baseUrl + "/agent/heartbeat", {
-    method: "POST",
-    body: JSON.stringify({
-      nodeId: "node-desktop-flow",
-      observedAt: "2026-04-06T14:00:00Z",
-      activeTunnels: 0,
-    }),
-  });
+  await waitForServer(baseUrl, () => childLogs);
 
   const bootstrap = await requestJSON(baseUrl + "/api/auth/bootstrap", {
     method: "POST",
-    body: JSON.stringify({ email: "desktopflow@example.com", displayName: "Desktop Flow", password: "desktop-pass" }),
-    headers: { "X-Bootstrap-Secret": "desktop-flow-secret" },
+    body: JSON.stringify({ email: "duplicatelive@example.com", displayName: "Duplicate Live", password: "desktop-pass" }),
+    headers: { "X-Bootstrap-Secret": "duplicate-flow-secret" },
   });
   const cookieHeader = cookieHeaderFrom(bootstrap.response);
   assert.ok(cookieHeader.includes("crp_access="));
 
-  const { payload: options } = await requestJSON(baseUrl + "/api/control-actions/node/node-desktop-flow/operator_console/options", undefined, cookieHeader);
-  const oldContextVersion = options.contextVersion;
-  assert.ok(oldContextVersion);
+  const { payload: options } = await requestJSON(baseUrl + "/api/control-actions/node/node-desktop-duplicate-live/operator_console/options", undefined, cookieHeader);
+  const contextVersion = options.contextVersion;
+  assert.ok(contextVersion);
 
-  renderer = TestRenderer.create(
-    React.createElement(RealServerResultHost, {
+  const renderer = TestRenderer.create(
+    React.createElement(RealDuplicateInflightHost, {
       baseUrl,
       cookieHeader,
-      requests: [
-        {
-          actionKind: "isolate_node",
-          targetKind: "node",
-          targetId: "node-desktop-flow",
-          sourceSurface: "operator_console",
-          dryRun: false,
-          requestedAt: oldContextVersion,
-        },
-        {
-          actionKind: "restart_agent",
-          targetKind: "node",
-          targetId: "node-desktop-flow",
-          sourceSurface: "operator_console",
-          dryRun: false,
-          requestedAt: oldContextVersion,
-        },
-      ],
+      request: {
+        actionKind: "isolate_node",
+        targetKind: "node",
+        targetId: "node-desktop-duplicate-live",
+        sourceSurface: "operator_console",
+        dryRun: false,
+        requestedAt: contextVersion,
+      },
     }),
   );
 
@@ -202,28 +185,41 @@ try {
   assert.ok(JSON.stringify(tree).includes("暂无控制结果"));
 
   const button = renderer.root.findByType("button");
+  const firstRun = button.props.onClick();
   await act(async () => {
-    await button.props.onClick();
+    await Promise.resolve();
   });
+  await waitForFixtureStarted(baseUrl, () => childLogs);
+
   tree = renderer.toJSON();
   let serialized = JSON.stringify(tree);
-  assert.ok(serialized.includes("已真实隔离目标节点。"));
-  assert.ok(serialized.includes("真实执行已受理"));
-  assert.ok(serialized.includes("accepted_real"));
+  assert.ok(serialized.includes("处理中..."));
+  assert.ok(serialized.includes("暂无控制结果"));
 
   await act(async () => {
     await button.props.onClick();
   });
   tree = renderer.toJSON();
   serialized = JSON.stringify(tree);
-  assert.ok(serialized.includes("上下文已过期"));
-  assert.ok(serialized.includes("state_drift"));
-  assert.ok(serialized.includes("请先刷新控制面板或动作列表，再基于新的上下文重新发起动作。"));
-  assert.ok(serialized.includes("node_isolated") || serialized.includes("当前节点已隔离"));
-  assert.ok(!serialized.includes("accepted_real"));
+  assert.ok(serialized.includes("处理中"));
+  assert.ok(serialized.includes("policy_rejected"));
+  assert.ok(serialized.includes("duplicate_inflight"));
+  assert.ok(serialized.includes("等待当前执行结果返回，不要在同一上下文下重复点击。"));
+  assert.ok(serialized.includes("该上下文动作仍在处理中，请等待当前结果或刷新后再重试。"));
+
+  await act(async () => {
+    await firstRun;
+  });
+  tree = renderer.toJSON();
+  serialized = JSON.stringify(tree);
+  assert.ok(serialized.includes("已真实隔离目标节点。"));
+  assert.ok(serialized.includes("真实执行已受理"));
+  assert.ok(serialized.includes("accepted_real"));
+  assert.ok(serialized.includes("节点已更新为 isolated=true。"));
+  assert.ok(!serialized.includes("duplicate_inflight"));
+  renderer.unmount();
 } finally {
-  renderer?.unmount();
   await stopProcessTree(child);
 }
 
-console.log("desktop-console control server-api flow assertions passed");
+console.log("desktop-console control duplicate inflight server flow assertions passed");
