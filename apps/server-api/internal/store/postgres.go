@@ -833,13 +833,16 @@ func (s *PostgresStore) ListAuditLogs(ctx context.Context, filter AuditLogFilter
 		where ($1 = '' or action = $1)
 		  and ($2 = '' or action like $2 || '%')
 		  and ($3 = '' or coalesce(payload->>'outcome', '') = $3)
-		  and ($4 = '' or actor_type = $4)
-		  and ($5 = '' or coalesce(actor_id, '') = $5)
-		  and ($6 = '' or resource_type = $6)
-		  and ($7 = '' or coalesce(resource_id, '') = $7)
-		  and ($8::timestamptz is null or created_at >= $8)
-		  and ($9::timestamptz is null or created_at <= $9)
-	`, filter.Action, filter.ActionPrefix, filter.Outcome, filter.ActorType, filter.ActorID, filter.ResourceType, filter.ResourceID, filter.StartAt, filter.EndAt).Scan(&total)
+		  and ($4 = '' or coalesce(payload->>'rejectionKind', '') = $4)
+		  and ($5 = '' or coalesce(payload->>'executionMode', '') = $5)
+		  and ($6 = '' or coalesce(payload->>'placeholderOnly', '') = $6)
+		  and ($7 = '' or actor_type = $7)
+		  and ($8 = '' or coalesce(actor_id, '') = $8)
+		  and ($9 = '' or resource_type = $9)
+		  and ($10 = '' or coalesce(resource_id, '') = $10)
+		  and ($11::timestamptz is null or created_at >= $11)
+		  and ($12::timestamptz is null or created_at <= $12)
+	`, filter.Action, filter.ActionPrefix, filter.Outcome, filter.RejectionKind, filter.ExecutionMode, filter.PlaceholderOnly, filter.ActorType, filter.ActorID, filter.ResourceType, filter.ResourceID, filter.StartAt, filter.EndAt).Scan(&total)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -849,15 +852,18 @@ func (s *PostgresStore) ListAuditLogs(ctx context.Context, filter AuditLogFilter
 		where ($1 = '' or action = $1)
 		  and ($2 = '' or action like $2 || '%')
 		  and ($3 = '' or coalesce(payload->>'outcome', '') = $3)
-		  and ($4 = '' or actor_type = $4)
-		  and ($5 = '' or coalesce(actor_id, '') = $5)
-		  and ($6 = '' or resource_type = $6)
-		  and ($7 = '' or coalesce(resource_id, '') = $7)
-		  and ($8::timestamptz is null or created_at >= $8)
-		  and ($9::timestamptz is null or created_at <= $9)
+		  and ($4 = '' or coalesce(payload->>'rejectionKind', '') = $4)
+		  and ($5 = '' or coalesce(payload->>'executionMode', '') = $5)
+		  and ($6 = '' or coalesce(payload->>'placeholderOnly', '') = $6)
+		  and ($7 = '' or actor_type = $7)
+		  and ($8 = '' or coalesce(actor_id, '') = $8)
+		  and ($9 = '' or resource_type = $9)
+		  and ($10 = '' or coalesce(resource_id, '') = $10)
+		  and ($11::timestamptz is null or created_at >= $11)
+		  and ($12::timestamptz is null or created_at <= $12)
 		order by created_at desc, id desc
-		limit $10 offset $11
-	`, filter.Action, filter.ActionPrefix, filter.Outcome, filter.ActorType, filter.ActorID, filter.ResourceType, filter.ResourceID, filter.StartAt, filter.EndAt, limit, offset)
+		limit $13 offset $14
+	`, filter.Action, filter.ActionPrefix, filter.Outcome, filter.RejectionKind, filter.ExecutionMode, filter.PlaceholderOnly, filter.ActorType, filter.ActorID, filter.ResourceType, filter.ResourceID, filter.StartAt, filter.EndAt, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}

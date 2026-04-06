@@ -96,17 +96,20 @@ type UpdateUserParams struct {
 }
 
 type AuditLogFilter struct {
-	Action       string
-	ActionPrefix string
-	Outcome      string
-	ActorType    string
-	ActorID      string
-	ResourceType string
-	ResourceID   string
-	StartAt      *time.Time
-	EndAt        *time.Time
-	Limit        int
-	Offset       int
+	Action          string
+	ActionPrefix    string
+	Outcome         string
+	RejectionKind   string
+	ExecutionMode   string
+	PlaceholderOnly string
+	ActorType       string
+	ActorID         string
+	ResourceType    string
+	ResourceID      string
+	StartAt         *time.Time
+	EndAt           *time.Time
+	Limit           int
+	Offset          int
 }
 
 type AuditLogParams struct {

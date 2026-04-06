@@ -779,6 +779,15 @@ func (s *InMemoryStore) ListAuditLogs(_ context.Context, filter AuditLogFilter) 
 		if filter.Outcome != "" && item.Payload["outcome"] != filter.Outcome {
 			continue
 		}
+		if filter.RejectionKind != "" && item.Payload["rejectionKind"] != filter.RejectionKind {
+			continue
+		}
+		if filter.ExecutionMode != "" && item.Payload["executionMode"] != filter.ExecutionMode {
+			continue
+		}
+		if filter.PlaceholderOnly != "" && item.Payload["placeholderOnly"] != filter.PlaceholderOnly {
+			continue
+		}
 		if filter.ActorType != "" && item.ActorType != filter.ActorType {
 			continue
 		}

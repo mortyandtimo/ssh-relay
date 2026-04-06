@@ -236,6 +236,9 @@ type AuditFilterState = {
   action: string;
   actionPrefix: string;
   outcome: string;
+  rejectionKind: string;
+  executionMode: string;
+  placeholderOnly: string;
   actorType: string;
   resourceType: string;
   resourceID: string;
@@ -268,6 +271,9 @@ const initialAuditFilter: AuditFilterState = {
   action: "",
   actionPrefix: "",
   outcome: "",
+  rejectionKind: "",
+  executionMode: "",
+  placeholderOnly: "",
   actorType: "",
   resourceType: "",
   resourceID: "",
@@ -544,6 +550,9 @@ function buildAuditQuery(filter: AuditFilterState) {
     if (filter.action) query.set("action", filter.action);
     if (filter.actionPrefix) query.set("actionPrefix", filter.actionPrefix);
     if (filter.outcome) query.set("outcome", filter.outcome);
+    if (filter.rejectionKind) query.set("rejectionKind", filter.rejectionKind);
+    if (filter.executionMode) query.set("executionMode", filter.executionMode);
+    if (filter.placeholderOnly) query.set("placeholderOnly", filter.placeholderOnly);
     if (filter.actorType) query.set("actorType", filter.actorType);
     if (filter.resourceType) query.set("resourceType", filter.resourceType);
     if (filter.resourceID) query.set("resourceID", filter.resourceID);
@@ -2080,6 +2089,31 @@ function buildAuditQuery(filter: AuditFilterState) {
                 <label><span>动作</span><input value={auditFilter.action} onChange={(event) => setAuditFilter((current) => ({ ...current, action: event.target.value }))} /></label>
                 <label><span>动作前缀</span><input value={auditFilter.actionPrefix} onChange={(event) => setAuditFilter((current) => ({ ...current, actionPrefix: event.target.value }))} placeholder="control_execute_" /></label>
                 <label><span>结果分类</span><input value={auditFilter.outcome} onChange={(event) => setAuditFilter((current) => ({ ...current, outcome: event.target.value }))} placeholder="accepted_real / policy_rejected" /></label>
+                <label>
+                  <span>拒绝细分</span>
+                  <select value={auditFilter.rejectionKind} onChange={(event) => setAuditFilter((current) => ({ ...current, rejectionKind: event.target.value }))}>
+                    <option value="">全部</option>
+                    <option value="state_drift">state_drift</option>
+                    <option value="duplicate_inflight">duplicate_inflight</option>
+                    <option value="duplicate_handled">duplicate_handled</option>
+                  </select>
+                </label>
+                <label>
+                  <span>执行模式</span>
+                  <select value={auditFilter.executionMode} onChange={(event) => setAuditFilter((current) => ({ ...current, executionMode: event.target.value }))}>
+                    <option value="">全部</option>
+                    <option value="real">real</option>
+                    <option value="placeholder">placeholder</option>
+                  </select>
+                </label>
+                <label>
+                  <span>占位执行</span>
+                  <select value={auditFilter.placeholderOnly} onChange={(event) => setAuditFilter((current) => ({ ...current, placeholderOnly: event.target.value }))}>
+                    <option value="">全部</option>
+                    <option value="false">false</option>
+                    <option value="true">true</option>
+                  </select>
+                </label>
                 <label><span>执行者类型</span><input value={auditFilter.actorType} onChange={(event) => setAuditFilter((current) => ({ ...current, actorType: event.target.value }))} /></label>
                 <label><span>资源类型</span><input value={auditFilter.resourceType} onChange={(event) => setAuditFilter((current) => ({ ...current, resourceType: event.target.value }))} /></label>
                 <label><span>资源 ID</span><input value={auditFilter.resourceID} onChange={(event) => setAuditFilter((current) => ({ ...current, resourceID: event.target.value }))} /></label>
@@ -2090,7 +2124,7 @@ function buildAuditQuery(filter: AuditFilterState) {
                   <button type="submit">应用筛选</button>
                   <button type="button" className="secondary" onClick={clearAuditFilters}>清空筛选</button>
                   <button type="button" className="secondary" onClick={() => {
-                    const nextFilter = { ...auditFilter, action: "", actionPrefix: "control_execute_", outcome: "", actorType: "", resourceType: "", resourceID: "", actorID: "", startAt: "", endAt: "", offset: 0 };
+                    const nextFilter = { ...auditFilter, action: "", actionPrefix: "control_execute_", outcome: "", rejectionKind: "", executionMode: "", placeholderOnly: "", actorType: "", resourceType: "", resourceID: "", actorID: "", startAt: "", endAt: "", offset: 0 };
                     setAuditFilter(nextFilter);
                     auditFilterRef.current = nextFilter;
                     void refreshDashboard(false, currentUser, false, nextFilter, nodeFilterRef.current);
@@ -2211,13 +2245,13 @@ function auditRejectionLabel(entry: AuditLogEntry) {
 }
 
 function auditNextStep(entry: AuditLogEntry) {
-  const message = entry.payload?.humanMessage || "";
+  const nextStep = entry.payload?.nextStep || "";
   if ((entry.payload?.outcome || "") === "retryable_failure") return "可稍后重试";
   if ((entry.payload?.outcome || "") === "non_retryable_failure") return "先修正环境后再试";
   if (entry.payload?.rejectionKind === "state_drift") return "先刷新控制上下文";
   if (entry.payload?.rejectionKind === "duplicate_inflight") return "等待当前结果";
   if (entry.payload?.rejectionKind === "duplicate_handled") return "刷新后再决定是否重试";
-  return message || "-";
+  return nextStep || entry.payload?.humanMessage || "-";
 }
 
 function MetricCard({ label, value, hint }: { label: string; value: string; hint: string }) {

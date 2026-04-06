@@ -4048,6 +4048,9 @@ func TestAuditLogFilterSupportsCombinedControlExecuteQueries(t *testing.T) {
 	execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-audit-filter", "sourceSurface": "operator_console", "dryRun": false, "requestedAt": optionsOut.ContextVersion})
 	execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-audit-filter", "sourceSurface": "operator_console", "dryRun": false, "requestedAt": optionsOut.ContextVersion})
 
+	server.controlExecutor = newPlaceholderControlExecutor()
+	execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-filter", "sourceSurface": "node_console", "dryRun": false})
+
 	nodePreviewReq := httptest.NewRequest(http.MethodPost, "/api/control-actions", mustJSON(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-filter-stale", "sourceSurface": "node_console", "dryRun": true}))
 	applyCookies(nodePreviewReq, adminCookies)
 	nodePreviewRes := httptest.NewRecorder()
@@ -4069,7 +4072,12 @@ func TestAuditLogFilterSupportsCombinedControlExecuteQueries(t *testing.T) {
 	}
 	execAction(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-audit-filter-stale", "sourceSurface": "node_console", "dryRun": false, "requestedAt": previewOut.Facts["controlStateUpdatedAt"]})
 
-	query := "/api/audit-logs?actionPrefix=control_execute_&outcome=policy_rejected&resourceID=node-audit-filter-stale"
+	baseQueryValues := url.Values{}
+	baseQueryValues.Set("actionPrefix", "control_execute_")
+	baseQueryValues.Set("outcome", "policy_rejected")
+	baseQueryValues.Set("rejectionKind", "state_drift")
+	baseQueryValues.Set("resourceID", "node-audit-filter-stale")
+	query := "/api/audit-logs?" + baseQueryValues.Encode()
 	req := httptest.NewRequest(http.MethodGet, query, nil)
 	applyCookies(req, adminCookies)
 	res := httptest.NewRecorder()
@@ -4086,6 +4094,63 @@ func TestAuditLogFilterSupportsCombinedControlExecuteQueries(t *testing.T) {
 	}
 	if out.Items[0].Payload["rejectionKind"] != "state_drift" || out.Items[0].Payload["nextStep"] == "" {
 		t.Fatalf("expected filtered audit payload to preserve stable triage fields, got %+v", out.Items[0])
+	}
+	if out.Items[0].Payload["executionMode"] == "" || out.Items[0].Payload["placeholderOnly"] == "" {
+		t.Fatalf("expected combined filter to preserve execution markers, got %+v", out.Items[0])
+	}
+
+	realizedMode := out.Items[0].Payload["executionMode"]
+	realizedPlaceholderOnly := out.Items[0].Payload["placeholderOnly"]
+	strictQueryValues := url.Values{}
+	strictQueryValues.Set("actionPrefix", "control_execute_")
+	strictQueryValues.Set("outcome", "policy_rejected")
+	strictQueryValues.Set("rejectionKind", "state_drift")
+	strictQueryValues.Set("executionMode", realizedMode)
+	strictQueryValues.Set("placeholderOnly", realizedPlaceholderOnly)
+	strictQueryValues.Set("resourceID", "node-audit-filter-stale")
+	strictReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs?"+strictQueryValues.Encode(), nil)
+	applyCookies(strictReq, adminCookies)
+	strictRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(strictRes, strictReq)
+	if strictRes.Code != http.StatusOK {
+		t.Fatalf("expected strict audit logs 200, got %d", strictRes.Code)
+	}
+	var strictOut types.AuditLogListResponse
+	if err := json.NewDecoder(strictRes.Body).Decode(&strictOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if len(strictOut.Items) != 1 {
+		t.Fatalf("expected strict filter to keep the same stale rejection audit, got %+v", strictOut.Items)
+	}
+
+	placeholderQuery := url.Values{}
+	placeholderQuery.Set("actionPrefix", "control_execute_")
+	placeholderQuery.Set("outcome", "accepted_placeholder")
+	placeholderQuery.Set("executionMode", string(types.ControlExecutionPlaceholder))
+	placeholderQuery.Set("placeholderOnly", "true")
+	placeholderQuery.Set("resourceID", "node-audit-filter")
+	placeholderReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs?"+placeholderQuery.Encode(), nil)
+	applyCookies(placeholderReq, adminCookies)
+	placeholderRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(placeholderRes, placeholderReq)
+	if placeholderRes.Code != http.StatusOK {
+		t.Fatalf("expected placeholder audit logs 200, got %d", placeholderRes.Code)
+	}
+	var placeholderOut types.AuditLogListResponse
+	if err := json.NewDecoder(placeholderRes.Body).Decode(&placeholderOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if len(placeholderOut.Items) != 1 {
+		t.Fatalf("expected placeholder filter to return exactly one execute audit, got %+v", placeholderOut.Items)
+	}
+	if placeholderOut.Items[0].Action != "control_execute_placeholder_accepted" {
+		t.Fatalf("expected placeholder accepted audit action, got %+v", placeholderOut.Items[0])
+	}
+	if placeholderOut.Items[0].Payload["actionKind"] != string(types.ControlActionRestartAgent) {
+		t.Fatalf("expected placeholder audit to come from restart action, got %+v", placeholderOut.Items[0])
+	}
+	if placeholderOut.Items[0].Payload["executionMode"] != string(types.ControlExecutionPlaceholder) || placeholderOut.Items[0].Payload["placeholderOnly"] != "true" {
+		t.Fatalf("expected placeholder audit to keep execution markers, got %+v", placeholderOut.Items[0])
 	}
 }
 

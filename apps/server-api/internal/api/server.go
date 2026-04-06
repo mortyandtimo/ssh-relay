@@ -978,15 +978,18 @@ func (s *Server) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filter := store.AuditLogFilter{
-		Action:       strings.TrimSpace(r.URL.Query().Get("action")),
-		ActionPrefix: strings.TrimSpace(r.URL.Query().Get("actionPrefix")),
-		Outcome:      strings.TrimSpace(r.URL.Query().Get("outcome")),
-		ActorType:    strings.TrimSpace(r.URL.Query().Get("actorType")),
-		ActorID:      strings.TrimSpace(r.URL.Query().Get("actorID")),
-		ResourceType: strings.TrimSpace(r.URL.Query().Get("resourceType")),
-		ResourceID:   strings.TrimSpace(r.URL.Query().Get("resourceID")),
-		Limit:        50,
-		Offset:       0,
+		Action:          strings.TrimSpace(r.URL.Query().Get("action")),
+		ActionPrefix:    strings.TrimSpace(r.URL.Query().Get("actionPrefix")),
+		Outcome:         strings.TrimSpace(r.URL.Query().Get("outcome")),
+		RejectionKind:   strings.TrimSpace(r.URL.Query().Get("rejectionKind")),
+		ExecutionMode:   strings.TrimSpace(r.URL.Query().Get("executionMode")),
+		PlaceholderOnly: strings.TrimSpace(r.URL.Query().Get("placeholderOnly")),
+		ActorType:       strings.TrimSpace(r.URL.Query().Get("actorType")),
+		ActorID:         strings.TrimSpace(r.URL.Query().Get("actorID")),
+		ResourceType:    strings.TrimSpace(r.URL.Query().Get("resourceType")),
+		ResourceID:      strings.TrimSpace(r.URL.Query().Get("resourceID")),
+		Limit:           50,
+		Offset:          0,
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		if parsed, err := parseInt64(raw); err == nil && parsed > 0 {
