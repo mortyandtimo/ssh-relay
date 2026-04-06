@@ -26,6 +26,7 @@ import {
   tunnelTabs,
 } from "../../../packages/desktop-core/src/utils";
 import { buildDesktopControlResultView } from "./controlResultView";
+import { ControlResultBlock } from "./controlResultBlock";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
@@ -724,51 +725,5 @@ function Metric({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
-  );
-}
-
-function ControlResultBlock({ result }: { result: ControlActionResponse }) {
-  const view = buildDesktopControlResultView(result);
-  return (
-    <section className="panel result-panel">
-      <div className="panel-head small">
-        <h2>最近一次控制结果</h2>
-        <span className={"status-chip " + view.tone}>{view.categoryLabel}</span>
-      </div>
-      <p className="copy">{view.message}</p>
-      <div className="detail-stack result-summary-grid">
-        {view.summaryItems.map((item) => (
-          <Metric key={item.label} label={item.label} value={item.value} />
-        ))}
-      </div>
-      <p className="copy">下一步：{view.nextStep}</p>
-      {view.rejectionKind ? <div className="banner info">拒绝细分：<code>{view.rejectionKind}</code></div> : null}
-      {view.blockedReasons.length > 0 ? (
-        <div className="check-list compact-check-list">
-          {view.blockedReasons.map((reason) => (
-            <div key={reason.code} className="check-item">
-              <div className="check-head">
-                <strong>{reason.code}</strong>
-                <span className="status-chip danger">阻断</span>
-              </div>
-              <p className="copy">{reason.message}</p>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {view.executionNotes.length > 0 ? (
-        <div className="check-list compact-check-list">
-          {view.executionNotes.map((note) => (
-            <div key={note.code || note.message} className="check-item">
-              <div className="check-head">
-                <strong>{note.code || "note"}</strong>
-                <span className="status-chip neutral">执行说明</span>
-              </div>
-              <p className="copy">{note.message}</p>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </section>
   );
 }
