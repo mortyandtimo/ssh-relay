@@ -17,7 +17,6 @@ import {
   checkStateTone,
   controlOptionStateLabel,
   controlOptionTone,
-  formatControlResultDisplay,
   formatDate,
   nodeAgentDeploymentLabel,
   publicEntry,
@@ -26,6 +25,7 @@ import {
   statusClass,
   tunnelTabs,
 } from "../../../packages/desktop-core/src/utils";
+import { buildDesktopControlResultView } from "./controlResultView";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
@@ -728,32 +728,24 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 function ControlResultBlock({ result }: { result: ControlActionResponse }) {
-  const display = formatControlResultDisplay(result);
-  const summaryItems = [
-    { label: "category label", value: display.categoryLabel },
-    { label: "result", value: result.result },
-    { label: "executeOutcome", value: result.executeOutcome || "-" },
-    { label: "rejectionKind", value: result.rejectionKind || "-" },
-    { label: "executionMode", value: display.executionMode || "-" },
-    { label: "placeholderOnly", value: String(display.placeholderOnly) },
-  ];
+  const view = buildDesktopControlResultView(result);
   return (
     <section className="panel result-panel">
       <div className="panel-head small">
         <h2>最近一次控制结果</h2>
-        <span className={"status-chip " + display.tone}>{display.categoryLabel}</span>
+        <span className={"status-chip " + view.tone}>{view.categoryLabel}</span>
       </div>
-      <p className="copy">{display.message}</p>
+      <p className="copy">{view.message}</p>
       <div className="detail-stack result-summary-grid">
-        {summaryItems.map((item) => (
+        {view.summaryItems.map((item) => (
           <Metric key={item.label} label={item.label} value={item.value} />
         ))}
       </div>
-      <p className="copy">下一步：{display.nextStep}</p>
-      {result.rejectionKind ? <div className="banner info">拒绝细分：<code>{result.rejectionKind}</code></div> : null}
-      {display.blockedReasons.length > 0 ? (
+      <p className="copy">下一步：{view.nextStep}</p>
+      {view.rejectionKind ? <div className="banner info">拒绝细分：<code>{view.rejectionKind}</code></div> : null}
+      {view.blockedReasons.length > 0 ? (
         <div className="check-list compact-check-list">
-          {display.blockedReasons.map((reason) => (
+          {view.blockedReasons.map((reason) => (
             <div key={reason.code} className="check-item">
               <div className="check-head">
                 <strong>{reason.code}</strong>
@@ -764,9 +756,9 @@ function ControlResultBlock({ result }: { result: ControlActionResponse }) {
           ))}
         </div>
       ) : null}
-      {display.executionNotes.length > 0 ? (
+      {view.executionNotes.length > 0 ? (
         <div className="check-list compact-check-list">
-          {display.executionNotes.map((note) => (
+          {view.executionNotes.map((note) => (
             <div key={note.code || note.message} className="check-item">
               <div className="check-head">
                 <strong>{note.code || "note"}</strong>

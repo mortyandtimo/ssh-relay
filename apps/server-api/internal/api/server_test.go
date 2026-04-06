@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http/cookiejar"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -4694,6 +4695,105 @@ func TestControlExecuteSameContextInFlightIsRejected(t *testing.T) {
 	}
 	if secondOut.Result != types.ControlResultRejected || !strings.Contains(secondOut.HumanMessage, "处理中") {
 		t.Fatalf("expected in-flight duplicate to be rejected as processing, got %+v", secondOut)
+	}
+
+	close(blocking.release)
+	<-firstDone
+}
+
+func TestControlExecuteSameContextInFlightLiveHTTP(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-inflight-live", NodeName: "node-inflight-live", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-inflight-live.service", "instanceProfile": "node-inflight-live", "instanceManaged": "true"}})
+	registerRes, err := http.Post(httpServer.URL+"/agent/register", "application/json", bytes.NewReader(registerBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registerRes.Body.Close()
+	if registerRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.StatusCode)
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+	bootstrapReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/api/auth/bootstrap", mustJSON(map[string]any{"email": "inflight@example.com", "displayName": "Inflight", "password": "desktop-pass"}))
+	bootstrapReq.Header.Set("Content-Type", "application/json")
+	bootstrapReq.Header.Set("X-Bootstrap-Secret", "bootstrap-secret")
+	bootstrapRes, err := client.Do(bootstrapReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bootstrapRes.Body.Close()
+	if bootstrapRes.StatusCode != http.StatusCreated {
+		t.Fatalf("expected bootstrap 201, got %d", bootstrapRes.StatusCode)
+	}
+
+	optionsRes, err := client.Get(httpServer.URL + "/api/control-actions/node/node-inflight-live/node_console/options")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer optionsRes.Body.Close()
+	if optionsRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected options 200, got %d", optionsRes.StatusCode)
+	}
+	var optionsOut types.ControlActionOptionsResponse
+	if err := json.NewDecoder(optionsRes.Body).Decode(&optionsOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	blocking := &blockingControlExecutor{started: make(chan struct{}), release: make(chan struct{})}
+	server.controlExecutor = blocking
+
+	makeReq := func() *http.Request {
+		body, _ := json.Marshal(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-inflight-live", "sourceSurface": "node_console", "dryRun": false, "requestedAt": optionsOut.ContextVersion})
+		req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/api/control-actions", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		return req
+	}
+
+	firstDone := make(chan types.ControlActionResponse, 1)
+	go func() {
+		res, err := client.Do(makeReq())
+		if err != nil {
+			firstDone <- types.ControlActionResponse{HumanMessage: err.Error()}
+			return
+		}
+		defer res.Body.Close()
+		var out types.ControlActionResponse
+		_ = json.NewDecoder(res.Body).Decode(&out)
+		firstDone <- out
+	}()
+
+	<-blocking.started
+	secondRes, err := client.Do(makeReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondRes.Body.Close()
+	if secondRes.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected second status %d", secondRes.StatusCode)
+	}
+	var secondOut types.ControlActionResponse
+	if err := json.NewDecoder(secondRes.Body).Decode(&secondOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if secondOut.Result != types.ControlResultRejected {
+		t.Fatalf("expected duplicate in-flight rejection, got %+v", secondOut)
+	}
+	if secondOut.ExecuteOutcome != string(controlExecutionOutcomePolicyRejected) || secondOut.RejectionKind != "duplicate_inflight" {
+		t.Fatalf("expected live HTTP duplicate markers, got %+v", secondOut)
+	}
+	if !strings.Contains(secondOut.NextStep, "等待当前执行结果返回") {
+		t.Fatalf("expected duplicate nextStep to explain wait, got %+v", secondOut)
+	}
+	if len(secondOut.ExecutionNotes) == 0 || !strings.Contains(secondOut.ExecutionNotes[0].Message, "处理中") {
+		t.Fatalf("expected duplicate execution notes, got %+v", secondOut)
 	}
 
 	close(blocking.release)
