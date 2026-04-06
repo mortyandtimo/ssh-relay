@@ -21,6 +21,7 @@ import (
 func main() {
 	addr := config.GetEnv("SERVER_API_ADDR", "127.0.0.1:18080")
 	relayTCPRuntimeURL := config.GetEnv("RELAY_TCP_RUNTIME_URL", "http://127.0.0.1:9090/runtime")
+	mode := strings.TrimSpace(config.GetEnv("CONTROL_FIXTURE_MODE", "duplicate_inflight"))
 	nodeID := strings.TrimSpace(config.GetEnv("CONTROL_FIXTURE_NODE_ID", "node-desktop-duplicate-live"))
 	releaseDelay := time.Duration(parseIntEnv("CONTROL_FIXTURE_RELEASE_DELAY_MS", 600)) * time.Millisecond
 
@@ -29,15 +30,25 @@ func main() {
 	prepareManagedNode(backend, nodeID)
 
 	server := api.NewServer("fixture", backend, relayTCPRuntimeURL)
-	fixture := server.UseBlockingControlExecutionFixture(types.ControlActionIsolateNode, types.ControlTargetNode, nodeID)
+	var fixture *api.BlockingControlExecutionFixture
+	switch mode {
+	case "duplicate_inflight":
+		fixture = server.UseBlockingControlExecutionFixture(types.ControlActionIsolateNode, types.ControlTargetNode, nodeID)
+	case "retryable_restart":
+		server.UseRetryableRestartFailureFixture(nodeID, config.GetEnv("CONTROL_FIXTURE_RETRYABLE_DETAIL", "fixture transient failure"))
+	default:
+		log.Fatalf("unsupported CONTROL_FIXTURE_MODE: %s", mode)
+	}
 
-	go func() {
-		for !fixture.Started() {
-			time.Sleep(20 * time.Millisecond)
-		}
-		time.Sleep(releaseDelay)
-		fixture.Release()
-	}()
+	if fixture != nil {
+		go func() {
+			for !fixture.Started() {
+				time.Sleep(20 * time.Millisecond)
+			}
+			time.Sleep(releaseDelay)
+			fixture.Release()
+		}()
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fixture/started", func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +57,11 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]bool{"started": fixture.Started()})
+		started := false
+		if fixture != nil {
+			started = fixture.Started()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]bool{"started": started})
 	})
 	mux.Handle("/", server.Handler())
 
@@ -55,13 +70,15 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		fixture.Release()
+		if fixture != nil {
+			fixture.Release()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(ctx)
 	}()
 
-	log.Printf("control-fixture listening on %s for node %s", addr, nodeID)
+	log.Printf("control-fixture listening on %s for node %s in mode %s", addr, nodeID, mode)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}

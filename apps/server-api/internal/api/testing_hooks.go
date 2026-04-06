@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"time"
 
 	"github.com/25743/cloud-relay-platform/packages/protocol/types"
 )
@@ -86,4 +88,29 @@ func (e *fixtureBlockingControlExecutor) shouldBlock(plan controlExecutionPlan) 
 	}
 	e.blocked = true
 	return true
+}
+
+type fixtureRetryableRestartRunner struct {
+	detail string
+}
+
+func (f fixtureRetryableRestartRunner) restartService(_ context.Context, _ string) controlCommandResult {
+	detail := f.detail
+	if detail == "" {
+		detail = "fixture transient failure"
+	}
+	return controlCommandResult{
+		exitCode: 1,
+		stderr:   detail,
+		err:      errors.New(detail),
+	}
+}
+
+func (s *Server) UseRetryableRestartFailureFixture(localNodeID string, detail string) {
+	s.controlExecutor = newStateMutationControlExecutor(s.store, newRestartCapableControlExecutor(restartAgentExecutorConfig{
+		enabled:              true,
+		localNodeID:          localNodeID,
+		allowedServicePrefix: defaultRestartServicePrefix,
+		timeout:              2 * time.Second,
+	}, fixtureRetryableRestartRunner{detail: detail}))
 }
