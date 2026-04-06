@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import TestRenderer, { act } from "react-test-renderer";
 import { ControlResultBlock } from "./controlResultBlock.ts";
 
 const duplicateInflight = {
@@ -75,5 +76,18 @@ const staleMarkup = renderToStaticMarkup(React.createElement(ControlResultBlock,
 assert.match(staleMarkup, /上下文已过期/);
 assert.match(staleMarkup, /tunnel_state_conflict/);
 assert.match(staleMarkup, /当前 tunnel 已变化，请刷新后重试/);
+
+const renderer = TestRenderer.create(React.createElement(ControlResultBlock, { result: duplicateInflight }));
+let tree = renderer.toJSON();
+assert.ok(JSON.stringify(tree).includes("处理中"));
+assert.ok(JSON.stringify(tree).includes("duplicate_inflight"));
+
+act(() => {
+  renderer.update(React.createElement(ControlResultBlock, { result: retryableFailure }));
+});
+tree = renderer.toJSON();
+assert.ok(JSON.stringify(tree).includes("可重试失败"));
+assert.ok(JSON.stringify(tree).includes("执行器处理失败，建议稍后重试"));
+assert.ok(!JSON.stringify(tree).includes("duplicate_inflight"));
 
 console.log("desktop-console control result block markup assertions passed");
