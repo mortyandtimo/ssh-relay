@@ -695,10 +695,11 @@ function ControlResultBlock({ result }: { result: ControlActionResponse }) {
     <div className="control-result-card">
       <div className="check-head">
         <strong>最近一次控制契约结果</strong>
-        <span className={"status-chip " + display.tone}>{result.result}</span>
+        <span className={"status-chip " + display.tone}>{display.categoryLabel}</span>
       </div>
       <p className="copy">{display.message}</p>
-      <p className="copy">executionMode: <code>{display.executionMode}</code> / dryRunOnly: <code>{display.dryRunOnly}</code></p>
+      <p className="copy">result: <code>{result.result}</code> / executionMode: <code>{display.executionMode}</code> / dryRunOnly: <code>{display.dryRunOnly}</code> / placeholderOnly: <code>{String(display.placeholderOnly)}</code></p>
+      <p className="copy">下一步：{display.nextStep}</p>
       {display.placeholderOnly ? <div className="banner info">当前仅为占位执行提示，尚未接入真实系统执行器。</div> : null}
       <div className="check-list compact-check-list">
         {display.checks.map((item) => (

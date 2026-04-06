@@ -129,6 +129,102 @@ export function controlResultTone(result: ControlActionResponse["result"]) {
 	return "warn";
 }
 
+export type ControlResultCategory =
+	| "accepted_real"
+	| "accepted_placeholder"
+	| "blocked"
+	| "stale_context"
+	| "duplicate_inflight"
+	| "duplicate_handled"
+	| "retryable_failure"
+	| "non_retryable_failure"
+	| "policy_rejected"
+	| "rejected_generic";
+
+export function classifyControlResult(result: ControlActionResponse): ControlResultCategory {
+	if (result.result === "accepted") {
+		return result.placeholderOnly ? "accepted_placeholder" : "accepted_real";
+	}
+	if (result.result === "blocked") {
+		return "blocked";
+	}
+	const message = (result.humanMessage || "").toLowerCase();
+	const notes = (result.executionNotes || []).map((item) => (item.message || "").toLowerCase()).join(" ");
+	const combined = message + " " + notes;
+	if (combined.includes("刷新") || combined.includes("状态已变化")) return "stale_context";
+	if (combined.includes("处理中") || combined.includes("请勿重复提交")) return "duplicate_inflight";
+	if (combined.includes("已处理完成") || combined.includes("避免重复执行")) return "duplicate_handled";
+	if (combined.includes("可稍后重试") || combined.includes("建议稍后重试") || combined.includes("retry")) return "retryable_failure";
+	if (combined.includes("不建议重试")) return "non_retryable_failure";
+	if (result.executionMode === "placeholder" && !result.placeholderOnly) return "policy_rejected";
+	return "rejected_generic";
+}
+
+export function controlResultCategoryLabel(category: ControlResultCategory) {
+	switch (category) {
+		case "accepted_real":
+			return "真实执行已受理";
+		case "accepted_placeholder":
+			return "占位执行已受理";
+		case "blocked":
+			return "预检阻断";
+		case "stale_context":
+			return "上下文已过期";
+		case "duplicate_inflight":
+			return "处理中";
+		case "duplicate_handled":
+			return "已处理完成";
+		case "retryable_failure":
+			return "可重试失败";
+		case "non_retryable_failure":
+			return "不可重试失败";
+		case "policy_rejected":
+			return "策略拒绝";
+		default:
+			return "执行被拒绝";
+	}
+}
+
+export function controlResultCategoryTone(category: ControlResultCategory) {
+	switch (category) {
+		case "accepted_real":
+			return "good";
+		case "accepted_placeholder":
+			return "neutral";
+		case "blocked":
+			return "danger";
+		case "retryable_failure":
+			return "warn";
+		default:
+			return "danger";
+	}
+}
+
+export function controlResultNextStep(category: ControlResultCategory) {
+	switch (category) {
+		case "accepted_real":
+			return "观察最新目标状态和审计记录，确认真实执行结果已经反映到页面。";
+		case "accepted_placeholder":
+			return "当前只经过占位执行边界；如需真实动作，请确认该动作是否已接入真实执行路径。";
+		case "blocked":
+			return "先处理阻断原因，再重新读取控制摘要。";
+		case "stale_context":
+			return "请先刷新控制面板或动作列表，再基于新的上下文重新发起动作。";
+		case "duplicate_inflight":
+			return "等待当前执行结果返回，不要在同一上下文下重复点击。";
+		case "duplicate_handled":
+			return "该上下文动作已经处理完成；刷新后再决定是否需要新的动作。";
+		case "retryable_failure":
+			return "可稍后重试；若连续失败，请结合审计与执行说明排查。";
+		case "non_retryable_failure":
+			return "当前不建议直接重试；请先修正环境或策略条件。";
+		case "policy_rejected":
+			return "请先处理策略拒绝原因，再决定是否重新发起动作。";
+		default:
+			return "请结合执行说明与审计记录继续排查。";
+	}
+}
+
 export function controlOptionTone(option: ControlActionOption) {
 	if (option.availabilityState === "blocked") return "danger";
 	if (option.availabilityState === "placeholder_only") return "neutral";
@@ -143,7 +239,10 @@ export function controlOptionStateLabel(option: ControlActionOption) {
 
 export type ControlResultDisplay = {
 	tone: string;
+	category: ControlResultCategory;
+	categoryLabel: string;
 	message: string;
+	nextStep: string;
 	executionMode: string;
 	dryRunOnly: string;
 	placeholderOnly: boolean;
@@ -153,9 +252,13 @@ export type ControlResultDisplay = {
 };
 
 export function formatControlResultDisplay(result: ControlActionResponse): ControlResultDisplay {
+	const category = classifyControlResult(result);
 	return {
-		tone: controlResultTone(result.result),
+		tone: controlResultCategoryTone(category),
+		category,
+		categoryLabel: controlResultCategoryLabel(category),
 		message: result.humanMessage,
+		nextStep: controlResultNextStep(category),
 		executionMode: result.executionMode,
 		dryRunOnly: String(result.dryRunOnly),
 		placeholderOnly: Boolean(result.placeholderOnly),
