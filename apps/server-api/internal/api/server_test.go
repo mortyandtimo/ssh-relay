@@ -4228,3 +4228,111 @@ func TestControlContextVersionOnlyMovesOnControlRelevantStateChanges(t *testing.
 		t.Fatalf("status-changing tunnel update must trigger drift rejection for stale context, got %+v", rejectedAfterStatusChange)
 	}
 }
+
+func TestControlExecuteSameContextIsIdempotencyGuarded(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(nodeID string, metadata map[string]string) {
+		body, _ := json.Marshal(types.NodeRegisterRequest{NodeID: nodeID, NodeName: nodeID, AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: metadata})
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(body))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+	}
+
+	registerNode("node-idempotent", map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-idempotent.service", "instanceProfile": "node-idempotent", "instanceManaged": "true"})
+	if _, err := server.store.CreateTunnel(context.Background(), types.TunnelSpec{ID: "tunnel-idempotent", NodeID: "node-idempotent", Name: "tunnel-idempotent", Type: "tcp", Status: "active", TargetHost: "127.0.0.1", TargetPort: 8080, PublicPort: 28100, Metadata: map[string]string{"nodeId": "node-idempotent"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	decodeTunnelOptions := func() types.ControlActionOptionsResponse {
+		req := httptest.NewRequest(http.MethodGet, "/api/control-actions/tunnel/tunnel-idempotent/operator_console/options", nil)
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected tunnel options 200, got %d", res.Code)
+		}
+		var out types.ControlActionOptionsResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	execAction := func(payload map[string]any) types.ControlActionResponse {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+		var out types.ControlActionResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	options := decodeTunnelOptions()
+	contextVersion := options.ContextVersion
+	if contextVersion == "" {
+		t.Fatalf("expected contextVersion, got %+v", options)
+	}
+
+	first := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-idempotent", "sourceSurface": "operator_console", "dryRun": false, "requestedAt": contextVersion})
+	if first.Result != types.ControlResultAccepted {
+		t.Fatalf("expected first execute accepted, got %+v", first)
+	}
+	tunnel, err := server.store.GetTunnel(context.Background(), "tunnel-idempotent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tunnel.Status != "paused" {
+		t.Fatalf("expected first execute to pause tunnel, got %+v", tunnel)
+	}
+
+	second := execAction(map[string]any{"actionKind": "pause_tunnel", "targetKind": "tunnel", "targetId": "tunnel-idempotent", "sourceSurface": "operator_console", "dryRun": false, "requestedAt": contextVersion})
+	if second.Result != types.ControlResultRejected || !strings.Contains(second.HumanMessage, "已经处理完成") {
+		t.Fatalf("expected duplicate same-context execute to be rejected as already handled, got %+v", second)
+	}
+	tunnel, err = server.store.GetTunnel(context.Background(), "tunnel-idempotent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tunnel.Status != "paused" {
+		t.Fatalf("duplicate same-context execute must not flip tunnel again, got %+v", tunnel)
+	}
+
+	auditReq := httptest.NewRequest(http.MethodGet, "/api/audit-logs?actionPrefix=control_execute_&resourceID=tunnel-idempotent", nil)
+	applyCookies(auditReq, adminCookies)
+	auditRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(auditRes, auditReq)
+	if auditRes.Code != http.StatusOK {
+		t.Fatalf("expected audit logs 200, got %d", auditRes.Code)
+	}
+	var auditOut types.AuditLogListResponse
+	if err := json.NewDecoder(auditRes.Body).Decode(&auditOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	acceptCount := 0
+	for _, item := range auditOut.Items {
+		if item.Action == "control_execute_accepted" && item.Payload["actionKind"] == "pause_tunnel" {
+			acceptCount++
+		}
+	}
+	if acceptCount != 1 {
+		t.Fatalf("expected exactly one accepted execute audit for duplicate same-context submissions, got %+v", auditOut.Items)
+	}
+
+	staleRetry := execAction(map[string]any{"actionKind": "resume_tunnel", "targetKind": "tunnel", "targetId": "tunnel-idempotent", "sourceSurface": "operator_console", "dryRun": false, "requestedAt": contextVersion})
+	if staleRetry.Result != types.ControlResultRejected || !strings.Contains(staleRetry.HumanMessage, "状态已变化") {
+		t.Fatalf("expected stale retry on old context to stay rejected, got %+v", staleRetry)
+	}
+}

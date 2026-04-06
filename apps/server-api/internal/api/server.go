@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/25743/cloud-relay-platform/apps/server-api/internal/store"
@@ -52,6 +53,9 @@ type Server struct {
 	adminBootstrapSecret string
 	allowedOrigins       map[string]struct{}
 	authCookiesSecure    bool
+	controlExecuteMu     sync.Mutex
+	controlExecuteActive map[string]struct{}
+	controlExecuteDone   map[string]controlExecutionRecord
 }
 
 func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *Server {
@@ -69,6 +73,8 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 		adminBootstrapSecret: strings.TrimSpace(os.Getenv("SERVER_API_ADMIN_BOOTSTRAP_SECRET")),
 		allowedOrigins:       parseAllowedOrigins(os.Getenv("SERVER_API_ALLOWED_ORIGINS")),
 		authCookiesSecure:    parseBoolEnv(os.Getenv("SERVER_API_AUTH_COOKIES_SECURE")),
+		controlExecuteActive: map[string]struct{}{},
+		controlExecuteDone:   map[string]controlExecutionRecord{},
 	}
 	s.controlExecutor = newStateMutationControlExecutor(backend, newConfiguredControlExecutor())
 	s.routes()

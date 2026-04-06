@@ -63,6 +63,11 @@ type controlExecutionPlan struct {
 	actionEvaluation  evaluatedControlAction
 }
 
+type controlExecutionRecord struct {
+	response types.ControlActionResponse
+	result   controlExecutionResult
+}
+
 type controlExecutionRevalidation struct {
 	allowed           bool
 	outcome           controlExecutionOutcome
@@ -554,6 +559,14 @@ func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlAct
 		}
 	}
 	plan := buildExecutionPlan(req, snapshot, *actionSnapshot)
+	if duplicate, ok := s.rejectDuplicateControlExecution(req, plan); ok {
+		resp = buildControlActionResponse(req, plan, duplicate)
+		return resp, http.StatusOK
+	}
+	executionKey := controlExecutionKey(req, plan)
+	if executionKey != "" {
+		defer s.finishDuplicateControlExecution(executionKey)
+	}
 	if revalidated := revalidateRequestedControlContext(plan); !revalidated.allowed {
 		plan = applyExecutionRevalidation(plan, revalidated)
 		result := controlExecutionResult{
@@ -573,7 +586,70 @@ func (s *Server) evaluateControlAction(ctx context.Context, req types.ControlAct
 	result := s.controlExecutor.execute(ctx, plan)
 	resp = buildControlActionResponse(req, plan, result)
 	s.writeControlExecutionAudit(ctx, req, plan, result, resp)
+	s.storeDuplicateControlExecutionResult(req, plan, result, resp)
 	return resp, http.StatusOK
+}
+
+func controlExecutionKey(req types.ControlActionRequest, plan controlExecutionPlan) string {
+	contextVersion := requestedControlContextVersion(plan)
+	if strings.TrimSpace(contextVersion) == "" {
+		return ""
+	}
+	parts := []string{string(req.TargetKind), req.TargetID, string(req.ActionKind), string(req.SourceSurface), contextVersion}
+	return strings.Join(parts, "|")
+}
+
+func (s *Server) rejectDuplicateControlExecution(req types.ControlActionRequest, plan controlExecutionPlan) (controlExecutionResult, bool) {
+	key := controlExecutionKey(req, plan)
+	if key == "" {
+		return controlExecutionResult{}, false
+	}
+	s.controlExecuteMu.Lock()
+	defer s.controlExecuteMu.Unlock()
+	if _, ok := s.controlExecuteActive[key]; ok {
+		return controlExecutionResult{
+			outcome:       controlExecutionOutcomePolicyRejected,
+			humanMessage:  "相同控制上下文的动作仍在处理中，请勿重复提交。",
+			executionMode: plan.executionMode,
+			executionNotes: []types.ControlExecutionNote{{
+				Message: "该上下文动作仍在处理中，请等待当前结果或刷新后再重试。",
+			}},
+		}, true
+	}
+	if existing, ok := s.controlExecuteDone[key]; ok {
+		return controlExecutionResult{
+			outcome:       controlExecutionOutcomePolicyRejected,
+			humanMessage:  "相同控制上下文的动作已经处理完成，请刷新后再决定是否重试。",
+			executionMode: existing.response.ExecutionMode,
+			executionNotes: []types.ControlExecutionNote{{
+				Message: "该上下文动作已经处理完成，避免重复执行。请刷新控制摘要后再决定下一步。",
+			}},
+		}, true
+	}
+	s.controlExecuteActive[key] = struct{}{}
+	return controlExecutionResult{}, false
+}
+
+func (s *Server) finishDuplicateControlExecution(key string) {
+	if key == "" {
+		return
+	}
+	s.controlExecuteMu.Lock()
+	delete(s.controlExecuteActive, key)
+	s.controlExecuteMu.Unlock()
+}
+
+func (s *Server) storeDuplicateControlExecutionResult(req types.ControlActionRequest, plan controlExecutionPlan, result controlExecutionResult, resp types.ControlActionResponse) {
+	key := controlExecutionKey(req, plan)
+	if key == "" {
+		return
+	}
+	s.controlExecuteMu.Lock()
+	if s.controlExecuteDone == nil {
+		s.controlExecuteDone = map[string]controlExecutionRecord{}
+	}
+	s.controlExecuteDone[key] = controlExecutionRecord{response: cloneControlActionResponse(resp), result: result}
+	s.controlExecuteMu.Unlock()
 }
 
 func newControlActionResponse(req types.ControlActionRequest) types.ControlActionResponse {
