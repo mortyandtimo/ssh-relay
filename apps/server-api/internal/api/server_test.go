@@ -31,6 +31,16 @@ type fakeRestartRunner struct {
 	result          controlCommandResult
 }
 
+type sequenceControlExecutor struct {
+	callCount int
+	results   []controlExecutionResult
+}
+
+type blockingControlExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
 func (s *spyControlExecutor) execute(_ context.Context, plan controlExecutionPlan) controlExecutionResult {
 	s.callCount++
 	s.lastPlan = plan
@@ -42,6 +52,24 @@ func (f *fakeRestartRunner) restartService(_ context.Context, serviceUnit string
 	f.callCount++
 	f.lastServiceUnit = serviceUnit
 	return f.result
+}
+
+func (s *sequenceControlExecutor) execute(_ context.Context, _ controlExecutionPlan) controlExecutionResult {
+	s.callCount++
+	if len(s.results) == 0 {
+		return controlExecutionResult{}
+	}
+	result := s.results[0]
+	if len(s.results) > 1 {
+		s.results = s.results[1:]
+	}
+	return result
+}
+
+func (b *blockingControlExecutor) execute(_ context.Context, _ controlExecutionPlan) controlExecutionResult {
+	close(b.started)
+	<-b.release
+	return controlExecutionResult{outcome: controlExecutionOutcomeAcceptedPlaceholder, humanMessage: "blocked executor released", executionMode: types.ControlExecutionPlaceholder}
 }
 
 func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
@@ -4335,4 +4363,145 @@ func TestControlExecuteSameContextIsIdempotencyGuarded(t *testing.T) {
 	if staleRetry.Result != types.ControlResultRejected || !strings.Contains(staleRetry.HumanMessage, "状态已变化") {
 		t.Fatalf("expected stale retry on old context to stay rejected, got %+v", staleRetry)
 	}
+}
+
+func TestControlExecuteRetryableFailureAllowsSameContextRetry(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-retryable-context", NodeName: "node-retryable-context", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-retryable-context.service", "instanceProfile": "node-retryable-context", "instanceManaged": "true"}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+
+	executor := &sequenceControlExecutor{results: []controlExecutionResult{
+		{outcome: controlExecutionOutcomeRetryableFailure, humanMessage: "retry later", executionMode: types.ControlExecutionReal},
+		{outcome: controlExecutionOutcomeAcceptedReal, humanMessage: "retry success", executionMode: types.ControlExecutionReal},
+	}}
+	server.controlExecutor = executor
+
+	optionsReq := httptest.NewRequest(http.MethodGet, "/api/control-actions/node/node-retryable-context/node_console/options", nil)
+	applyCookies(optionsReq, adminCookies)
+	optionsRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(optionsRes, optionsReq)
+	if optionsRes.Code != http.StatusOK {
+		t.Fatalf("expected options 200, got %d", optionsRes.Code)
+	}
+	var optionsOut types.ControlActionOptionsResponse
+	if err := json.NewDecoder(optionsRes.Body).Decode(&optionsOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	execAction := func() types.ControlActionResponse {
+		body, _ := json.Marshal(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-retryable-context", "sourceSurface": "node_console", "dryRun": false, "requestedAt": optionsOut.ContextVersion})
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("unexpected status %d", res.Code)
+		}
+		var out types.ControlActionResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		return out
+	}
+
+	first := execAction()
+	if first.Result != types.ControlResultRejected || !strings.Contains(first.HumanMessage, "retry later") {
+		t.Fatalf("expected first retryable failure, got %+v", first)
+	}
+	second := execAction()
+	if second.Result != types.ControlResultAccepted || second.HumanMessage != "retry success" {
+		t.Fatalf("expected second same-context attempt to reach real retry, got %+v", second)
+	}
+	if executor.callCount != 2 {
+		t.Fatalf("expected retryable failure not to be permanently cached, got callCount=%d", executor.callCount)
+	}
+}
+
+func TestControlExecuteDoneCacheTTLPrunesEntries(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.controlExecuteDone["expired"] = controlExecutionRecord{storedAt: time.Now().UTC().Add(-3 * time.Minute), result: controlExecutionResult{outcome: controlExecutionOutcomeAcceptedReal}}
+	server.controlExecuteDone["fresh"] = controlExecutionRecord{storedAt: time.Now().UTC(), result: controlExecutionResult{outcome: controlExecutionOutcomeAcceptedReal}}
+
+	server.controlExecuteMu.Lock()
+	server.pruneControlExecuteDoneLocked(time.Now().UTC())
+	_, expiredOk := server.controlExecuteDone["expired"]
+	_, freshOk := server.controlExecuteDone["fresh"]
+	server.controlExecuteMu.Unlock()
+
+	if expiredOk {
+		t.Fatalf("expected expired done-cache entry to be pruned")
+	}
+	if !freshOk {
+		t.Fatalf("expected fresh done-cache entry to remain")
+	}
+}
+
+func TestControlExecuteSameContextInFlightIsRejected(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{NodeID: "node-inflight", NodeName: "node-inflight", AgentVersion: "0.1.0", Capabilities: types.NodeCapabilities{TCPRelay: true}, Metadata: map[string]string{"deploymentMode": "managed", "serviceUnit": "cloud-relay-client-agent@node-inflight.service", "instanceProfile": "node-inflight", "instanceManaged": "true"}})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+
+	blocking := &blockingControlExecutor{started: make(chan struct{}), release: make(chan struct{})}
+	server.controlExecutor = blocking
+
+	optionsReq := httptest.NewRequest(http.MethodGet, "/api/control-actions/node/node-inflight/node_console/options", nil)
+	applyCookies(optionsReq, adminCookies)
+	optionsRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(optionsRes, optionsReq)
+	if optionsRes.Code != http.StatusOK {
+		t.Fatalf("expected options 200, got %d", optionsRes.Code)
+	}
+	var optionsOut types.ControlActionOptionsResponse
+	if err := json.NewDecoder(optionsRes.Body).Decode(&optionsOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	makeReq := func() *http.Request {
+		body, _ := json.Marshal(map[string]any{"actionKind": "restart_agent", "targetKind": "node", "targetId": "node-inflight", "sourceSurface": "node_console", "dryRun": false, "requestedAt": optionsOut.ContextVersion})
+		req := httptest.NewRequest(http.MethodPost, "/api/control-actions", bytes.NewReader(body))
+		applyCookies(req, adminCookies)
+		return req
+	}
+
+	firstDone := make(chan types.ControlActionResponse, 1)
+	go func() {
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, makeReq())
+		var out types.ControlActionResponse
+		_ = json.NewDecoder(res.Body).Decode(&out)
+		firstDone <- out
+	}()
+
+	<-blocking.started
+	secondRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(secondRes, makeReq())
+	if secondRes.Code != http.StatusOK {
+		t.Fatalf("unexpected second status %d", secondRes.Code)
+	}
+	var secondOut types.ControlActionResponse
+	if err := json.NewDecoder(secondRes.Body).Decode(&secondOut); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if secondOut.Result != types.ControlResultRejected || !strings.Contains(secondOut.HumanMessage, "处理中") {
+		t.Fatalf("expected in-flight duplicate to be rejected as processing, got %+v", secondOut)
+	}
+
+	close(blocking.release)
+	<-firstDone
 }

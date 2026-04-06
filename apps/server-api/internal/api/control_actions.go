@@ -64,9 +64,12 @@ type controlExecutionPlan struct {
 }
 
 type controlExecutionRecord struct {
+	storedAt time.Time
 	response types.ControlActionResponse
 	result   controlExecutionResult
 }
+
+const controlExecutionDoneTTL = 2 * time.Minute
 
 type controlExecutionRevalidation struct {
 	allowed           bool
@@ -606,6 +609,7 @@ func (s *Server) rejectDuplicateControlExecution(req types.ControlActionRequest,
 	}
 	s.controlExecuteMu.Lock()
 	defer s.controlExecuteMu.Unlock()
+	s.pruneControlExecuteDoneLocked(time.Now().UTC())
 	if _, ok := s.controlExecuteActive[key]; ok {
 		return controlExecutionResult{
 			outcome:       controlExecutionOutcomePolicyRejected,
@@ -617,6 +621,10 @@ func (s *Server) rejectDuplicateControlExecution(req types.ControlActionRequest,
 		}, true
 	}
 	if existing, ok := s.controlExecuteDone[key]; ok {
+		if !shouldCacheCompletedControlExecution(existing.result) {
+			delete(s.controlExecuteDone, key)
+			return controlExecutionResult{}, false
+		}
 		return controlExecutionResult{
 			outcome:       controlExecutionOutcomePolicyRejected,
 			humanMessage:  "相同控制上下文的动作已经处理完成，请刷新后再决定是否重试。",
@@ -645,11 +653,39 @@ func (s *Server) storeDuplicateControlExecutionResult(req types.ControlActionReq
 		return
 	}
 	s.controlExecuteMu.Lock()
+	s.pruneControlExecuteDoneLocked(time.Now().UTC())
 	if s.controlExecuteDone == nil {
 		s.controlExecuteDone = map[string]controlExecutionRecord{}
 	}
-	s.controlExecuteDone[key] = controlExecutionRecord{response: cloneControlActionResponse(resp), result: result}
+	if shouldCacheCompletedControlExecution(result) {
+		s.controlExecuteDone[key] = controlExecutionRecord{storedAt: time.Now().UTC(), response: cloneControlActionResponse(resp), result: result}
+	} else {
+		delete(s.controlExecuteDone, key)
+	}
 	s.controlExecuteMu.Unlock()
+}
+
+func shouldCacheCompletedControlExecution(result controlExecutionResult) bool {
+	switch result.outcome {
+	case controlExecutionOutcomeAcceptedReal,
+		controlExecutionOutcomeAcceptedPlaceholder,
+		controlExecutionOutcomePolicyRejected,
+		controlExecutionOutcomeNonRetryableFailure:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) pruneControlExecuteDoneLocked(now time.Time) {
+	if len(s.controlExecuteDone) == 0 {
+		return
+	}
+	for key, record := range s.controlExecuteDone {
+		if now.Sub(record.storedAt) > controlExecutionDoneTTL {
+			delete(s.controlExecuteDone, key)
+		}
+	}
 }
 
 func newControlActionResponse(req types.ControlActionRequest) types.ControlActionResponse {
