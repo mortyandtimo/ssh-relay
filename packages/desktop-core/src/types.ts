@@ -188,6 +188,9 @@ export type ControlActionResponse = {
   targetKind: ControlTargetKind;
   targetId: string;
   sourceSurface: ControlSurface;
+  executeOutcome?: string;
+  rejectionKind?: string;
+  nextStep?: string;
   preflight: ControlPreflightSummary;
   humanMessage: string;
   dryRunOnly: boolean;

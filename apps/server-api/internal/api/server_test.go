@@ -3171,6 +3171,9 @@ func TestBuildControlActionResponseMapsExecutionOutcomes(t *testing.T) {
 				t.Fatalf("%s: expected blocked reason %s, got %+v", name, wantBlockedReason, resp.Preflight.BlockedReasons)
 			}
 		}
+		if resp.ExecuteOutcome != string(result.outcome) {
+			t.Fatalf("%s: expected executeOutcome=%s, got %+v", name, result.outcome, resp)
+		}
 	}
 
 	assertMapped(
@@ -3248,6 +3251,31 @@ func TestBuildControlActionResponseMapsExecutionOutcomes(t *testing.T) {
 		"executor failed this action and retry is not advised",
 		"",
 	)
+}
+
+func TestBuildControlActionResponseReturnsStableMachineFields(t *testing.T) {
+	plan := controlExecutionPlan{executionMode: types.ControlExecutionReal, actionEvaluation: evaluatedControlAction{response: types.ControlActionResponse{Preflight: types.ControlPreflightSummary{Allowed: true, Items: []types.ControlCheckItem{}}, Facts: map[string]string{}, ActionKind: types.ControlActionRestartAgent, TargetKind: types.ControlTargetNode, TargetID: "node-machine", SourceSurface: types.ControlSurfaceNodeConsole}}}
+	req := types.ControlActionRequest{ActionKind: types.ControlActionRestartAgent, TargetKind: types.ControlTargetNode, TargetID: "node-machine", SourceSurface: types.ControlSurfaceNodeConsole}
+
+	cases := []struct {
+		name          string
+		result        controlExecutionResult
+		wantOutcome   string
+		wantRejectTag string
+		wantNextStep  string
+	}{
+		{name: "stale-context", result: controlExecutionResult{outcome: controlExecutionOutcomePolicyRejected, humanMessage: "文案 A", executionMode: types.ControlExecutionReal, auditHint: "state_drift"}, wantOutcome: "policy_rejected", wantRejectTag: "state_drift", wantNextStep: "请先刷新控制面板或动作列表，再基于新的上下文重新发起动作。"},
+		{name: "duplicate-inflight", result: controlExecutionResult{outcome: controlExecutionOutcomePolicyRejected, humanMessage: "文案 B", executionMode: types.ControlExecutionReal, auditHint: "duplicate_inflight"}, wantOutcome: "policy_rejected", wantRejectTag: "duplicate_inflight", wantNextStep: "等待当前执行结果返回，不要在同一上下文下重复点击。"},
+		{name: "duplicate-handled", result: controlExecutionResult{outcome: controlExecutionOutcomePolicyRejected, humanMessage: "文案 C", executionMode: types.ControlExecutionReal, auditHint: "duplicate_handled"}, wantOutcome: "policy_rejected", wantRejectTag: "duplicate_handled", wantNextStep: "该上下文动作已经处理完成；刷新后再决定是否需要新的动作。"},
+		{name: "retryable", result: controlExecutionResult{outcome: controlExecutionOutcomeRetryableFailure, humanMessage: "文案 D", executionMode: types.ControlExecutionReal}, wantOutcome: "retryable_failure", wantRejectTag: "", wantNextStep: "可稍后重试；若连续失败，请结合审计与执行说明排查。"},
+	}
+
+	for _, tc := range cases {
+		resp := buildControlActionResponse(req, plan, tc.result)
+		if resp.ExecuteOutcome != tc.wantOutcome || resp.RejectionKind != tc.wantRejectTag || resp.NextStep != tc.wantNextStep {
+			t.Fatalf("%s: unexpected machine fields: %+v", tc.name, resp)
+		}
+	}
 }
 
 func TestBuildControlActionResponseDistinguishesPolicyRejectionFromPreflightBlock(t *testing.T) {

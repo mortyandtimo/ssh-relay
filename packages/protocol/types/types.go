@@ -269,6 +269,9 @@ type ControlActionResponse struct {
 	TargetKind      ControlTargetKind       `json:"targetKind"`
 	TargetID        string                  `json:"targetId"`
 	SourceSurface   ControlSurface          `json:"sourceSurface"`
+	ExecuteOutcome  string                  `json:"executeOutcome,omitempty"`
+	RejectionKind   string                  `json:"rejectionKind,omitempty"`
+	NextStep        string                  `json:"nextStep,omitempty"`
 	Preflight       ControlPreflightSummary `json:"preflight"`
 	HumanMessage    string                  `json:"humanMessage"`
 	DryRunOnly      bool                    `json:"dryRunOnly"`

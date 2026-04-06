@@ -142,21 +142,20 @@ export type ControlResultCategory =
 	| "rejected_generic";
 
 export function classifyControlResult(result: ControlActionResponse): ControlResultCategory {
+	const outcome = result.executeOutcome || "";
+	const rejectionKind = result.rejectionKind || "";
 	if (result.result === "accepted") {
 		return result.placeholderOnly ? "accepted_placeholder" : "accepted_real";
 	}
 	if (result.result === "blocked") {
 		return "blocked";
 	}
-	const message = (result.humanMessage || "").toLowerCase();
-	const notes = (result.executionNotes || []).map((item) => (item.message || "").toLowerCase()).join(" ");
-	const combined = message + " " + notes;
-	if (combined.includes("刷新") || combined.includes("状态已变化")) return "stale_context";
-	if (combined.includes("处理中") || combined.includes("请勿重复提交")) return "duplicate_inflight";
-	if (combined.includes("已处理完成") || combined.includes("避免重复执行")) return "duplicate_handled";
-	if (combined.includes("可稍后重试") || combined.includes("建议稍后重试") || combined.includes("retry")) return "retryable_failure";
-	if (combined.includes("不建议重试")) return "non_retryable_failure";
-	if (result.executionMode === "placeholder" && !result.placeholderOnly) return "policy_rejected";
+	if (rejectionKind === "state_drift") return "stale_context";
+	if (rejectionKind === "duplicate_inflight") return "duplicate_inflight";
+	if (rejectionKind === "duplicate_handled") return "duplicate_handled";
+	if (outcome === "retryable_failure") return "retryable_failure";
+	if (outcome === "non_retryable_failure") return "non_retryable_failure";
+	if (outcome === "policy_rejected") return "policy_rejected";
 	return "rejected_generic";
 }
 
@@ -258,7 +257,7 @@ export function formatControlResultDisplay(result: ControlActionResponse): Contr
 		category,
 		categoryLabel: controlResultCategoryLabel(category),
 		message: result.humanMessage,
-		nextStep: controlResultNextStep(category),
+		nextStep: result.nextStep || controlResultNextStep(category),
 		executionMode: result.executionMode,
 		dryRunOnly: String(result.dryRunOnly),
 		placeholderOnly: Boolean(result.placeholderOnly),

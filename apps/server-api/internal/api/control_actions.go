@@ -615,6 +615,7 @@ func (s *Server) rejectDuplicateControlExecution(req types.ControlActionRequest,
 			outcome:       controlExecutionOutcomePolicyRejected,
 			humanMessage:  "相同控制上下文的动作仍在处理中，请勿重复提交。",
 			executionMode: plan.executionMode,
+			auditHint:     "duplicate_inflight",
 			executionNotes: []types.ControlExecutionNote{{
 				Message: "该上下文动作仍在处理中，请等待当前结果或刷新后再重试。",
 			}},
@@ -629,6 +630,7 @@ func (s *Server) rejectDuplicateControlExecution(req types.ControlActionRequest,
 			outcome:       controlExecutionOutcomePolicyRejected,
 			humanMessage:  "相同控制上下文的动作已经处理完成，请刷新后再决定是否重试。",
 			executionMode: existing.response.ExecutionMode,
+			auditHint:     "duplicate_handled",
 			executionNotes: []types.ControlExecutionNote{{
 				Message: "该上下文动作已经处理完成，避免重复执行。请刷新控制摘要后再决定下一步。",
 			}},
@@ -913,6 +915,8 @@ func buildControlActionResponse(req types.ControlActionRequest, plan controlExec
 	resp.TargetID = req.TargetID
 	resp.SourceSurface = req.SourceSurface
 	resp.DryRunOnly = false
+	resp.ExecuteOutcome = string(result.outcome)
+	resp.RejectionKind = result.auditHint
 	resp.Facts = cloneFacts(plan.targetFacts)
 	resp.Preflight = clonePreflightSummary(plan.preflight)
 	resp.ExecutionMode = result.executionMode
@@ -923,40 +927,60 @@ func buildControlActionResponse(req types.ControlActionRequest, plan controlExec
 	case controlExecutionOutcomeAcceptedReal:
 		resp.Result = types.ControlResultAccepted
 		resp.HumanMessage = defaultControlMessage(result.humanMessage, "已通过真实执行器触发 agent restart。")
+		resp.NextStep = "观察最新目标状态和审计记录，确认真实执行结果已经反映到页面。"
 		resp.PlaceholderOnly = false
 		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "已通过真实执行器提交 restart 请求。"}})
 	case controlExecutionOutcomeAcceptedPlaceholder:
 		resp.Result = types.ControlResultAccepted
 		resp.HumanMessage = defaultControlMessage(result.humanMessage, "动作已受理，但当前只接入 placeholder execution boundary，未执行真实系统动作。")
+		resp.NextStep = "当前只经过占位执行边界；如需真实动作，请确认该动作是否已接入真实执行路径。"
 		resp.PlaceholderOnly = true
 		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, placeholderExecutionNotes())
 	case controlExecutionOutcomeBlockedPreflight:
 		resp.Result = types.ControlResultBlocked
 		resp.HumanMessage = defaultControlMessage(result.humanMessage, "execute 已被预检阻断。")
+		resp.NextStep = "先处理阻断原因，再重新读取控制摘要。"
 		resp.PlaceholderOnly = false
 		resp.ExecutionNotes = cloneExecutionNotes(result.executionNotes)
 	case controlExecutionOutcomePolicyRejected:
 		resp.Result = types.ControlResultRejected
 		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行策略拒绝了当前动作。")
+		resp.NextStep = policyRejectedNextStep(result.auditHint)
 		resp.PlaceholderOnly = false
 		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行策略拒绝执行当前动作。"}})
 	case controlExecutionOutcomeRetryableFailure:
 		resp.Result = types.ControlResultRejected
 		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器处理当前动作失败，但可稍后重试。")
+		resp.NextStep = "可稍后重试；若连续失败，请结合审计与执行说明排查。"
 		resp.PlaceholderOnly = false
 		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行器处理失败，建议稍后重试。"}})
 	case controlExecutionOutcomeNonRetryableFailure:
 		resp.Result = types.ControlResultRejected
 		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器处理当前动作失败，当前不建议重试。")
+		resp.NextStep = "当前不建议直接重试；请先修正环境或策略条件。"
 		resp.PlaceholderOnly = false
 		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行器处理失败，当前不建议重试。"}})
 	default:
 		resp.Result = types.ControlResultRejected
 		resp.HumanMessage = defaultControlMessage(result.humanMessage, "执行器返回了未知结果。")
+		resp.NextStep = "请结合执行说明与审计记录继续排查。"
 		resp.PlaceholderOnly = false
 		resp.ExecutionNotes = defaultExecutionNotes(result.executionNotes, []types.ControlExecutionNote{{Message: "执行器返回了未知结果。"}})
 	}
 	return resp
+}
+
+func policyRejectedNextStep(rejectionKind string) string {
+	switch strings.TrimSpace(rejectionKind) {
+	case "state_drift":
+		return "请先刷新控制面板或动作列表，再基于新的上下文重新发起动作。"
+	case "duplicate_inflight":
+		return "等待当前执行结果返回，不要在同一上下文下重复点击。"
+	case "duplicate_handled":
+		return "该上下文动作已经处理完成；刷新后再决定是否需要新的动作。"
+	default:
+		return "请先处理策略拒绝原因，再决定是否重新发起动作。"
+	}
 }
 
 func acceptedRealExecutionResult(plan controlExecutionPlan, serviceUnit string) controlExecutionResult {
