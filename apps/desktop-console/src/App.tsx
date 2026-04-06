@@ -729,6 +729,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function ControlResultBlock({ result }: { result: ControlActionResponse }) {
   const display = formatControlResultDisplay(result);
+  const rejectionKindLabel = result.rejectionKind || "-";
   return (
     <section className="panel result-panel">
       <div className="panel-head small">
@@ -736,9 +737,17 @@ function ControlResultBlock({ result }: { result: ControlActionResponse }) {
         <span className={"status-chip " + display.tone}>{display.categoryLabel}</span>
       </div>
       <p className="copy">{display.message}</p>
-      <p className="copy">result: <code>{result.result}</code> / executeOutcome: <code>{result.executeOutcome || "-"}</code> / rejectionKind: <code>{result.rejectionKind || "-"}</code></p>
+      <div className="detail-stack result-summary-grid">
+        <Metric label="category label" value={display.categoryLabel} />
+        <Metric label="result" value={result.result} />
+        <Metric label="executeOutcome" value={result.executeOutcome || "-"} />
+        <Metric label="rejectionKind" value={rejectionKindLabel} />
+        <Metric label="executionMode" value={display.executionMode || "-"} />
+        <Metric label="placeholderOnly" value={String(display.placeholderOnly)} />
+      </div>
       <p className="copy">executionMode: <code>{display.executionMode}</code> / dryRunOnly: <code>{display.dryRunOnly}</code> / placeholderOnly: <code>{String(display.placeholderOnly)}</code></p>
       <p className="copy">下一步：{display.nextStep}</p>
+      {result.rejectionKind ? <div className="banner info">拒绝细分：<code>{result.rejectionKind}</code></div> : null}
       {display.blockedReasons.length > 0 ? (
         <div className="check-list compact-check-list">
           {display.blockedReasons.map((reason) => (
