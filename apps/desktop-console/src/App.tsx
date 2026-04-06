@@ -34,7 +34,6 @@ type DesktopMode = "local-node" | "operator";
 
 type TunnelEditForm = {
   name: string;
-  status: "active" | "paused";
   targetHost: string;
   targetPort: string;
   publicPort: string;
@@ -168,7 +167,6 @@ export default function App() {
     }
     setEditForm({
       name: selectedTunnel.name,
-      status: selectedTunnel.status === "paused" ? "paused" : "active",
       targetHost: selectedTunnel.targetHost || "",
       targetPort: String(selectedTunnel.targetPort || ""),
       publicPort: String(selectedTunnel.publicPort || ""),
@@ -325,7 +323,7 @@ export default function App() {
         nodeId: selectedNode.nodeId,
         name: editForm.name.trim(),
         type: selectedTunnel.type,
-        status: editForm.status,
+        status: selectedTunnel.status,
         targetHost: editForm.targetHost.trim(),
         targetPort: Number(editForm.targetPort),
         publicPort: Number(editForm.publicPort),
@@ -335,7 +333,7 @@ export default function App() {
         tlsMode: selectedTunnel.tlsMode || "",
       });
       await refreshConsoleData(false, "manual");
-      setMessage("当前 tunnel 的最小配置字段已提交，列表和详情已刷新。transportPolicy 仍只代表配置意图，不代表当前 runtime facts 已改变。");
+      setMessage("当前 tunnel 的普通配置字段已提交，列表和详情已刷新。status 不会通过普通保存改变；active/paused 只能通过 pause_tunnel / resume_tunnel 控制动作切换。");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "保存 tunnel 失败");
     } finally {
@@ -583,7 +581,7 @@ export default function App() {
                 <div className="panel-head">
                   <div>
                     <h2>按隧道类型切换的工作区</h2>
-                    <p className="copy">当前选中隧道的详情、最小编辑入口和 tunnel control panel/options/result 全部在同一个工作区里闭环。</p>
+                    <p className="copy">当前选中隧道的详情、普通配置编辑和 tunnel control panel/options/result 全部在同一个工作区里闭环；status 切换只能走控制动作。</p>
                   </div>
                 </div>
 
@@ -641,14 +639,13 @@ export default function App() {
                         <form className="edit-form" onSubmit={handleTunnelSave}>
                           <div className="panel-head small"><h3>最小编辑入口</h3></div>
                           <label><span>tunnel 名称</span><input value={editForm?.name || ""} onChange={(event) => setEditForm((current) => current ? { ...current, name: event.target.value } : current)} /></label>
-                          <label><span>status</span><select value={editForm?.status || "active"} onChange={(event) => setEditForm((current) => current ? { ...current, status: event.target.value as "active" | "paused" } : current)}><option value="active">active</option><option value="paused">paused</option></select></label>
                           <label><span>targetHost</span><input value={editForm?.targetHost || ""} onChange={(event) => setEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} /></label>
                           <label><span>targetPort</span><input value={editForm?.targetPort || ""} onChange={(event) => setEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} /></label>
                           <label><span>publicPort</span><input value={editForm?.publicPort || ""} onChange={(event) => setEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} /></label>
                           {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>domain</span><input value={editForm?.domain || ""} onChange={(event) => setEditForm((current) => current ? { ...current, domain: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 domain。</div>}
                           {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>probePath</span><input value={editForm?.probePath || ""} onChange={(event) => setEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 probePath。</div>}
                           <label><span>transportPolicy</span><select value={editForm?.transportPolicy || "relay_only"} onChange={(event) => setEditForm((current) => current ? { ...current, transportPolicy: event.target.value } : current)}><option value="relay_only">relay_only</option><option value="p2p_preferred">p2p_preferred</option></select></label>
-                          <div className="weak-note">transportPolicy 只代表配置意图。当前 runtimePath / runtimeState / lastFailureReason 仍然是运行事实，这轮编辑不会把它们伪装成已经改变。</div>
+                          <div className="weak-note">transportPolicy 和目标配置只代表普通配置编辑。当前 status={selectedTunnel.status} 只能通过下方 pause_tunnel / resume_tunnel 控制动作改变，不会经由普通保存提交。</div>
 
                           {tunnelControlPanel ? <div className="banner info">{tunnelControlPanel.headline} {tunnelControlPanel.summary} 下一步：{tunnelControlPanel.nextStep}</div> : null}
                           <div className="check-list compact-check-list">
