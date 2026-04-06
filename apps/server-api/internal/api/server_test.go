@@ -3904,6 +3904,19 @@ func TestControlExecuteAuditOutcomeSemantics(t *testing.T) {
 		return false
 	}
 
+	countExecuteAudits := func(resourceID string) int {
+		count := 0
+		for _, item := range auditOut.Items {
+			if item.ResourceID != resourceID {
+				continue
+			}
+			if strings.HasPrefix(item.Action, "control_execute_") {
+				count++
+			}
+		}
+		return count
+	}
+
 	if !hasAudit("control_execute_placeholder_accepted", "node-audit-placeholder", "release_node") {
 		t.Fatalf("expected placeholder accepted audit, got %+v", auditOut.Items)
 	}
@@ -3916,10 +3929,10 @@ func TestControlExecuteAuditOutcomeSemantics(t *testing.T) {
 	if !hasAudit("control_execute_non_retryable_failure", "node-audit-nonretryable", "restart_agent") {
 		t.Fatalf("expected non-retryable failure audit, got %+v", auditOut.Items)
 	}
-	if hasAudit("control_execute_placeholder_accepted", "node-audit-policy", "restart_agent") || hasAudit("control_execute_accepted", "node-audit-policy", "restart_agent") {
-		t.Fatalf("dry-run must not write execute audit, got %+v", auditOut.Items)
+	if countExecuteAudits("node-audit-policy") != 1 {
+		t.Fatalf("dry-run must not add execute audit rows; expected exactly 1 execute audit for node-audit-policy, got %+v", auditOut.Items)
 	}
-	if hasAudit("control_execute_placeholder_accepted", "node-audit-blocked-preflight", "restart_agent") || hasAudit("control_execute_accepted", "node-audit-blocked-preflight", "restart_agent") || hasAudit("control_execute_policy_rejected", "node-audit-blocked-preflight", "restart_agent") {
-		t.Fatalf("blocked preflight must not write execute audit, got %+v", auditOut.Items)
+	if countExecuteAudits("node-audit-blocked-preflight") != 0 {
+		t.Fatalf("blocked preflight must not add execute audit rows, got %+v", auditOut.Items)
 	}
 }
