@@ -729,7 +729,14 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function ControlResultBlock({ result }: { result: ControlActionResponse }) {
   const display = formatControlResultDisplay(result);
-  const rejectionKindLabel = result.rejectionKind || "-";
+  const summaryItems = [
+    { label: "category label", value: display.categoryLabel },
+    { label: "result", value: result.result },
+    { label: "executeOutcome", value: result.executeOutcome || "-" },
+    { label: "rejectionKind", value: result.rejectionKind || "-" },
+    { label: "executionMode", value: display.executionMode || "-" },
+    { label: "placeholderOnly", value: String(display.placeholderOnly) },
+  ];
   return (
     <section className="panel result-panel">
       <div className="panel-head small">
@@ -738,14 +745,10 @@ function ControlResultBlock({ result }: { result: ControlActionResponse }) {
       </div>
       <p className="copy">{display.message}</p>
       <div className="detail-stack result-summary-grid">
-        <Metric label="category label" value={display.categoryLabel} />
-        <Metric label="result" value={result.result} />
-        <Metric label="executeOutcome" value={result.executeOutcome || "-"} />
-        <Metric label="rejectionKind" value={rejectionKindLabel} />
-        <Metric label="executionMode" value={display.executionMode || "-"} />
-        <Metric label="placeholderOnly" value={String(display.placeholderOnly)} />
+        {summaryItems.map((item) => (
+          <Metric key={item.label} label={item.label} value={item.value} />
+        ))}
       </div>
-      <p className="copy">executionMode: <code>{display.executionMode}</code> / dryRunOnly: <code>{display.dryRunOnly}</code> / placeholderOnly: <code>{String(display.placeholderOnly)}</code></p>
       <p className="copy">下一步：{display.nextStep}</p>
       {result.rejectionKind ? <div className="banner info">拒绝细分：<code>{result.rejectionKind}</code></div> : null}
       {display.blockedReasons.length > 0 ? (
