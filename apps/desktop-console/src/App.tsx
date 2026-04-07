@@ -31,7 +31,15 @@ import { ControlResultBlock } from "./controlResultBlock";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
-const desktopPublicHost = (import.meta.env.VITE_PUBLIC_ENTRY_HOST || "82.156.236.104").trim() || "82.156.236.104";
+const desktopPublicHost = (() => {
+  const configured = (import.meta.env.VITE_PUBLIC_ENTRY_HOST || "").trim();
+  if (configured) return configured;
+  if (typeof window !== "undefined") {
+    const hostname = window.location.hostname.trim();
+    if (hostname) return hostname;
+  }
+  return "82.156.236.104";
+})();
 
 type DesktopMode = "local-node" | "operator";
 
@@ -375,6 +383,19 @@ export default function App() {
     }
   }
 
+  function openExternal(url: string, label: string) {
+    try {
+      const opened = window.open(url, "_blank", "noopener,noreferrer");
+      if (!opened) {
+        throw new Error("窗口被拦截，请允许当前桌面页打开新窗口。")
+      }
+      setMessage(label + " 已在新窗口打开。");
+      setError("");
+    } catch (openError) {
+      setError(openError instanceof Error ? openError.message : "打开入口失败");
+    }
+  }
+
   function currentControlContextAt(targetKind: ControlActionRequest["targetKind"]) {
     if (targetKind === "tunnel") {
       return tunnelControlPanel?.contextVersion || tunnelActionOptions[0]?.contextVersion || tunnelControlContextAt || undefined;
@@ -683,10 +704,17 @@ export default function App() {
                             <Metric label="运行事实" value={runtimeFactSummary(selectedTunnel)} />
                             <Metric label="最近 probe" value={probeFreshnessLabel(selectedTunnel, probeResults[selectedTunnel.id])} />
                           </div>
+                          <div className="badge-row access-badges">
+                            <span className={"status-chip " + runtimeBadgeTone(selectedTunnel)}>{runtimeBadgeLabel(selectedTunnel)}</span>
+                            <span className={"status-chip " + healthBadgeTone(selectedTunnel)}>{healthBadgeLabel(selectedTunnel)}</span>
+                            <span className="status-chip neutral">transportPolicy {selectedTunnel.transportPolicy || "relay_only"}</span>
+                          </div>
                           <div className="banner info">{tunnelAccessGuide(selectedTunnel)}</div>
                           <div className="button-row wrap-actions">
                             <button type="button" className="secondary" onClick={() => void copyToClipboard(tunnelPublicEntry(selectedTunnel), "用户入口")}>复制用户入口</button>
                             <button type="button" className="secondary" onClick={() => void copyToClipboard(tunnelQuickCommand(selectedTunnel), "协议示例命令")}>复制协议示例命令</button>
+                            {supportsOpenEntry(selectedTunnel) ? <button type="button" className="secondary" onClick={() => openExternal(tunnelPublicEntry(selectedTunnel), "用户入口")}>打开用户入口</button> : null}
+                            {supportsProbeTargetOpen(selectedTunnel) ? <button type="button" className="secondary" onClick={() => openExternal(tunnelProbeTargetEntry(selectedTunnel, probeResults[selectedTunnel.id]), "Probe 目标")}>打开 probe 目标</button> : null}
                           </div>
                           <div className="access-command-box">
                             <span>协议示例命令</span>
@@ -858,10 +886,52 @@ function tunnelQuickCommand(tunnel: TunnelSpec) {
   return `nc ${desktopPublicHost} ${tunnel.publicPort}`;
 }
 
+function supportsOpenEntry(tunnel: TunnelSpec) {
+  return tunnel.type === "http" || tunnel.type === "https";
+}
+
+function supportsProbeTargetOpen(tunnel: TunnelSpec) {
+  return tunnel.type === "http" || tunnel.type === "https";
+}
+
+function tunnelProbeTargetEntry(tunnel: TunnelSpec, probe: TunnelProbeResult | null | undefined) {
+  if (probe?.targetEntry) {
+    return probe.targetEntry;
+  }
+  const entry = tunnelPublicEntry(tunnel);
+  const path = normalizeProbePath(tunnel.probePath);
+  return path === "/" ? entry + "/" : entry + path;
+}
+
 function runtimeFactSummary(tunnel: TunnelSpec) {
   const path = tunnel.runtimePath || "尚无路径上报";
   const state = tunnel.runtimeState || "尚无状态上报";
   return `${path} / ${state}`;
+}
+
+function runtimeBadgeLabel(tunnel: TunnelSpec) {
+  if (tunnel.runtimeState === "active") return `运行中 ${tunnel.runtimePath || "reported"}`;
+  if (tunnel.runtimeState === "pending") return "运行待定";
+  if (tunnel.runtimeState === "unavailable") return "运行不可用";
+  if (tunnel.lastFailureReason) return "存在失败原因";
+  return "运行事实未上报";
+}
+
+function runtimeBadgeTone(tunnel: TunnelSpec) {
+  if (tunnel.runtimeState === "active") return "good";
+  if (tunnel.runtimeState === "pending") return "neutral";
+  if (tunnel.runtimeState === "unavailable" || tunnel.lastFailureReason) return "danger";
+  return "neutral";
+}
+
+function healthBadgeLabel(tunnel: TunnelSpec) {
+  if (!tunnel.healthStatus) return "health 未上报";
+  return `health ${tunnel.healthStatus}`;
+}
+
+function healthBadgeTone(tunnel: TunnelSpec) {
+  if (!tunnel.healthStatus || tunnel.healthStatus === "healthy") return "good";
+  return "danger";
 }
 
 function runtimeFactGuide(tunnel: TunnelSpec) {

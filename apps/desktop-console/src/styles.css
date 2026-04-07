@@ -117,6 +117,12 @@
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
+.access-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .access-command-box {
   display: grid;
   gap: 8px;
@@ -138,6 +144,11 @@
 
 .runtime-note {
   margin: 0;
+}
+
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
 }
 
 .result-summary-grid {
