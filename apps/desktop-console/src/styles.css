@@ -117,6 +117,29 @@
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
+.access-command-box {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(17, 34, 56, 0.05);
+}
+
+.access-command-box span {
+  color: #708198;
+  font-size: 12px;
+}
+
+.access-command-box code {
+  color: #162c45;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.runtime-note {
+  margin: 0;
+}
+
 .result-summary-grid {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }

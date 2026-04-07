@@ -31,6 +31,7 @@ import { ControlResultBlock } from "./controlResultBlock";
 
 const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
+const desktopPublicHost = (import.meta.env.VITE_PUBLIC_ENTRY_HOST || "82.156.236.104").trim() || "82.156.236.104";
 
 type DesktopMode = "local-node" | "operator";
 
@@ -361,6 +362,19 @@ export default function App() {
     }
   }
 
+  async function copyToClipboard(value: string, copiedLabel: string) {
+    try {
+      if (!navigator?.clipboard?.writeText) {
+        throw new Error("clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(value);
+      setMessage(copiedLabel + " 已复制到剪贴板。");
+      setError("");
+    } catch (copyError) {
+      setError(copyError instanceof Error ? copyError.message : "复制失败");
+    }
+  }
+
   function currentControlContextAt(targetKind: ControlActionRequest["targetKind"]) {
     if (targetKind === "tunnel") {
       return tunnelControlPanel?.contextVersion || tunnelActionOptions[0]?.contextVersion || tunnelControlContextAt || undefined;
@@ -666,10 +680,18 @@ export default function App() {
                           <div className="detail-stack access-grid">
                             <Metric label="用户入口" value={tunnelPublicEntry(selectedTunnel)} />
                             <Metric label="入口语义" value={tunnelAccessLabel(selectedTunnel)} />
-                            <Metric label="运行事实" value={runtimeLabel(selectedTunnel)} />
+                            <Metric label="运行事实" value={runtimeFactSummary(selectedTunnel)} />
                             <Metric label="最近 probe" value={probeFreshnessLabel(selectedTunnel, probeResults[selectedTunnel.id])} />
                           </div>
                           <div className="banner info">{tunnelAccessGuide(selectedTunnel)}</div>
+                          <div className="button-row wrap-actions">
+                            <button type="button" className="secondary" onClick={() => void copyToClipboard(tunnelPublicEntry(selectedTunnel), "用户入口")}>复制用户入口</button>
+                            <button type="button" className="secondary" onClick={() => void copyToClipboard(tunnelQuickCommand(selectedTunnel), "协议示例命令")}>复制协议示例命令</button>
+                          </div>
+                          <div className="access-command-box">
+                            <span>协议示例命令</span>
+                            <code>{tunnelQuickCommand(selectedTunnel)}</code>
+                          </div>
                           {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? (
                             <div className="button-row wrap-actions">
                               <button type="button" className="secondary" disabled={busy === selectedTunnel.id + ":probe"} onClick={() => void runTunnelProbe(selectedTunnel)}>
@@ -679,6 +701,7 @@ export default function App() {
                             </div>
                           ) : null}
                           {renderProbeSummary(selectedTunnel, probeResults[selectedTunnel.id])}
+                          <div className="weak-note runtime-note">{runtimeFactGuide(selectedTunnel)}</div>
                           {selectedTunnel.transportPolicy === "p2p_preferred" ? <div className="banner info">P2P 当前仍为降级占位：配置意图可见，但当前不作为桌面数据面前提，也不表达成已建立 P2P 路径。</div> : null}
                         </div>
 
@@ -775,18 +798,18 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function tunnelPublicEntry(tunnel: TunnelSpec) {
   if (tunnel.type === "http") {
-    return `http://82.156.236.104:${tunnel.publicPort}`;
+    return `http://${desktopPublicHost}:${tunnel.publicPort}`;
   }
   if (tunnel.type === "https") {
     return tunnel.domain ? `https://${tunnel.domain}` : "https://<待绑定域名>";
   }
   if (tunnel.type === "udp") {
-    return `udp://82.156.236.104:${tunnel.publicPort}`;
+    return `udp://${desktopPublicHost}:${tunnel.publicPort}`;
   }
   if (tunnel.type === "socks5") {
-    return `socks5://82.156.236.104:${tunnel.publicPort}`;
+    return `socks5://${desktopPublicHost}:${tunnel.publicPort}`;
   }
-  return `82.156.236.104:${tunnel.publicPort}`;
+  return `${desktopPublicHost}:${tunnel.publicPort}`;
 }
 
 function tunnelAccessLabel(tunnel: TunnelSpec) {
@@ -814,6 +837,39 @@ function tunnelAccessGuide(tunnel: TunnelSpec) {
     return `当前 tunnel 配置偏好为 p2p_preferred，但 P2P 仍是 partial 能力；桌面端只展示配置意图和运行事实，不把它当作已可用的数据面。`;
   }
   return `TCP 端口映射当前可直接使用。适合 SSH / RDP / 数据库等原始 TCP 服务。`;
+}
+
+function tunnelQuickCommand(tunnel: TunnelSpec) {
+  const entry = tunnelPublicEntry(tunnel);
+  if (tunnel.type === "http") {
+    const path = normalizeProbePath(tunnel.probePath);
+    return `curl ${entry}${path === "/" ? "" : path}`;
+  }
+  if (tunnel.type === "https") {
+    const path = normalizeProbePath(tunnel.probePath);
+    return `curl ${entry}${path === "/" ? "" : path}`;
+  }
+  if (tunnel.type === "udp") {
+    return `echo -n "ping" | nc -u ${desktopPublicHost} ${tunnel.publicPort}`;
+  }
+  if (tunnel.type === "socks5") {
+    return `curl --proxy ${entry} https://example.com -I`;
+  }
+  return `nc ${desktopPublicHost} ${tunnel.publicPort}`;
+}
+
+function runtimeFactSummary(tunnel: TunnelSpec) {
+  const path = tunnel.runtimePath || "尚无路径上报";
+  const state = tunnel.runtimeState || "尚无状态上报";
+  return `${path} / ${state}`;
+}
+
+function runtimeFactGuide(tunnel: TunnelSpec) {
+  const failure = tunnel.lastFailureReason || "尚无失败原因";
+  if (tunnel.runtimePath || tunnel.runtimeState) {
+    return `当前运行事实来自 tunnel runtime 字段：runtimePath=${tunnel.runtimePath || "-"} / runtimeState=${tunnel.runtimeState || "-"} / lastFailureReason=${failure}。`;
+  }
+  return `当前还没有 runtimePath/runtimeState 回传。桌面端不把 transportPolicy 误当作运行事实；lastFailureReason=${failure}。`;
 }
 
 function normalizeProbePath(pathValue?: string) {
