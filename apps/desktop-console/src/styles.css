@@ -27,6 +27,17 @@
   margin: 0;
 }
 
+.protocol-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.protocol-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
 .preflight-panel {
   display: grid;
   gap: 14px;
@@ -149,6 +160,11 @@
 .badge-row {
   display: flex;
   flex-wrap: wrap;
+}
+
+.empty-workbench-state {
+  display: grid;
+  gap: 8px;
 }
 
 .result-summary-grid {
