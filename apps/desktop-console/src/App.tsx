@@ -850,15 +850,30 @@ function tunnelAccessLabel(tunnel: TunnelSpec) {
 
 function tunnelAccessGuide(tunnel: TunnelSpec) {
   if (tunnel.type === "http") {
+    if (tunnel.status !== "active") {
+      return `HTTP 入口当前处于非 active 状态。请先通过 pause_tunnel / resume_tunnel 控制动作恢复入口，再进行访问或 probe。`;
+    }
     return `HTTP 已可作为当前桌面开发前提。建议先访问 ${tunnelPublicEntry(tunnel)}${normalizeProbePath(tunnel.probePath) === "/" ? "" : normalizeProbePath(tunnel.probePath)}，再按需执行 probe。`;
   }
   if (tunnel.type === "https") {
+    if (!(tunnel.domain || "").trim()) {
+      return `HTTPS 当前还不能直接打开，因为还没有配置 domain。请先在普通配置区补齐域名，再使用打开入口或 probe。`;
+    }
+    if (tunnel.status !== "active") {
+      return `HTTPS 入口当前处于非 active 状态。请先通过 pause_tunnel / resume_tunnel 控制动作恢复入口，再进行访问或 probe。`;
+    }
     return `HTTPS 已可作为当前桌面开发前提。标准入口使用域名 ${tunnel.domain || "<待绑定域名>"}，当前仍需环境侧证书与域名配置配合。`;
   }
   if (tunnel.type === "udp") {
+    if (tunnel.status !== "active") {
+      return `UDP 入口当前处于非 active 状态。请先恢复 tunnel 状态，再进行最小数据面验证。`;
+    }
     return `UDP 已可作为当前桌面开发前提。当前只确认最小数据面闭环，不提供 UDP probe、复杂会话治理或 NAT 穿透。`;
   }
   if (tunnel.type === "socks5") {
+    if (tunnel.status !== "active") {
+      return `SOCKS5 入口当前处于非 active 状态。请先恢复 tunnel 状态，再进行代理验证。`;
+    }
     return `SOCKS5 已可作为当前桌面开发前提。当前只支持 CONNECT，不支持 UDP associate，也不提供高级认证或 ACL。`;
   }
   if (tunnel.transportPolicy === "p2p_preferred") {
@@ -887,11 +902,23 @@ function tunnelQuickCommand(tunnel: TunnelSpec) {
 }
 
 function supportsOpenEntry(tunnel: TunnelSpec) {
-  return tunnel.type === "http" || tunnel.type === "https";
+  if (tunnel.type === "http") {
+    return tunnel.status === "active";
+  }
+  if (tunnel.type === "https") {
+    return tunnel.status === "active" && Boolean((tunnel.domain || "").trim());
+  }
+  return false;
 }
 
 function supportsProbeTargetOpen(tunnel: TunnelSpec) {
-  return tunnel.type === "http" || tunnel.type === "https";
+  if (tunnel.type === "http") {
+    return tunnel.status === "active";
+  }
+  if (tunnel.type === "https") {
+    return tunnel.status === "active" && Boolean((tunnel.domain || "").trim());
+  }
+  return false;
 }
 
 function tunnelProbeTargetEntry(tunnel: TunnelSpec, probe: TunnelProbeResult | null | undefined) {
@@ -936,6 +963,9 @@ function healthBadgeTone(tunnel: TunnelSpec) {
 
 function runtimeFactGuide(tunnel: TunnelSpec) {
   const failure = tunnel.lastFailureReason || "尚无失败原因";
+  if (tunnel.status !== "active") {
+    return `当前 tunnel 状态是 ${tunnel.status}。在非 active 状态下，打开入口和 probe 等动作会被降级或禁用；lastFailureReason=${failure}。`;
+  }
   if (tunnel.runtimePath || tunnel.runtimeState) {
     return `当前运行事实来自 tunnel runtime 字段：runtimePath=${tunnel.runtimePath || "-"} / runtimeState=${tunnel.runtimeState || "-"} / lastFailureReason=${failure}。`;
   }
