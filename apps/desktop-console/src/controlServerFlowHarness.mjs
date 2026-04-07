@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import net from "node:net";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { act } from "react-test-renderer";
 import { ControlResultBlock } from "./controlResultBlock.ts";
 
@@ -111,6 +111,71 @@ export function ControlRequestHost({ baseUrl, cookieHeader, request, requests })
   return React.createElement(
     "section",
     null,
+    React.createElement("button", { type: "button", onClick: () => trigger() }, busyCount > 0 ? "处理中..." : "执行"),
+    message ? React.createElement("p", null, message) : null,
+    result ? React.createElement(ControlResultBlock, { result }) : React.createElement("p", null, "暂无控制结果"),
+  );
+}
+
+export function ControlPageHost({
+  baseUrl,
+  cookieHeader,
+  targetKind,
+  targetId,
+  sourceSurface,
+  actionKind,
+  requests,
+}) {
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState("");
+  const [busyCount, setBusyCount] = useState(0);
+  const [result, setResult] = useState(null);
+  const [contextVersion, setContextVersion] = useState("");
+  const [index, setIndex] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadOptions() {
+      setLoading(true);
+      setMessage("");
+      const { payload } = await requestJSON(baseUrl + `/api/control-actions/${targetKind}/${encodeURIComponent(targetId)}/${encodeURIComponent(sourceSurface)}/options`, undefined, cookieHeader);
+      if (cancelled) return;
+      setContextVersion(payload.contextVersion || "");
+      setLoading(false);
+    }
+    void loadOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [baseUrl, cookieHeader, sourceSurface, targetId, targetKind]);
+
+  async function trigger() {
+    const requestList = requests || [{ actionKind, targetKind, targetId, sourceSurface, dryRun: false }];
+    const currentRequest = requestList[Math.min(index, requestList.length - 1)];
+    setBusyCount((current) => current + 1);
+    setMessage("");
+    const { payload } = await requestJSON(baseUrl + "/api/control-actions", {
+      method: "POST",
+      body: JSON.stringify({
+        ...currentRequest,
+        requestedAt: currentRequest.requestedAt || contextVersion,
+      }),
+    }, cookieHeader);
+    setResult(payload);
+    setMessage(payload.humanMessage || "");
+    setBusyCount((current) => Math.max(0, current - 1));
+    setIndex((current) => Math.min(current + 1, requestList.length - 1));
+    return payload;
+  }
+
+  if (loading) {
+    return React.createElement("section", null, React.createElement("p", null, "正在读取控制选项"));
+  }
+
+  return React.createElement(
+    "section",
+    null,
+    React.createElement("p", null, `contextVersion=${contextVersion}`),
     React.createElement("button", { type: "button", onClick: () => trigger() }, busyCount > 0 ? "处理中..." : "执行"),
     message ? React.createElement("p", null, message) : null,
     result ? React.createElement(ControlResultBlock, { result }) : React.createElement("p", null, "暂无控制结果"),
