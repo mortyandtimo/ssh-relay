@@ -108,6 +108,15 @@
   gap: 12px;
 }
 
+.access-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.access-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
 .result-summary-grid {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }

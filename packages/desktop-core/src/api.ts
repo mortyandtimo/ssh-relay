@@ -1,4 +1,4 @@
-import type { AuthUserResponse, BootstrapStatusResponse, ControlActionOptionsResponse, ControlActionRequest, ControlActionResponse, ControlPanelSummary, ControlSurface, NodeListResponse, TunnelListResponse } from "./types";
+import type { AuthUserResponse, BootstrapStatusResponse, ControlActionOptionsResponse, ControlActionRequest, ControlActionResponse, ControlPanelSummary, ControlSurface, NodeListResponse, TunnelListResponse, TunnelProbeResult } from "./types";
 
 export function createDesktopApi(apiBaseUrl = "") {
   let refreshInFlight: Promise<boolean> | null = null;
@@ -80,6 +80,11 @@ export function createDesktopApi(apiBaseUrl = "") {
       return requestJSON("/api/tunnels/" + encodeURIComponent(id), {
         method: "PUT",
         body: JSON.stringify(payload),
+      });
+    },
+    probeTunnel(id: string) {
+      return requestJSON<TunnelProbeResult>("/api/tunnels/" + encodeURIComponent(id) + "/probe", {
+        method: "POST",
       });
     },
     controlAction(payload: ControlActionRequest) {

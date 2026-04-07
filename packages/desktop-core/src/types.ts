@@ -86,6 +86,15 @@ export type TunnelListResponse = {
   items: TunnelSpec[];
 };
 
+export type TunnelProbeResult = {
+  tunnelId: string;
+  success: boolean;
+  statusCode?: number;
+  error?: string;
+  probedAt: string;
+  targetEntry: string;
+};
+
 export type AuthUserResponse = {
   user: UserSummary;
 };

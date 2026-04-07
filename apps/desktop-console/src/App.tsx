@@ -8,6 +8,7 @@ import type {
   ControlSurface,
   NodeSummary,
   TunnelSpec,
+  TunnelProbeResult,
   TunnelTypeTab,
   UserSummary,
 } from "../../../packages/desktop-core/src/types";
@@ -61,6 +62,7 @@ export default function App() {
   const [lastRefreshAt, setLastRefreshAt] = useState("");
   const [controlNote, setControlNote] = useState("");
   const [controlResult, setControlResult] = useState<ControlActionResponse | null>(null);
+  const [probeResults, setProbeResults] = useState<Record<string, TunnelProbeResult>>({});
   const [nodeActionOptions, setNodeActionOptions] = useState<ControlActionOption[]>([]);
   const [tunnelActionOptions, setTunnelActionOptions] = useState<ControlActionOption[]>([]);
   const [nodeControlPanel, setNodeControlPanel] = useState<ControlPanelSummary | null>(null);
@@ -337,6 +339,23 @@ export default function App() {
       setMessage("当前 tunnel 的普通配置字段已提交，列表和详情已刷新。status 不会通过普通保存改变；active/paused 只能通过 pause_tunnel / resume_tunnel 控制动作切换。");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "保存 tunnel 失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runTunnelProbe(tunnel: TunnelSpec) {
+    const busyKey = tunnel.id + ":probe";
+    setBusy(busyKey);
+    setError("");
+    setMessage("");
+    try {
+      const result = await api.probeTunnel(tunnel.id);
+      setProbeResults((current) => ({ ...current, [tunnel.id]: result }));
+      setMessage(result.success ? "协议入口探测完成：当前入口可访问。" : "协议入口探测完成：当前入口不可访问。" );
+      await refreshConsoleData(false, "manual");
+    } catch (probeError) {
+      setError(probeError instanceof Error ? probeError.message : "协议入口探测失败");
     } finally {
       setBusy("");
     }
@@ -637,6 +656,32 @@ export default function App() {
                           <Metric label="status" value={selectedTunnel.status} />
                         </div>
 
+                        <div className="panel access-panel">
+                          <div className="panel-head small">
+                            <div>
+                              <h3>Tunnel Access Workbench</h3>
+                              <p className="copy">基于当前已验证可用的 HTTP / HTTPS / UDP / SOCKS5 能力，给桌面端一个可直接操作的协议入口工作区。P2P 当前只做降级表达，不阻塞主线。</p>
+                            </div>
+                          </div>
+                          <div className="detail-stack access-grid">
+                            <Metric label="用户入口" value={tunnelPublicEntry(selectedTunnel)} />
+                            <Metric label="入口语义" value={tunnelAccessLabel(selectedTunnel)} />
+                            <Metric label="运行事实" value={runtimeLabel(selectedTunnel)} />
+                            <Metric label="最近 probe" value={probeFreshnessLabel(selectedTunnel, probeResults[selectedTunnel.id])} />
+                          </div>
+                          <div className="banner info">{tunnelAccessGuide(selectedTunnel)}</div>
+                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? (
+                            <div className="button-row wrap-actions">
+                              <button type="button" className="secondary" disabled={busy === selectedTunnel.id + ":probe"} onClick={() => void runTunnelProbe(selectedTunnel)}>
+                                {busy === selectedTunnel.id + ":probe" ? "探测中..." : "探测当前入口"}
+                              </button>
+                              <span className="weak-note">probePath: <code>{normalizeProbePath(selectedTunnel.probePath)}</code></span>
+                            </div>
+                          ) : null}
+                          {renderProbeSummary(selectedTunnel, probeResults[selectedTunnel.id])}
+                          {selectedTunnel.transportPolicy === "p2p_preferred" ? <div className="banner info">P2P 当前仍为降级占位：配置意图可见，但当前不作为桌面数据面前提，也不表达成已建立 P2P 路径。</div> : null}
+                        </div>
+
                         <form className="edit-form" onSubmit={handleTunnelSave}>
                           <div className="panel-head small"><h3>最小编辑入口</h3></div>
                           <label><span>tunnel 名称</span><input value={editForm?.name || ""} onChange={(event) => setEditForm((current) => current ? { ...current, name: event.target.value } : current)} /></label>
@@ -724,6 +769,88 @@ function Metric({ label, value }: { label: string; value: string }) {
     <div className="metric-box">
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function tunnelPublicEntry(tunnel: TunnelSpec) {
+  if (tunnel.type === "http") {
+    return `http://82.156.236.104:${tunnel.publicPort}`;
+  }
+  if (tunnel.type === "https") {
+    return tunnel.domain ? `https://${tunnel.domain}` : "https://<待绑定域名>";
+  }
+  if (tunnel.type === "udp") {
+    return `udp://82.156.236.104:${tunnel.publicPort}`;
+  }
+  if (tunnel.type === "socks5") {
+    return `socks5://82.156.236.104:${tunnel.publicPort}`;
+  }
+  return `82.156.236.104:${tunnel.publicPort}`;
+}
+
+function tunnelAccessLabel(tunnel: TunnelSpec) {
+  if (tunnel.type === "http") return "HTTP Web/API 入口";
+  if (tunnel.type === "https") return "HTTPS 标准入口";
+  if (tunnel.type === "udp") return "UDP 最小数据面入口";
+  if (tunnel.type === "socks5") return "SOCKS5 CONNECT 代理入口";
+  return "TCP 端口直连入口";
+}
+
+function tunnelAccessGuide(tunnel: TunnelSpec) {
+  if (tunnel.type === "http") {
+    return `HTTP 已可作为当前桌面开发前提。建议先访问 ${tunnelPublicEntry(tunnel)}${normalizeProbePath(tunnel.probePath) === "/" ? "" : normalizeProbePath(tunnel.probePath)}，再按需执行 probe。`;
+  }
+  if (tunnel.type === "https") {
+    return `HTTPS 已可作为当前桌面开发前提。标准入口使用域名 ${tunnel.domain || "<待绑定域名>"}，当前仍需环境侧证书与域名配置配合。`;
+  }
+  if (tunnel.type === "udp") {
+    return `UDP 已可作为当前桌面开发前提。当前只确认最小数据面闭环，不提供 UDP probe、复杂会话治理或 NAT 穿透。`;
+  }
+  if (tunnel.type === "socks5") {
+    return `SOCKS5 已可作为当前桌面开发前提。当前只支持 CONNECT，不支持 UDP associate，也不提供高级认证或 ACL。`;
+  }
+  if (tunnel.transportPolicy === "p2p_preferred") {
+    return `当前 tunnel 配置偏好为 p2p_preferred，但 P2P 仍是 partial 能力；桌面端只展示配置意图和运行事实，不把它当作已可用的数据面。`;
+  }
+  return `TCP 端口映射当前可直接使用。适合 SSH / RDP / 数据库等原始 TCP 服务。`;
+}
+
+function normalizeProbePath(pathValue?: string) {
+  const value = (pathValue || "/").trim();
+  if (!value) return "/";
+  return value.startsWith("/") ? value : "/" + value;
+}
+
+function probeFreshnessLabel(tunnel: TunnelSpec, probe: TunnelProbeResult | null | undefined) {
+  const probedAt = probe?.probedAt || tunnel.lastProbedAt || "";
+  if (!probedAt || probedAt.startsWith("0001-01-01")) return "尚未探测";
+  const parsed = Date.parse(probedAt);
+  if (Number.isNaN(parsed)) return "探测结果时间未知";
+  const success = probe?.success ?? Boolean(tunnel.lastProbeSuccess);
+  return success ? `最近成功 / ${formatDate(probedAt)}` : `最近失败 / ${formatDate(probedAt)}`;
+}
+
+function renderProbeSummary(tunnel: TunnelSpec, probe: TunnelProbeResult | null | undefined) {
+  if (tunnel.type !== "http" && tunnel.type !== "https") {
+    return null;
+  }
+  const result = probe || (tunnel.lastProbedAt ? {
+    success: Boolean(tunnel.lastProbeSuccess),
+    statusCode: tunnel.lastProbeStatusCode,
+    error: tunnel.lastProbeError,
+    targetEntry: tunnel.lastProbeTargetEntry || tunnelPublicEntry(tunnel),
+    probedAt: tunnel.lastProbedAt,
+  } : null);
+  if (!result) {
+    return <div className="weak-note">当前还没有 probe 结果。可直接探测当前入口验证可达性。</div>;
+  }
+  return (
+    <div className={result.success ? "banner info" : "banner error"}>
+      {result.success ? "Probe 成功" : "Probe 失败"}
+      {result.statusCode ? ` / status=${result.statusCode}` : ""}
+      {result.targetEntry ? ` / target=${result.targetEntry}` : ""}
+      {result.error ? ` / error=${result.error}` : ""}
     </div>
   );
 }
