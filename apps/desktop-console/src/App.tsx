@@ -701,8 +701,9 @@ export default function App() {
                       <WorkbenchEmptyState activeTab={activeTab} selectedNode={selectedNode} />
                     ) : (
                       <div className="detail-column">
-                        {selectedTunnel.status !== "active" ? <div className="banner error">当前 tunnel 处于非 active 状态，入口打开、示例命令和 probe 已按产品交互降级或禁用。请先通过控制动作恢复状态。</div> : null}
-                        {selectedTunnel.lastFailureReason ? <div className="banner error">最近失败原因：{selectedTunnel.lastFailureReason}</div> : null}
+                        {tunnelStateEvaluation(selectedTunnel).messages.filter((item) => item.tone === "danger").map((item) => (
+                          <div key={item.message} className={item.tone === "danger" ? "banner error" : "banner info"}>{item.message}</div>
+                        ))}
                         <div className="detail-stack">
                           <Metric label="name" value={selectedTunnel.name} />
                           <Metric label="type" value={selectedTunnel.type} />
@@ -729,16 +730,16 @@ export default function App() {
                             <Metric label="最近 probe" value={probeFreshnessLabel(selectedTunnel, probeResults[selectedTunnel.id])} />
                           </div>
                           <div className="badge-row access-badges">
-                            <span className={"status-chip " + runtimeBadgeTone(selectedTunnel)}>{runtimeBadgeLabel(selectedTunnel)}</span>
-                            <span className={"status-chip " + healthBadgeTone(selectedTunnel)}>{healthBadgeLabel(selectedTunnel)}</span>
-                            <span className="status-chip neutral">transportPolicy {selectedTunnel.transportPolicy || "relay_only"}</span>
+                            {tunnelStateEvaluation(selectedTunnel).badges.map((badge) => (
+                              <span key={badge.label} className={"status-chip " + badge.tone}>{badge.label}</span>
+                            ))}
                           </div>
                           <div className="banner info">{tunnelAccessGuide(selectedTunnel)}</div>
                           <div className="button-row wrap-actions">
                             <button type="button" className="secondary" disabled={!supportsCopyEntry(selectedTunnel)} onClick={() => void copyToClipboard(tunnelPublicEntry(selectedTunnel), "用户入口")}>复制用户入口</button>
                             <button type="button" className="secondary" disabled={!supportsQuickCommand(selectedTunnel)} onClick={() => void copyToClipboard(tunnelQuickCommand(selectedTunnel), "协议示例命令")}>复制协议示例命令</button>
-                            {supportsOpenEntry(selectedTunnel) ? <button type="button" className="secondary" onClick={() => openExternal(tunnelPublicEntry(selectedTunnel), "用户入口")}>打开用户入口</button> : null}
-                            {supportsProbeTargetOpen(selectedTunnel) ? <button type="button" className="secondary" onClick={() => openExternal(tunnelProbeTargetEntry(selectedTunnel, probeResults[selectedTunnel.id]), "Probe 目标")}>打开 probe 目标</button> : null}
+                            <button type="button" className="secondary" disabled={!supportsOpenEntry(selectedTunnel)} onClick={() => openExternal(tunnelPublicEntry(selectedTunnel), "用户入口")}>打开用户入口</button>
+                            <button type="button" className="secondary" disabled={!supportsProbeTargetOpen(selectedTunnel)} onClick={() => openExternal(tunnelProbeTargetEntry(selectedTunnel, probeResults[selectedTunnel.id]), "Probe 目标")}>打开 probe 目标</button>
                           </div>
                           <div className="access-command-box">
                             <span>协议示例命令</span>
@@ -887,29 +888,30 @@ function tunnelAccessLabel(tunnel: TunnelSpec) {
 }
 
 function tunnelAccessGuide(tunnel: TunnelSpec) {
+  const state = tunnelStateEvaluation(tunnel);
   if (tunnel.type === "http") {
-    if (tunnel.status !== "active") {
+    if (!state.entryUsable) {
       return `HTTP 入口当前处于非 active 状态。请先通过 pause_tunnel / resume_tunnel 控制动作恢复入口，再进行访问或 probe。`;
     }
     return `HTTP 已可作为当前桌面开发前提。建议先访问 ${tunnelPublicEntry(tunnel)}${normalizeProbePath(tunnel.probePath) === "/" ? "" : normalizeProbePath(tunnel.probePath)}，再按需执行 probe。`;
   }
   if (tunnel.type === "https") {
-    if (!(tunnel.domain || "").trim()) {
+    if (!state.domainReady) {
       return `HTTPS 当前还不能直接打开，因为还没有配置 domain。请先在普通配置区补齐域名，再使用打开入口或 probe。`;
     }
-    if (tunnel.status !== "active") {
+    if (!state.entryUsable) {
       return `HTTPS 入口当前处于非 active 状态。请先通过 pause_tunnel / resume_tunnel 控制动作恢复入口，再进行访问或 probe。`;
     }
     return `HTTPS 已可作为当前桌面开发前提。标准入口使用域名 ${tunnel.domain || "<待绑定域名>"}，当前仍需环境侧证书与域名配置配合。`;
   }
   if (tunnel.type === "udp") {
-    if (tunnel.status !== "active") {
+    if (!state.entryUsable) {
       return `UDP 入口当前处于非 active 状态。请先恢复 tunnel 状态，再进行最小数据面验证。`;
     }
     return `UDP 已可作为当前桌面开发前提。当前只确认最小数据面闭环，不提供 UDP probe、复杂会话治理或 NAT 穿透。`;
   }
   if (tunnel.type === "socks5") {
-    if (tunnel.status !== "active") {
+    if (!state.entryUsable) {
       return `SOCKS5 入口当前处于非 active 状态。请先恢复 tunnel 状态，再进行代理验证。`;
     }
     return `SOCKS5 已可作为当前桌面开发前提。当前只支持 CONNECT，不支持 UDP associate，也不提供高级认证或 ACL。`;
@@ -948,43 +950,19 @@ function supportsQuickCommand(tunnel: TunnelSpec) {
 }
 
 function supportsOpenEntry(tunnel: TunnelSpec) {
-  if (tunnel.type === "http") {
-    return hasUsableEntry(tunnel);
-  }
-  if (tunnel.type === "https") {
-    return hasUsableEntry(tunnel);
-  }
-  return false;
+  return (tunnel.type === "http" || tunnel.type === "https") && tunnelStateEvaluation(tunnel).entryUsable;
 }
 
 function supportsProbeTargetOpen(tunnel: TunnelSpec) {
-  if (tunnel.type === "http") {
-    return hasUsableEntry(tunnel);
-  }
-  if (tunnel.type === "https") {
-    return hasUsableEntry(tunnel);
-  }
-  return false;
+  return (tunnel.type === "http" || tunnel.type === "https") && tunnelStateEvaluation(tunnel).entryUsable;
 }
 
 function supportsProbeAction(tunnel: TunnelSpec) {
-  if (tunnel.type === "http" || tunnel.type === "https") {
-    return hasUsableEntry(tunnel);
-  }
-  return false;
+  return (tunnel.type === "http" || tunnel.type === "https") && tunnelStateEvaluation(tunnel).entryUsable;
 }
 
 function hasUsableEntry(tunnel: TunnelSpec) {
-  if (tunnel.status !== "active") {
-    return false;
-  }
-  if (tunnel.type === "https") {
-    return Boolean((tunnel.domain || "").trim());
-  }
-  if (tunnel.type === "http" || tunnel.type === "udp" || tunnel.type === "socks5" || tunnel.type === "tcp") {
-    return tunnel.publicPort > 0;
-  }
-  return false;
+  return tunnelStateEvaluation(tunnel).entryUsable;
 }
 
 function tunnelProbeTargetEntry(tunnel: TunnelSpec, probe: TunnelProbeResult | null | undefined) {
@@ -1002,31 +980,6 @@ function runtimeFactSummary(tunnel: TunnelSpec) {
   return `${path} / ${state}`;
 }
 
-function runtimeBadgeLabel(tunnel: TunnelSpec) {
-  if (tunnel.runtimeState === "active") return `运行中 ${tunnel.runtimePath || "reported"}`;
-  if (tunnel.runtimeState === "pending") return "运行待定";
-  if (tunnel.runtimeState === "unavailable") return "运行不可用";
-  if (tunnel.lastFailureReason) return "存在失败原因";
-  return "运行事实未上报";
-}
-
-function runtimeBadgeTone(tunnel: TunnelSpec) {
-  if (tunnel.runtimeState === "active") return "good";
-  if (tunnel.runtimeState === "pending") return "neutral";
-  if (tunnel.runtimeState === "unavailable" || tunnel.lastFailureReason) return "danger";
-  return "neutral";
-}
-
-function healthBadgeLabel(tunnel: TunnelSpec) {
-  if (!tunnel.healthStatus) return "health 未上报";
-  return `health ${tunnel.healthStatus}`;
-}
-
-function healthBadgeTone(tunnel: TunnelSpec) {
-  if (!tunnel.healthStatus || tunnel.healthStatus === "healthy") return "good";
-  return "danger";
-}
-
 function buildProtocolOverview(node: NodeSummary, tunnels: TunnelSpec[]) {
   return [
     protocolOverviewItem("tcp", "TCP", Boolean(node.capabilities.tcpRelay), tunnels.filter((item) => item.type === "tcp")),
@@ -1039,8 +992,9 @@ function buildProtocolOverview(node: NodeSummary, tunnels: TunnelSpec[]) {
 }
 
 function protocolOverviewItem(key: string, label: string, supported: boolean, tunnels: TunnelSpec[]) {
-  const activeCount = tunnels.filter((item) => item.status === "active").length;
-  const attentionCount = tunnels.filter((item) => item.status !== "active" || item.runtimeState === "unavailable" || Boolean(item.lastFailureReason) || (item.type === "https" && !(item.domain || "").trim())).length;
+  const states = tunnels.map((item) => tunnelStateEvaluation(item));
+  const activeCount = states.filter((item) => item.active).length;
+  const attentionCount = states.filter((item) => item.attention).length;
   if (!supported) {
     return { key, label, tone: "danger", state: "不可用", summary: "当前节点未上报对应能力。", detail: "当前协议不应作为这台机器的桌面入口前提。" };
   }
@@ -1093,14 +1047,58 @@ function emptyStateForProtocol(activeTab: TunnelTypeTab, node: NodeSummary) {
 }
 
 function runtimeFactGuide(tunnel: TunnelSpec) {
+  const state = tunnelStateEvaluation(tunnel);
   const failure = tunnel.lastFailureReason || "尚无失败原因";
-  if (tunnel.status !== "active") {
+  if (!state.active) {
     return `当前 tunnel 状态是 ${tunnel.status}。在非 active 状态下，打开入口和 probe 等动作会被降级或禁用；lastFailureReason=${failure}。`;
   }
   if (tunnel.runtimePath || tunnel.runtimeState) {
     return `当前运行事实来自 tunnel runtime 字段：runtimePath=${tunnel.runtimePath || "-"} / runtimeState=${tunnel.runtimeState || "-"} / lastFailureReason=${failure}。`;
   }
   return `当前还没有 runtimePath/runtimeState 回传。桌面端不把 transportPolicy 误当作运行事实；lastFailureReason=${failure}。`;
+}
+
+function tunnelStateEvaluation(tunnel: TunnelSpec) {
+  const domainReady = tunnel.type !== "https" || Boolean((tunnel.domain || "").trim());
+  const active = tunnel.status === "active";
+  const hasPortEntry = tunnel.type === "http" || tunnel.type === "udp" || tunnel.type === "socks5" || tunnel.type === "tcp";
+  const entryConfigured = tunnel.type === "https" ? domainReady : !hasPortEntry || tunnel.publicPort > 0;
+  const runtimeUnavailable = tunnel.runtimeState === "unavailable";
+  const hasFailure = Boolean(tunnel.lastFailureReason);
+  const entryUsable = active && entryConfigured;
+  const attention = !active || !entryConfigured || runtimeUnavailable || hasFailure;
+  const badges = [
+    {
+      label: runtimeUnavailable ? "运行不可用" : tunnel.runtimeState === "pending" ? "运行待定" : tunnel.runtimeState === "active" ? `运行中 ${tunnel.runtimePath || "reported"}` : "运行事实未上报",
+      tone: runtimeUnavailable ? "danger" : tunnel.runtimeState === "active" ? "good" : "neutral",
+    },
+    {
+      label: !tunnel.healthStatus ? "health 未上报" : `health ${tunnel.healthStatus}`,
+      tone: !tunnel.healthStatus || tunnel.healthStatus === "healthy" ? "good" : "danger",
+    },
+    {
+      label: `transportPolicy ${tunnel.transportPolicy || "relay_only"}`,
+      tone: "neutral",
+    },
+  ];
+  const messages = [] as Array<{ tone: "danger" | "info"; message: string }>;
+  if (!active) {
+    messages.push({ tone: "danger", message: `当前 tunnel 处于非 active 状态，入口打开、示例命令和 probe 已按产品交互降级或禁用。请先通过控制动作恢复状态。` });
+  }
+  if (hasFailure) {
+    messages.push({ tone: "danger", message: `最近失败原因：${tunnel.lastFailureReason}` });
+  }
+  if (tunnel.type === "https" && !domainReady) {
+    messages.push({ tone: "info", message: "HTTPS 仍缺少 domain，打开入口和 probe 目标会继续保持禁用，直到补齐域名。" });
+  }
+  return {
+    active,
+    domainReady,
+    entryUsable,
+    attention,
+    badges,
+    messages,
+  };
 }
 
 function normalizeProbePath(pathValue?: string) {
