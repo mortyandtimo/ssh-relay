@@ -34,6 +34,10 @@ func main() {
 	switch mode {
 	case "duplicate_inflight":
 		fixture = server.UseBlockingControlExecutionFixture(types.ControlActionIsolateNode, types.ControlTargetNode, nodeID)
+	case "duplicate_handled":
+		// No extra hook is needed. The first accepted real execute writes into the
+		// existing done-cache, and the second same-context request should then be
+		// rejected as duplicate_handled by the normal server path.
 	case "retryable_restart":
 		server.UseRetryableRestartFailureFixture(nodeID, config.GetEnv("CONTROL_FIXTURE_RETRYABLE_DETAIL", "fixture transient failure"))
 	default:
