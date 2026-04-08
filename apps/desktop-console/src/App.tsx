@@ -172,6 +172,8 @@ export default function App() {
     () => (selectedTunnelId ? tabTunnels.find((tunnel) => tunnel.id === selectedTunnelId) ?? null : null),
     [selectedTunnelId, tabTunnels],
   );
+  const selectedTunnelState = selectedTunnel ? tunnelStateEvaluation(selectedTunnel) : null;
+  const selectedTunnelActions = selectedTunnel && selectedTunnelState ? buildWorkbenchActions(selectedTunnel, selectedTunnelState, busy === selectedTunnel.id + ":probe") : [];
 
   useEffect(() => {
     if (!selectedTunnel) {
@@ -702,7 +704,7 @@ export default function App() {
                       <WorkbenchEmptyState activeTab={activeTab} selectedNode={selectedNode} />
                     ) : (
                       <div className="detail-column">
-                        {tunnelStateEvaluation(selectedTunnel).messages.map((item) => (
+                        {selectedTunnelState?.messages.map((item) => (
                           <div key={item.message} className={item.tone === "danger" ? "banner error" : "banner info"}>{item.message}</div>
                         ))}
                         <div className="detail-stack">
@@ -731,30 +733,50 @@ export default function App() {
                             <Metric label="最近 probe" value={probeFreshnessLabel(selectedTunnel, probeResults[selectedTunnel.id])} />
                           </div>
                           <div className="badge-row access-badges">
-                            {tunnelStateEvaluation(selectedTunnel).badges.map((badge) => (
+                            {selectedTunnelState?.badges.map((badge) => (
                               <span key={badge.label} className={"status-chip " + badge.tone}>{badge.label}</span>
                             ))}
                           </div>
                           <div className="banner info">{tunnelAccessGuide(selectedTunnel)}</div>
-                          {tunnelStateEvaluation(selectedTunnel).nextStep ? <div className="banner info">下一步：{tunnelStateEvaluation(selectedTunnel).nextStep}</div> : null}
-                          <div className="button-row wrap-actions">
-                            <button type="button" className="secondary" disabled={!supportsCopyEntry(selectedTunnel)} onClick={() => void copyToClipboard(tunnelPublicEntry(selectedTunnel), "用户入口")}>复制用户入口</button>
-                            <button type="button" className="secondary" disabled={!supportsQuickCommand(selectedTunnel)} onClick={() => void copyToClipboard(tunnelQuickCommand(selectedTunnel), "协议示例命令")}>复制协议示例命令</button>
-                            <button type="button" className="secondary" disabled={!supportsOpenEntry(selectedTunnel)} onClick={() => openExternal(tunnelPublicEntry(selectedTunnel), "用户入口")}>打开用户入口</button>
-                            <button type="button" className="secondary" disabled={!supportsProbeTargetOpen(selectedTunnel)} onClick={() => openExternal(tunnelProbeTargetEntry(selectedTunnel, probeResults[selectedTunnel.id]), "Probe 目标")}>打开 probe 目标</button>
+                          {selectedTunnelState?.nextStep ? <div className="banner info">下一步：{selectedTunnelState.nextStep}</div> : null}
+                          <div className="action-card-grid">
+                            {selectedTunnelActions.map((action) => (
+                              <div key={action.key} className="check-item">
+                                <div className="check-head">
+                                  <strong>{action.label}</strong>
+                                  <span className={"status-chip " + action.tone}>{action.state}</span>
+                                </div>
+                                <p className="copy">{action.summary}</p>
+                                <p className="weak-note">{action.detail}</p>
+                                <button type="button" className="secondary" disabled={action.disabled} onClick={() => {
+                                  if (action.key === "copy-entry") {
+                                    void copyToClipboard(tunnelPublicEntry(selectedTunnel), "用户入口");
+                                    return;
+                                  }
+                                  if (action.key === "copy-command") {
+                                    void copyToClipboard(tunnelQuickCommand(selectedTunnel), "协议示例命令");
+                                    return;
+                                  }
+                                  if (action.key === "open-entry") {
+                                    openExternal(tunnelPublicEntry(selectedTunnel), "用户入口");
+                                    return;
+                                  }
+                                  if (action.key === "open-probe") {
+                                    openExternal(tunnelProbeTargetEntry(selectedTunnel, probeResults[selectedTunnel.id]), "Probe 目标");
+                                    return;
+                                  }
+                                  if (action.key === "probe-entry") {
+                                    void runTunnelProbe(selectedTunnel);
+                                  }
+                                }}>{action.buttonLabel}</button>
+                              </div>
+                            ))}
                           </div>
                           <div className="access-command-box">
                             <span>协议示例命令</span>
                             <code>{tunnelQuickCommand(selectedTunnel)}</code>
                           </div>
-                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? (
-                            <div className="button-row wrap-actions">
-                              <button type="button" className="secondary" disabled={!supportsProbeAction(selectedTunnel) || busy === selectedTunnel.id + ":probe"} onClick={() => void runTunnelProbe(selectedTunnel)}>
-                                {busy === selectedTunnel.id + ":probe" ? "探测中..." : "探测当前入口"}
-                              </button>
-                              <span className="weak-note">probePath: <code>{normalizeProbePath(selectedTunnel.probePath)}</code></span>
-                            </div>
-                          ) : null}
+                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <div className="weak-note">probePath: <code>{normalizeProbePath(selectedTunnel.probePath)}</code></div> : null}
                           {renderProbeSummary(selectedTunnel, probeResults[selectedTunnel.id])}
                           <div className="weak-note runtime-note">{runtimeFactGuide(selectedTunnel)}</div>
                           {selectedTunnel.transportPolicy === "p2p_preferred" ? <div className="banner info">P2P 当前仍为降级占位：配置意图可见，但当前不作为桌面数据面前提，也不表达成已建立 P2P 路径。</div> : null}
@@ -1064,6 +1086,38 @@ function runtimeFactGuide(tunnel: TunnelSpec) {
     return `当前运行事实来自 tunnel runtime 字段：runtimePath=${tunnel.runtimePath || "-"} / runtimeState=${tunnel.runtimeState || "-"} / lastFailureReason=${failure}。`;
   }
   return `当前还没有 runtimePath/runtimeState 回传。桌面端不把 transportPolicy 误当作运行事实；lastFailureReason=${failure}。`;
+}
+
+function buildWorkbenchActions(tunnel: TunnelSpec, state: ReturnType<typeof tunnelStateEvaluation>, probeBusy: boolean) {
+  const actions = [
+    workbenchActionDescriptor("copy-entry", "复制用户入口", "复制入口", supportsCopyEntry(tunnel), state, "把当前入口复制给浏览器、客户端或文档。"),
+    workbenchActionDescriptor("copy-command", "复制协议示例命令", "复制命令", supportsQuickCommand(tunnel), state, "复制一条最小验证命令，便于直接在终端里使用。"),
+  ];
+  if (tunnel.type === "http" || tunnel.type === "https") {
+    actions.push(workbenchActionDescriptor("open-entry", "打开用户入口", "打开入口", supportsOpenEntry(tunnel), state, "直接在浏览器打开当前用户入口。"));
+    actions.push(workbenchActionDescriptor("open-probe", "打开 Probe 目标", "打开目标", supportsProbeTargetOpen(tunnel), state, "直接打开 probe 目标，验证最终命中的 URL。"));
+    actions.push({
+      ...workbenchActionDescriptor("probe-entry", "探测当前入口", probeBusy ? "探测中..." : "执行探测", supportsProbeAction(tunnel) && !probeBusy, state, "向当前 HTTP/HTTPS 入口发起最小探测。"),
+      state: probeBusy ? "处理中" : workbenchActionDescriptor("probe-entry", "探测当前入口", "执行探测", supportsProbeAction(tunnel), state, "向当前 HTTP/HTTPS 入口发起最小探测。").state,
+      tone: probeBusy ? "neutral" : workbenchActionDescriptor("probe-entry", "探测当前入口", "执行探测", supportsProbeAction(tunnel), state, "向当前 HTTP/HTTPS 入口发起最小探测。").tone,
+      disabled: probeBusy || !supportsProbeAction(tunnel),
+      detail: probeBusy ? "当前 probe 正在进行中，请等待结果返回。" : workbenchActionDescriptor("probe-entry", "探测当前入口", "执行探测", supportsProbeAction(tunnel), state, "向当前 HTTP/HTTPS 入口发起最小探测。").detail,
+    });
+  }
+  return actions;
+}
+
+function workbenchActionDescriptor(key: string, label: string, buttonLabel: string, enabled: boolean, state: ReturnType<typeof tunnelStateEvaluation>, summary: string) {
+  return {
+    key,
+    label,
+    buttonLabel,
+    state: enabled ? "可用" : "禁用",
+    tone: enabled ? "good" : state.attention ? "danger" : "neutral",
+    disabled: !enabled,
+    summary,
+    detail: enabled ? "当前动作已满足前提，可以直接执行。" : state.nextStep,
+  };
 }
 
 function tunnelStateEvaluation(tunnel: TunnelSpec) {

@@ -153,6 +153,12 @@
   white-space: pre-wrap;
 }
 
+.action-card-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
 .runtime-note {
   margin: 0;
 }
