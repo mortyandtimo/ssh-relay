@@ -10,7 +10,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/25743/cloud-relay-platform/packages/shared/config"
@@ -89,6 +91,20 @@ func main() {
 		})
 	})
 	mux.Handle("/api/", proxy)
+	mux.HandleFunc("/desktop/", func(w http.ResponseWriter, r *http.Request) {
+		trimmedPath := strings.TrimPrefix(r.URL.Path, "/desktop")
+		if trimmedPath == "" || trimmedPath == "/" || trimmedPath == "/index.html" {
+			serveIndexHTML(w, distDir, apiBaseURL, publicEntryHost)
+			return
+		}
+		if strings.HasPrefix(trimmedPath, "/assets/") {
+			req := r.Clone(r.Context())
+			req.URL.Path = trimmedPath
+			fileServer.ServeHTTP(w, req)
+			return
+		}
+		serveIndexHTML(w, distDir, apiBaseURL, publicEntryHost)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/assets/") {
 			fileServer.ServeHTTP(w, r)
@@ -105,7 +121,15 @@ func main() {
 		serveIndexHTML(w, distDir, apiBaseURL, publicEntryHost)
 	})
 
-	log.Printf("desktop-launcher listening on http://%s (api=%s, config=%s)", listenAddr, apiBaseURL, configPath)
+	launcherURL := "http://" + listenAddr + "/"
+	log.Printf("desktop-launcher listening on %s (api=%s, config=%s)", launcherURL, apiBaseURL, configPath)
+	if cfg.OpenBrowser {
+		go func() {
+			if err := openDesktopBrowser(launcherURL); err != nil {
+				log.Printf("open browser failed: %v", err)
+			}
+		}()
+	}
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)
 	}
@@ -126,7 +150,7 @@ func loadConfig(baseDir string) (desktopConfig, string, error) {
 			APIBaseURL:      config.GetEnv("DESKTOP_API_BASE_URL", "http://127.0.0.1:7710"),
 			PublicEntryHost: config.GetEnv("DESKTOP_PUBLIC_ENTRY_HOST", ""),
 			ListenAddr:      config.GetEnv("DESKTOP_LISTEN_ADDR", "127.0.0.1:5180"),
-			OpenBrowser:     false,
+			OpenBrowser:     true,
 		}
 		body, marshalErr := json.MarshalIndent(cfg, "", "  ")
 		if marshalErr != nil {
@@ -155,8 +179,59 @@ func serveIndexHTML(w http.ResponseWriter, distDir string, apiBaseURL string, pu
 		return
 	}
 	content := string(body)
-	inject := fmt.Sprintf("<script>window.__DESKTOP_ENV__={apiBaseUrl:%q,publicEntryHost:%q};</script>", apiBaseURL, publicEntryHost)
+	inject := fmt.Sprintf("<script>window.__DESKTOP_ENV__={apiBaseUrl:%q,publicEntryHost:%q};</script>", "", publicEntryHost)
 	content = strings.Replace(content, "</head>", inject+"</head>", 1)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.WriteString(w, content)
+}
+
+func openDesktopBrowser(rawURL string) error {
+	if runtime.GOOS == "windows" {
+		for _, candidate := range windowsBrowserCandidates() {
+			if candidate == "" {
+				continue
+			}
+			if err := exec.Command(candidate, rawURL).Start(); err == nil {
+				return nil
+			}
+		}
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL).Start()
+	}
+	if runtime.GOOS == "darwin" {
+		return exec.Command("open", rawURL).Start()
+	}
+	return exec.Command("xdg-open", rawURL).Start()
+}
+
+func windowsBrowserCandidates() []string {
+	candidates := []string{}
+	for _, item := range []string{"msedge.exe", "chrome.exe"} {
+		if path, err := exec.LookPath(item); err == nil {
+			candidates = append(candidates, path)
+		}
+	}
+	for _, base := range []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"), os.Getenv("LocalAppData")} {
+		if base == "" {
+			continue
+		}
+		candidates = append(candidates,
+			filepath.Join(base, "Microsoft", "Edge", "Application", "msedge.exe"),
+			filepath.Join(base, "Google", "Chrome", "Application", "chrome.exe"),
+		)
+	}
+	available := []string{}
+	seen := map[string]struct{}{}
+	for _, item := range candidates {
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		if _, err := os.Stat(item); err == nil {
+			available = append(available, item)
+		}
+	}
+	return available
 }

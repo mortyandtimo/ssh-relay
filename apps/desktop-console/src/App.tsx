@@ -41,7 +41,8 @@ declare global {
 }
 
 const runtimeDesktopEnv = typeof window !== "undefined" ? window.__DESKTOP_ENV__ || {} : {};
-const api = createDesktopApi(runtimeDesktopEnv.apiBaseUrl || import.meta.env.VITE_API_BASE_URL || "");
+const hasRuntimeAPIBaseURL = typeof window !== "undefined" && Boolean(window.__DESKTOP_ENV__) && Object.prototype.hasOwnProperty.call(window.__DESKTOP_ENV__, "apiBaseUrl");
+const api = createDesktopApi(hasRuntimeAPIBaseURL ? runtimeDesktopEnv.apiBaseUrl || "" : import.meta.env.VITE_API_BASE_URL || "");
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
 const desktopPublicHost = (() => {
   const configured = (runtimeDesktopEnv.publicEntryHost || import.meta.env.VITE_PUBLIC_ENTRY_HOST || "").trim();

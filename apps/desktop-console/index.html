@@ -7,6 +7,13 @@
   </head>
   <body>
     <div id="root"></div>
+    <script nomodule>
+      (function () {
+        var root = document.getElementById("root");
+        if (!root) return;
+        root.innerHTML = "<div style=\"max-width:720px;margin:8vh auto;padding:24px;border:1px solid rgba(17,34,56,0.12);border-radius:20px;background:#ffffff;font-family:Segoe UI,sans-serif;color:#112238;line-height:1.7;box-shadow:0 20px 40px rgba(17,34,56,0.08)\"><p style=\"margin:0 0 8px;text-transform:uppercase;letter-spacing:0.14em;font-size:12px;color:#73849a\">Cloud Relay Desktop</p><h1 style=\"margin:0 0 12px;font-size:28px\">当前浏览器内核过旧</h1><p style=\"margin:0 0 12px\">这个 Windows 试用包需要现代浏览器内核才能加载桌面界面。请优先使用 Microsoft Edge 或 Google Chrome 打开本地地址。</p><p style=\"margin:0 0 12px\"><code>http://127.0.0.1:5180/</code></p><p style=\"margin:0\">如果你是直接双击 <code>desktop-launcher.exe</code> 启动，新的打包版会优先尝试打开 Edge/Chrome，而不是继续落到旧浏览器白屏。</p></div>";
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
   </html>
