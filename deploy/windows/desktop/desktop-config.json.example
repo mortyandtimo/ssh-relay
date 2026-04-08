@@ -1,0 +1,6 @@
+{
+  "apiBaseUrl": "http://127.0.0.1:7710",
+  "publicEntryHost": "",
+  "listenAddr": "127.0.0.1:5180",
+  "openBrowser": false
+}

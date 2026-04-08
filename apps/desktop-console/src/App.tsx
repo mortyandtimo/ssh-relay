@@ -29,10 +29,22 @@ import {
 import { buildDesktopControlResultView } from "./controlResultView";
 import { ControlResultBlock } from "./controlResultBlock";
 
-const api = createDesktopApi(import.meta.env.VITE_API_BASE_URL || "");
+type DesktopWindowEnv = {
+  apiBaseUrl?: string;
+  publicEntryHost?: string;
+};
+
+declare global {
+  interface Window {
+    __DESKTOP_ENV__?: DesktopWindowEnv;
+  }
+}
+
+const runtimeDesktopEnv = typeof window !== "undefined" ? window.__DESKTOP_ENV__ || {} : {};
+const api = createDesktopApi(runtimeDesktopEnv.apiBaseUrl || import.meta.env.VITE_API_BASE_URL || "");
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
 const desktopPublicHost = (() => {
-  const configured = (import.meta.env.VITE_PUBLIC_ENTRY_HOST || "").trim();
+  const configured = (runtimeDesktopEnv.publicEntryHost || import.meta.env.VITE_PUBLIC_ENTRY_HOST || "").trim();
   if (configured) return configured;
   if (typeof window !== "undefined") {
     const hostname = window.location.hostname.trim();
