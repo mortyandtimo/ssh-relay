@@ -605,6 +605,7 @@ export default function App() {
                       </div>
                       <p className="copy">{item.summary}</p>
                       <p className="weak-note">{item.detail}</p>
+                      {item.nextStep ? <p className="weak-note">下一步：{item.nextStep}</p> : null}
                     </div>
                   ))}
                 </div>
@@ -701,7 +702,7 @@ export default function App() {
                       <WorkbenchEmptyState activeTab={activeTab} selectedNode={selectedNode} />
                     ) : (
                       <div className="detail-column">
-                        {tunnelStateEvaluation(selectedTunnel).messages.filter((item) => item.tone === "danger").map((item) => (
+                        {tunnelStateEvaluation(selectedTunnel).messages.map((item) => (
                           <div key={item.message} className={item.tone === "danger" ? "banner error" : "banner info"}>{item.message}</div>
                         ))}
                         <div className="detail-stack">
@@ -735,6 +736,7 @@ export default function App() {
                             ))}
                           </div>
                           <div className="banner info">{tunnelAccessGuide(selectedTunnel)}</div>
+                          {tunnelStateEvaluation(selectedTunnel).nextStep ? <div className="banner info">下一步：{tunnelStateEvaluation(selectedTunnel).nextStep}</div> : null}
                           <div className="button-row wrap-actions">
                             <button type="button" className="secondary" disabled={!supportsCopyEntry(selectedTunnel)} onClick={() => void copyToClipboard(tunnelPublicEntry(selectedTunnel), "用户入口")}>复制用户入口</button>
                             <button type="button" className="secondary" disabled={!supportsQuickCommand(selectedTunnel)} onClick={() => void copyToClipboard(tunnelQuickCommand(selectedTunnel), "协议示例命令")}>复制协议示例命令</button>
@@ -859,6 +861,7 @@ function WorkbenchEmptyState({ activeTab, selectedNode }: { activeTab: TunnelTyp
       </div>
       <p className="copy">{info.summary}</p>
       <p className="weak-note">{info.detail}</p>
+      {info.nextStep ? <p className="weak-note">下一步：{info.nextStep}</p> : null}
     </div>
   );
 }
@@ -890,29 +893,32 @@ function tunnelAccessLabel(tunnel: TunnelSpec) {
 function tunnelAccessGuide(tunnel: TunnelSpec) {
   const state = tunnelStateEvaluation(tunnel);
   if (tunnel.type === "http") {
+    if (!state.entryUsable && !state.domainReady) {
+      return `HTTP 当前入口配置不完整，暂时不能作为桌面入口使用。`;
+    }
     if (!state.entryUsable) {
-      return `HTTP 入口当前处于非 active 状态。请先通过 pause_tunnel / resume_tunnel 控制动作恢复入口，再进行访问或 probe。`;
+      return `HTTP 当前处于不可直接使用状态，入口动作已按产品交互降级。`;
     }
     return `HTTP 已可作为当前桌面开发前提。建议先访问 ${tunnelPublicEntry(tunnel)}${normalizeProbePath(tunnel.probePath) === "/" ? "" : normalizeProbePath(tunnel.probePath)}，再按需执行 probe。`;
   }
   if (tunnel.type === "https") {
     if (!state.domainReady) {
-      return `HTTPS 当前还不能直接打开，因为还没有配置 domain。请先在普通配置区补齐域名，再使用打开入口或 probe。`;
+      return `HTTPS 当前还不能直接打开，因为还没有配置 domain。`;
     }
     if (!state.entryUsable) {
-      return `HTTPS 入口当前处于非 active 状态。请先通过 pause_tunnel / resume_tunnel 控制动作恢复入口，再进行访问或 probe。`;
+      return `HTTPS 当前处于不可直接使用状态，入口动作已按产品交互降级。`;
     }
     return `HTTPS 已可作为当前桌面开发前提。标准入口使用域名 ${tunnel.domain || "<待绑定域名>"}，当前仍需环境侧证书与域名配置配合。`;
   }
   if (tunnel.type === "udp") {
     if (!state.entryUsable) {
-      return `UDP 入口当前处于非 active 状态。请先恢复 tunnel 状态，再进行最小数据面验证。`;
+      return `UDP 当前处于不可直接使用状态，入口命令仅保留为参考。`;
     }
     return `UDP 已可作为当前桌面开发前提。当前只确认最小数据面闭环，不提供 UDP probe、复杂会话治理或 NAT 穿透。`;
   }
   if (tunnel.type === "socks5") {
     if (!state.entryUsable) {
-      return `SOCKS5 入口当前处于非 active 状态。请先恢复 tunnel 状态，再进行代理验证。`;
+      return `SOCKS5 当前处于不可直接使用状态，入口动作已按产品交互降级。`;
     }
     return `SOCKS5 已可作为当前桌面开发前提。当前只支持 CONNECT，不支持 UDP associate，也不提供高级认证或 ACL。`;
   }
@@ -996,23 +1002,23 @@ function protocolOverviewItem(key: string, label: string, supported: boolean, tu
   const activeCount = states.filter((item) => item.active).length;
   const attentionCount = states.filter((item) => item.attention).length;
   if (!supported) {
-    return { key, label, tone: "danger", state: "不可用", summary: "当前节点未上报对应能力。", detail: "当前协议不应作为这台机器的桌面入口前提。" };
+    return { key, label, tone: "danger", state: "不可用", summary: "当前节点未上报对应能力。", detail: "当前协议不应作为这台机器的桌面入口前提。", nextStep: "继续使用其它已可用协议，不要让这个能力阻塞桌面主路径。" };
   }
   if (tunnels.length === 0) {
-    return { key, label, tone: "neutral", state: "空", summary: "当前节点还没有对应 tunnel。", detail: "这不阻塞其它已可用协议；如需接入该协议，可后续补 tunnel。" };
+    return { key, label, tone: "neutral", state: "空", summary: "当前节点还没有对应 tunnel。", detail: "这不阻塞其它已可用协议；如需接入该协议，可后续补 tunnel。", nextStep: "如需使用这一协议，先补 tunnel，而不是中断当前桌面主线。" };
   }
   if (attentionCount > 0) {
-    return { key, label, tone: "danger", state: "需关注", summary: `${tunnels.length} 条 tunnel，${attentionCount} 条处于失败、非 active 或配置不完整状态。`, detail: `当前 active=${activeCount}。桌面工作区会按不可用态禁用入口动作。` };
+    return { key, label, tone: "danger", state: "需关注", summary: `${tunnels.length} 条 tunnel，${attentionCount} 条处于失败、非 active 或配置不完整状态。`, detail: `当前 active=${activeCount}。桌面工作区会按不可用态禁用入口动作。`, nextStep: "优先处理 active/domain/failure 等阻塞条件，再回到入口操作。" };
   }
-  return { key, label, tone: "good", state: "可用", summary: `${tunnels.length} 条 tunnel 已可作为当前桌面入口区前提。`, detail: `当前 active=${activeCount}，可直接进入当前协议的入口操作路径。` };
+  return { key, label, tone: "good", state: "可用", summary: `${tunnels.length} 条 tunnel 已可作为当前桌面入口区前提。`, detail: `当前 active=${activeCount}，可直接进入当前协议的入口操作路径。`, nextStep: "直接进入 tunnel workbench，使用 copy/open/probe 等入口动作。" };
 }
 
 function p2pOverviewItem(node: NodeSummary, tunnels: TunnelSpec[]) {
   const preferredCount = tunnels.filter((item) => item.transportPolicy === "p2p_preferred").length;
   if (!node.capabilities.p2pAssist && preferredCount === 0) {
-    return { key: "p2p", label: "P2P", tone: "neutral", state: "未启用", summary: "当前节点没有 P2P assist，也没有 p2p_preferred tunnel。", detail: "桌面主路径继续建立在 HTTP/HTTPS/UDP/SOCKS5 上。" };
+    return { key: "p2p", label: "P2P", tone: "neutral", state: "未启用", summary: "当前节点没有 P2P assist，也没有 p2p_preferred tunnel。", detail: "桌面主路径继续建立在 HTTP/HTTPS/UDP/SOCKS5 上。", nextStep: "当前无需为 P2P 停下主线开发。" };
   }
-  return { key: "p2p", label: "P2P", tone: "neutral", state: "Partial", summary: `当前只展示配置意图与能力可见性；p2p_preferred tunnel=${preferredCount}。`, detail: "P2P 仍不是当前桌面数据面前提，不提供 live data-plane 入口动作。" };
+  return { key: "p2p", label: "P2P", tone: "neutral", state: "Partial", summary: `当前只展示配置意图与能力可见性；p2p_preferred tunnel=${preferredCount}。`, detail: "P2P 仍不是当前桌面数据面前提，不提供 live data-plane 入口动作。", nextStep: "继续沿 HTTP/HTTPS/UDP/SOCKS5 主路径做桌面产品，不等待 P2P。" };
 }
 
 function emptyStateForProtocol(activeTab: TunnelTypeTab, node: NodeSummary) {
@@ -1029,6 +1035,7 @@ function emptyStateForProtocol(activeTab: TunnelTypeTab, node: NodeSummary) {
       tone: "danger",
       summary: `当前节点还没有上报 ${label} 对应能力，当前协议不应作为这台机器的桌面入口主路径。`,
       detail: "可以继续使用其它已可用协议，不需要等待这个协议补齐后再继续桌面开发。",
+      nextStep: "切到其它已可用协议，或先补节点能力再回到这里。",
     };
   }
   return {
@@ -1043,6 +1050,7 @@ function emptyStateForProtocol(activeTab: TunnelTypeTab, node: NodeSummary) {
         : activeTab === "socks5"
           ? "SOCKS5 当前已验证可用，但这台机器还没有对应 tunnel。"
           : "当前协议能力并不缺失，只是还没有对应 tunnel。",
+    nextStep: "如需这个协议，先补 tunnel；否则继续沿当前已可用协议推进桌面主路径。",
   };
 }
 
@@ -1091,6 +1099,16 @@ function tunnelStateEvaluation(tunnel: TunnelSpec) {
   if (tunnel.type === "https" && !domainReady) {
     messages.push({ tone: "info", message: "HTTPS 仍缺少 domain，打开入口和 probe 目标会继续保持禁用，直到补齐域名。" });
   }
+  let nextStep = "直接使用当前入口动作，继续验证或访问当前 tunnel。";
+  if (!active) {
+    nextStep = "先通过 pause_tunnel / resume_tunnel 控制动作把 tunnel 恢复到 active。";
+  } else if (tunnel.type === "https" && !domainReady) {
+    nextStep = "先在普通配置区补齐 domain，再使用打开入口或 probe。";
+  } else if (runtimeUnavailable) {
+    nextStep = "先结合 runtimeState 和 lastFailureReason 排查，再决定是否继续访问当前入口。";
+  } else if (hasFailure) {
+    nextStep = "先处理最近失败原因，再决定是否继续访问或重新探测当前入口。";
+  }
   return {
     active,
     domainReady,
@@ -1098,6 +1116,7 @@ function tunnelStateEvaluation(tunnel: TunnelSpec) {
     attention,
     badges,
     messages,
+    nextStep,
   };
 }
 
