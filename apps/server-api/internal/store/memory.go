@@ -22,6 +22,8 @@ type InMemoryStore struct {
 	sessions    map[string]WebSession
 	auditLogs   []types.AuditLogEntry
 	nextAuditID int64
+	certificates map[string]types.CertificateSpec
+	certsByUser  map[string][]string
 }
 
 type nodeRecord struct {
@@ -31,13 +33,15 @@ type nodeRecord struct {
 
 func NewInMemoryStore() *InMemoryStore {
 	return &InMemoryStore{
-		nodes:       make(map[string]nodeRecord),
-		tunnels:     make(map[string]types.TunnelSpec),
-		users:       make(map[string]UserRecord),
-		userByEM:    make(map[string]string),
-		sessions:    make(map[string]WebSession),
-		auditLogs:   make([]types.AuditLogEntry, 0),
-		nextAuditID: 1,
+		nodes:        make(map[string]nodeRecord),
+		tunnels:      make(map[string]types.TunnelSpec),
+		users:        make(map[string]UserRecord),
+		userByEM:     make(map[string]string),
+		sessions:     make(map[string]WebSession),
+		auditLogs:    make([]types.AuditLogEntry, 0),
+		nextAuditID:  1,
+		certificates: make(map[string]types.CertificateSpec),
+		certsByUser:  make(map[string][]string),
 	}
 }
 
@@ -87,6 +91,7 @@ func (s *InMemoryStore) HeartbeatNode(_ context.Context, req types.NodeHeartbeat
 	record.Summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(req.NodeID)
 	record.Metrics = req.Metrics
 	record.Summary = hydrateNodeSummary(record.Summary)
+	record.Summary.LatestMetrics = cloneMetrics(record.Metrics)
 	s.nodes[req.NodeID] = record
 	return record.Summary, nil
 }
@@ -98,6 +103,7 @@ func (s *InMemoryStore) ListNodes(_ context.Context, filter NodeFilter) ([]types
 	for _, record := range s.nodes {
 		summary := hydrateNodeSummary(record.Summary)
 		summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(summary.NodeID)
+		summary.LatestMetrics = cloneMetrics(record.Metrics)
 		if !matchesNodeFilter(summary, filter) {
 			continue
 		}
@@ -132,6 +138,7 @@ func (s *InMemoryStore) GetNode(_ context.Context, nodeID string) (types.NodeSum
 	}
 	summary := hydrateNodeSummary(record.Summary)
 	summary.RuntimeSummary = s.buildNodeRuntimeSummaryLocked(nodeID)
+	summary.LatestMetrics = cloneMetrics(record.Metrics)
 	return summary, nil
 }
 
@@ -275,6 +282,10 @@ func (s *InMemoryStore) Counts(_ context.Context) (Counts, error) {
 		OnlineNodes:       online,
 		ConfiguredTunnels: len(s.tunnels),
 	}, nil
+}
+
+func (s *InMemoryStore) PurgeStaleNodes(_ context.Context, _ time.Duration) (int, error) {
+	return 0, nil
 }
 
 func (s *InMemoryStore) BootstrapStatus(_ context.Context) (bool, error) {
@@ -473,6 +484,115 @@ func (s *InMemoryStore) DeleteUserSessions(_ context.Context, userID string) err
 		}
 	}
 	return nil
+}
+
+func (s *InMemoryStore) CreateCertificate(_ context.Context, spec types.CertificateSpec) (types.CertificateSpec, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if spec.ID == "" {
+		spec.ID = fmt.Sprintf("cert-%d", time.Now().UnixNano())
+	}
+	now := time.Now().UTC()
+	spec.CreatedAt = now
+	spec.UpdatedAt = now
+	s.certificates[spec.ID] = spec
+	s.certsByUser[spec.UserID] = append(s.certsByUser[spec.UserID], spec.ID)
+	spec.KeyPEM = ""
+	return spec, nil
+}
+
+func (s *InMemoryStore) GetCertificate(_ context.Context, id string) (types.CertificateSpec, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	spec, ok := s.certificates[id]
+	if !ok {
+		return types.CertificateSpec{}, ErrNotFound
+	}
+	spec.KeyPEM = ""
+	return spec, nil
+}
+
+func (s *InMemoryStore) ListCertificates(_ context.Context, userID string) ([]types.CertificateSpec, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var items []types.CertificateSpec
+	for _, id := range s.certsByUser[userID] {
+		if spec, ok := s.certificates[id]; ok {
+			spec.KeyPEM = ""
+			items = append(items, spec)
+		}
+	}
+	return items, nil
+}
+
+func (s *InMemoryStore) DeleteCertificate(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	spec, ok := s.certificates[id]
+	if !ok {
+		return ErrNotFound
+	}
+	delete(s.certificates, id)
+	filtered := make([]string, 0, len(s.certsByUser[spec.UserID]))
+	for _, cid := range s.certsByUser[spec.UserID] {
+		if cid != id {
+			filtered = append(filtered, cid)
+		}
+	}
+	s.certsByUser[spec.UserID] = filtered
+	return nil
+}
+
+func (s *InMemoryStore) FindCertificateForDomain(_ context.Context, userID, domain string) (*types.CertificateSpec, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	for _, id := range s.certsByUser[userID] {
+		if spec, ok := s.certificates[id]; ok && strings.ToLower(spec.Domain) == domain {
+			cp := spec
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *InMemoryStore) FindCertificateByDomain(_ context.Context, domain string) (*types.CertificateSpec, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	for _, spec := range s.certificates {
+		if strings.ToLower(spec.Domain) == domain {
+			cp := spec
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *InMemoryStore) ListManagedHTTPSDomains(_ context.Context, userID string) ([]types.ManagedHTTPSDomain, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]types.ManagedHTTPSDomain, 0, len(s.certsByUser[userID]))
+	seen := make(map[string]struct{}, len(s.certsByUser[userID]))
+	for _, id := range s.certsByUser[userID] {
+		spec, ok := s.certificates[id]
+		if !ok {
+			continue
+		}
+		domain := strings.ToLower(strings.TrimSpace(spec.Domain))
+		if domain == "" {
+			continue
+		}
+		if _, exists := seen[domain]; exists {
+			continue
+		}
+		seen[domain] = struct{}{}
+		items = append(items, types.ManagedHTTPSDomain{Domain: domain, Source: "platform"})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Domain < items[j].Domain
+	})
+	return items, nil
 }
 
 func (s *InMemoryStore) Close() error {
@@ -827,4 +947,15 @@ func (s *InMemoryStore) ListAuditLogs(_ context.Context, filter AuditLogFilter) 
 	out := make([]types.AuditLogEntry, end-offset)
 	copy(out, items[offset:end])
 	return out, total, nil
+}
+
+func cloneMetrics(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(input))
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
 }

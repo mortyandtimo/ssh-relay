@@ -48,6 +48,7 @@ export type NodeSummary = {
   location?: string;
   tags?: string[];
   isolated?: boolean;
+  latestMetrics?: Record<string, string>;
 };
 
 export type NodeListResponse = {
@@ -93,6 +94,24 @@ export type TunnelProbeResult = {
   error?: string;
   probedAt: string;
   targetEntry: string;
+};
+
+export type ServerMetrics = {
+  service: string;
+  startedAt: string;
+  registeredNodes: number;
+  onlineNodes: number;
+  configuredTunnels: number;
+  protocolRelayCount: number;
+};
+
+export type ManagedHTTPSDomain = {
+  domain: string;
+  source: "platform" | "cert_keeper";
+};
+
+export type ManagedHTTPSDomainListResponse = {
+  items: ManagedHTTPSDomain[];
 };
 
 export type AuthUserResponse = {
@@ -207,4 +226,14 @@ export type ControlActionResponse = {
   placeholderOnly?: boolean;
   executionNotes?: ControlExecutionNote[];
   facts?: Record<string, string>;
+};
+
+export type CertificateSpec = {
+  id: string;
+  userId: string;
+  domain: string;
+  certPem: string;
+  expiresAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
 };

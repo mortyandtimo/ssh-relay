@@ -3,12 +3,14 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/25743/cloud-relay-platform/packages/protocol/types"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -122,6 +124,10 @@ func (s *PostgresStore) HeartbeatNode(ctx context.Context, req types.NodeHeartbe
 	if err != nil {
 		return types.NodeSummary{}, err
 	}
+	latestMetrics, err := unmarshalMap(metrics)
+	if err != nil {
+		return types.NodeSummary{}, err
+	}
 	return types.NodeSummary{
 		NodeID:         req.NodeID,
 		NodeName:       name,
@@ -132,6 +138,7 @@ func (s *PostgresStore) HeartbeatNode(ctx context.Context, req types.NodeHeartbe
 		RuntimeSummary: types.NodeRuntimeSummary{},
 		LastSeenAt:     now,
 		Metadata:       metadata,
+		LatestMetrics:  latestMetrics,
 	}, nil
 }
 
@@ -171,7 +178,8 @@ func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]typ
 			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimePath', '') = 'p2p'), 0),
 			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimeState', '') = 'pending'), 0),
 			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimeState', '') = 'unavailable'), 0),
-			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'lastFailureReason', '') <> ''), 0)
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'lastFailureReason', '') <> ''), 0),
+			coalesce((select payload from node_metrics nm where nm.node_id = n.id order by observed_at desc limit 1), '{}'::jsonb)
 		from nodes n
 		where ($1 = '' or coalesce(n.metadata->>'nodeRole', '') = $1)
 		  and ($2 = '' or coalesce(n.metadata->>'environment', '') = $2)
@@ -189,7 +197,7 @@ func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]typ
 	items := make([]types.NodeSummary, 0)
 	for rows.Next() {
 		var item types.NodeSummary
-		var capabilitiesJSON, metadataJSON []byte
+		var capabilitiesJSON, metadataJSON, latestMetricsJSON []byte
 		if err := rows.Scan(
 			&item.NodeID,
 			&item.NodeName,
@@ -204,6 +212,7 @@ func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]typ
 			&item.RuntimeSummary.PendingStateCount,
 			&item.RuntimeSummary.UnavailableStateCount,
 			&item.RuntimeSummary.FailureReasonCount,
+			&latestMetricsJSON,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -213,6 +222,10 @@ func (s *PostgresStore) ListNodes(ctx context.Context, filter NodeFilter) ([]typ
 			return nil, 0, err
 		}
 		item.Metadata, err = unmarshalMap(metadataJSON)
+		if err != nil {
+			return nil, 0, err
+		}
+		item.LatestMetrics, err = unmarshalMap(latestMetricsJSON)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -236,13 +249,14 @@ func (s *PostgresStore) GetNode(ctx context.Context, nodeID string) (types.NodeS
 			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimePath', '') = 'p2p'), 0),
 			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimeState', '') = 'pending'), 0),
 			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'runtimeState', '') = 'unavailable'), 0),
-			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'lastFailureReason', '') <> ''), 0)
+			coalesce((select count(*) from tunnels t where t.node_id = n.id and t.status = 'active' and coalesce(t.metadata->>'lastFailureReason', '') <> ''), 0),
+			coalesce((select payload from node_metrics nm where nm.node_id = n.id order by observed_at desc limit 1), '{}'::jsonb)
 		from nodes n
 		where n.id = $1
 	`, nodeID)
 	var item types.NodeSummary
-	var capabilitiesJSON, metadataJSON []byte
-	if err := row.Scan(&item.NodeID, &item.NodeName, &item.Status, &item.AgentVersion, &capabilitiesJSON, &metadataJSON, &item.LastSeenAt, &item.ActiveTunnels, &item.RuntimeSummary.RelayPathCount, &item.RuntimeSummary.P2PPathCount, &item.RuntimeSummary.PendingStateCount, &item.RuntimeSummary.UnavailableStateCount, &item.RuntimeSummary.FailureReasonCount); err != nil {
+	var capabilitiesJSON, metadataJSON, latestMetricsJSON []byte
+	if err := row.Scan(&item.NodeID, &item.NodeName, &item.Status, &item.AgentVersion, &capabilitiesJSON, &metadataJSON, &item.LastSeenAt, &item.ActiveTunnels, &item.RuntimeSummary.RelayPathCount, &item.RuntimeSummary.P2PPathCount, &item.RuntimeSummary.PendingStateCount, &item.RuntimeSummary.UnavailableStateCount, &item.RuntimeSummary.FailureReasonCount, &latestMetricsJSON); err != nil {
 		return types.NodeSummary{}, ErrNotFound
 	}
 	item.RuntimeSummary.ActiveTunnelCount = item.ActiveTunnels
@@ -252,6 +266,10 @@ func (s *PostgresStore) GetNode(ctx context.Context, nodeID string) (types.NodeS
 		return types.NodeSummary{}, err
 	}
 	item.Metadata, err = unmarshalMap(metadataJSON)
+	if err != nil {
+		return types.NodeSummary{}, err
+	}
+	item.LatestMetrics, err = unmarshalMap(latestMetricsJSON)
 	if err != nil {
 		return types.NodeSummary{}, err
 	}
@@ -466,8 +484,11 @@ func (s *PostgresStore) ListTunnels(ctx context.Context, filter TunnelFilter) ([
 
 func (s *PostgresStore) Counts(ctx context.Context) (Counts, error) {
 	counts := Counts{}
+	// Only count nodes that have been seen within the last 7 days (filters out stale/test nodes)
 	if err := s.pool.QueryRow(ctx, `
-		select count(*), count(*) filter (where status = 'online') from nodes
+		select count(*), count(*) filter (where status = 'online')
+		from nodes
+		where last_seen_at > now() - interval '7 days'
 	`).Scan(&counts.RegisteredNodes, &counts.OnlineNodes); err != nil {
 		return Counts{}, err
 	}
@@ -475,6 +496,16 @@ func (s *PostgresStore) Counts(ctx context.Context) (Counts, error) {
 		return Counts{}, err
 	}
 	return counts, nil
+}
+
+func (s *PostgresStore) PurgeStaleNodes(ctx context.Context, maxAge time.Duration) (int, error) {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM nodes WHERE last_seen_at < now() - $1
+	`, maxAge)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 func (s *PostgresStore) Close() error {
@@ -886,4 +917,139 @@ func (s *PostgresStore) ListAuditLogs(ctx context.Context, filter AuditLogFilter
 
 func (s *PostgresStore) DB() *pgxpool.Pool {
 	return s.pool
+}
+
+// ─── Certificate CRUD ───
+
+func (s *PostgresStore) CreateCertificate(ctx context.Context, spec types.CertificateSpec) (types.CertificateSpec, error) {
+	if spec.ID == "" {
+		spec.ID = fmt.Sprintf("cert-%d", time.Now().UnixNano())
+	}
+	now := time.Now().UTC()
+	spec.CreatedAt = now
+	spec.UpdatedAt = now
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO user_certificates (id, user_id, domain, cert_pem, key_pem, expires_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 ON CONFLICT (user_id, domain) DO UPDATE SET cert_pem=$4, key_pem=$5, expires_at=$6, updated_at=$8`,
+		spec.ID, spec.UserID, spec.Domain, spec.CertPEM, spec.KeyPEM, spec.ExpiresAt, spec.CreatedAt, spec.UpdatedAt,
+	)
+	if err != nil {
+		return types.CertificateSpec{}, fmt.Errorf("create certificate: %w", err)
+	}
+	spec.KeyPEM = ""
+	return spec, nil
+}
+
+func (s *PostgresStore) GetCertificate(ctx context.Context, id string) (types.CertificateSpec, error) {
+	var spec types.CertificateSpec
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, user_id, domain, cert_pem, expires_at, created_at, updated_at FROM user_certificates WHERE id=$1`, id,
+	).Scan(&spec.ID, &spec.UserID, &spec.Domain, &spec.CertPEM, &spec.ExpiresAt, &spec.CreatedAt, &spec.UpdatedAt)
+	if err != nil {
+		return types.CertificateSpec{}, fmt.Errorf("get certificate: %w", err)
+	}
+	return spec, nil
+}
+
+func (s *PostgresStore) ListCertificates(ctx context.Context, userID string) ([]types.CertificateSpec, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, user_id, domain, cert_pem, expires_at, created_at, updated_at FROM user_certificates WHERE user_id=$1 ORDER BY domain`, userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list certificates: %w", err)
+	}
+	defer rows.Close()
+	var items []types.CertificateSpec
+	for rows.Next() {
+		var spec types.CertificateSpec
+		if err := rows.Scan(&spec.ID, &spec.UserID, &spec.Domain, &spec.CertPEM, &spec.ExpiresAt, &spec.CreatedAt, &spec.UpdatedAt); err != nil {
+			return nil, err
+		}
+		spec.KeyPEM = ""
+		items = append(items, spec)
+	}
+	return items, nil
+}
+
+func (s *PostgresStore) DeleteCertificate(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM user_certificates WHERE id=$1`, id)
+	if err != nil {
+		return fmt.Errorf("delete certificate: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) FindCertificateForDomain(ctx context.Context, userID, domain string) (*types.CertificateSpec, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	var spec types.CertificateSpec
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, user_id, domain, cert_pem, key_pem, expires_at, created_at, updated_at FROM user_certificates WHERE user_id=$1 AND domain=$2`,
+		userID, domain,
+	).Scan(&spec.ID, &spec.UserID, &spec.Domain, &spec.CertPEM, &spec.KeyPEM, &spec.ExpiresAt, &spec.CreatedAt, &spec.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find certificate: %w", err)
+	}
+	return &spec, nil
+}
+
+func (s *PostgresStore) FindCertificateByDomain(ctx context.Context, domain string) (*types.CertificateSpec, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	var spec types.CertificateSpec
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, user_id, domain, cert_pem, key_pem, expires_at, created_at, updated_at FROM user_certificates WHERE domain=$1 LIMIT 1`,
+		domain,
+	).Scan(&spec.ID, &spec.UserID, &spec.Domain, &spec.CertPEM, &spec.KeyPEM, &spec.ExpiresAt, &spec.CreatedAt, &spec.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find certificate by domain: %w", err)
+	}
+	return &spec, nil
+}
+
+func (s *PostgresStore) ListManagedHTTPSDomains(ctx context.Context, userID string) ([]types.ManagedHTTPSDomain, error) {
+	rows, err := s.pool.Query(ctx, `
+		with current_user as (
+			select id, lower(email) as email
+			from users
+			where id = $1
+		), platform_domains as (
+			select lower(domain) as domain, 'platform'::text as source
+			from user_certificates
+			where user_id = $1
+		), cert_keeper_domains as (
+			select lower(c.domain) as domain, 'cert_keeper'::text as source
+			from current_user u
+			join ck_users cu on lower(cu.email) = u.email
+			join ck_certificates c on c.user_id = cu.id
+		), merged as (
+			select domain, source from platform_domains
+			union all
+			select domain, source from cert_keeper_domains
+		)
+		select domain,
+			case when bool_or(source = 'platform') then 'platform' else 'cert_keeper' end as source
+		from merged
+		where domain <> ''
+		group by domain
+		order by domain
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list managed https domains: %w", err)
+	}
+	defer rows.Close()
+	items := make([]types.ManagedHTTPSDomain, 0)
+	for rows.Next() {
+		var item types.ManagedHTTPSDomain
+		if err := rows.Scan(&item.Domain, &item.Source); err != nil {
+			return nil, fmt.Errorf("scan managed https domain: %w", err)
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }

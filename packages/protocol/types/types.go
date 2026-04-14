@@ -9,6 +9,8 @@ const (
 	AgentRelayStartByte      = byte(0x01)
 	AgentUDPRelayConnectPath = "/agent/reverse-udp"
 	AgentUDPRelayUpgrade     = "cloud-relay-udp"
+	AgentWebRelayConnectPath = "/agent/reverse-web"
+	AgentWebRelayUpgrade     = "cloud-relay-web"
 )
 
 type NodeCapabilities struct {
@@ -337,6 +339,26 @@ type AgentUDPRelayHello struct {
 	TargetPort int    `json:"targetPort"`
 }
 
+type CertificateSpec struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"userId"`
+	Domain    string    `json:"domain"`
+	CertPEM   string    `json:"certPem"`
+	KeyPEM    string    `json:"keyPem,omitempty"`
+	ExpiresAt time.Time `json:"expiresAt,omitempty"`
+	CreatedAt time.Time `json:"createdAt,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt,omitempty"`
+}
+
+type ManagedHTTPSDomain struct {
+	Domain string `json:"domain"`
+	Source string `json:"source"`
+}
+
+type ManagedHTTPSDomainListResponse struct {
+	Items []ManagedHTTPSDomain `json:"items"`
+}
+
 type UDPDatagramFrame struct {
 	SessionID string `json:"sessionId"`
 	Payload   []byte `json:"payload,omitempty"`
@@ -364,6 +386,7 @@ type NodeSummary struct {
 	Location        string             `json:"location,omitempty"`
 	Tags            []string           `json:"tags,omitempty"`
 	Isolated        bool               `json:"isolated,omitempty"`
+	LatestMetrics   map[string]string  `json:"latestMetrics,omitempty"`
 }
 
 type NodeRuntimeSummary struct {

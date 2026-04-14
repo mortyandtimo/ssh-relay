@@ -12,7 +12,7 @@ export default defineConfig(({ mode }) => {
   };
 
   return {
-    base: "/desktop/",
+    base: "./",
     plugins: [react()],
     server: {
       host: true,

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Cloud Relay Publisher",
+  "version": "0.1.0",
+  "identifier": "com.cloudrelay.publisher",
+  "build": {
+    "frontendDist": "../dist",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "驻阡陌",
+        "width": 1440,
+        "height": 960,
+        "minWidth": 1180,
+        "minHeight": 760,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi"],
+    "resources": [
+      "runtime/client-agent.exe"
+    ],
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "wix": {
+        "language": "zh-CN"
+      }
+    },
+    "shortDescription": "Publish local Windows services to cloud relay entries.",
+    "longDescription": "A Windows 10/11 desktop publisher for managing local services, cloud bindings, verification, and diagnostics."
+  }
+}

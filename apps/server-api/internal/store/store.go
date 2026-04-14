@@ -143,6 +143,7 @@ type Store interface {
 	DeleteTunnel(ctx context.Context, id string) error
 	ListTunnels(ctx context.Context, filter TunnelFilter) ([]types.TunnelSpec, error)
 	Counts(ctx context.Context) (Counts, error)
+	PurgeStaleNodes(ctx context.Context, maxAge time.Duration) (int, error)
 
 	BootstrapStatus(ctx context.Context) (bool, error)
 	BootstrapAdmin(ctx context.Context, params CreateUserParams) (types.UserSummary, error)
@@ -159,6 +160,14 @@ type Store interface {
 	DeleteUserSessions(ctx context.Context, userID string) error
 	WriteAuditLog(ctx context.Context, params AuditLogParams) (types.AuditLogEntry, error)
 	ListAuditLogs(ctx context.Context, filter AuditLogFilter) ([]types.AuditLogEntry, int, error)
+
+	CreateCertificate(ctx context.Context, spec types.CertificateSpec) (types.CertificateSpec, error)
+	GetCertificate(ctx context.Context, id string) (types.CertificateSpec, error)
+	ListCertificates(ctx context.Context, userID string) ([]types.CertificateSpec, error)
+	DeleteCertificate(ctx context.Context, id string) error
+	FindCertificateForDomain(ctx context.Context, userID, domain string) (*types.CertificateSpec, error)
+	FindCertificateByDomain(ctx context.Context, domain string) (*types.CertificateSpec, error)
+	ListManagedHTTPSDomains(ctx context.Context, userID string) ([]types.ManagedHTTPSDomain, error)
 
 	Close() error
 }

@@ -4,19 +4,25 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
+	mathrand "math/rand"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/25743/cloud-relay-platform/apps/server-api/internal/nginx"
 	"github.com/25743/cloud-relay-platform/apps/server-api/internal/store"
 	"github.com/25743/cloud-relay-platform/packages/protocol/types"
 )
@@ -44,10 +50,13 @@ type Server struct {
 	store                store.Store
 	controlExecutor      controlExecutor
 	relayTCPRuntimeURL   string
+	nginxManager         *nginx.Manager
+	acmeEmail            string
 	httpClient           *http.Client
 	mux                  *http.ServeMux
 	accessSecret         string
 	adminWebDir          string
+	publicEntryHost      string
 	accessTokenTTL       time.Duration
 	refreshTokenTTL      time.Duration
 	adminBootstrapSecret string
@@ -68,6 +77,7 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 		mux:                  http.NewServeMux(),
 		accessSecret:         envOrDefault("SERVER_API_ACCESS_SECRET", "cloud-relay-access-secret-dev"),
 		adminWebDir:          envOrDefault("SERVER_API_ADMIN_WEB_DIR", "/opt/cloud-relay-platform/admin-web"),
+		publicEntryHost:      envOrDefault("SERVER_API_PUBLIC_ENTRY_HOST", "82.156.236.104"),
 		accessTokenTTL:       15 * time.Minute,
 		refreshTokenTTL:      7 * 24 * time.Hour,
 		adminBootstrapSecret: strings.TrimSpace(os.Getenv("SERVER_API_ADMIN_BOOTSTRAP_SECRET")),
@@ -78,6 +88,18 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 	}
 	s.controlExecutor = newStateMutationControlExecutor(backend, newConfiguredControlExecutor())
 	s.routes()
+
+	// Initialize nginx manager if config dir is set
+	nginxConfigDir := envOrDefault("SERVER_API_NGINX_CONFIG_DIR", "")
+	nginxCertDir := envOrDefault("SERVER_API_NGINX_CERT_DIR", "")
+	nginxBin := envOrDefault("SERVER_API_NGINX_BIN", "")
+	if nginxConfigDir != "" && nginxCertDir != "" {
+		s.nginxManager = nginx.NewManager(nginxConfigDir, nginxCertDir, nginxBin, backend)
+		os.MkdirAll(nginxConfigDir, 0755)
+		os.MkdirAll(nginxCertDir, 0700)
+		s.acmeEmail = envOrDefault("SERVER_API_ACME_EMAIL", "")
+	}
+
 	return s
 }
 
@@ -98,6 +120,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/internal/routes/udp", s.handleUDPRoutes)
 	s.mux.HandleFunc("/internal/routes/http", s.handleHTTPRoutes)
 	s.mux.HandleFunc("/internal/routes/https", s.handleHTTPSRoutes)
+
+	s.mux.HandleFunc("/api/certificates", s.handleCertificates)
+	s.mux.HandleFunc("/api/certificates/auto-issue", s.handleCertificateAutoIssue)
+	s.mux.HandleFunc("/api/certificates/", s.handleCertificateByID)
 
 	s.mux.HandleFunc("/api/auth/bootstrap-status", s.handleBootstrapStatus)
 	s.mux.HandleFunc("/api/auth/bootstrap", s.handleBootstrap)
@@ -120,6 +146,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/control-actions/tunnel/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelControlActionOptions)))
 	s.mux.Handle("/api/control-actions", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleControlActions)))
 	s.mux.Handle("/api/server/metrics", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleServerMetrics)))
+	s.mux.Handle("/api/managed-domains/https", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleManagedHTTPSDomains)))
 	s.mux.Handle("/api/relay/tcp/runtime", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleRelayTCPRuntime)))
 	s.mux.Handle("/api/audit-logs", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleAuditLogs)))
 
@@ -187,6 +214,13 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "accepted", "observedAt": time.Now().UTC()})
+
+	// Probabilistically purge stale nodes (~1% of heartbeats)
+	if mathrand.Intn(100) == 0 {
+		if purged, err := s.store.PurgeStaleNodes(r.Context(), 7*24*time.Hour); err == nil && purged > 0 {
+			log.Printf("purged %d stale nodes (unseen > 7d)", purged)
+		}
+	}
 }
 
 func (s *Server) handleAgentTunnels(w http.ResponseWriter, r *http.Request) {
@@ -689,6 +723,7 @@ func (s *Server) handleTunnels(w http.ResponseWriter, r *http.Request) {
 		}
 		tunnel = s.withTunnelHealthOne(r.Context(), tunnel)
 		s.writeAudit(r, "create_tunnel", "tunnel", tunnel.ID, map[string]string{"nodeId": tunnel.NodeID, "publicPort": fmt.Sprintf("%d", tunnel.PublicPort)})
+		s.triggerNginxRegen()
 		writeJSON(w, http.StatusCreated, tunnel)
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
@@ -783,6 +818,7 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 		}
 		tunnel = s.withTunnelHealthOne(r.Context(), tunnel)
 		s.writeAudit(r, "update_tunnel", "tunnel", tunnel.ID, map[string]string{"nodeId": tunnel.NodeID, "publicPort": fmt.Sprintf("%d", tunnel.PublicPort), "status": tunnel.Status})
+		s.triggerNginxRegen()
 		writeJSON(w, http.StatusOK, tunnel)
 	case http.MethodDelete:
 		tunnel, err := s.store.GetTunnel(r.Context(), id)
@@ -803,6 +839,7 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.writeAudit(r, "delete_tunnel", "tunnel", id, map[string]string{"nodeId": tunnel.NodeID, "publicPort": fmt.Sprintf("%d", tunnel.PublicPort), "targetHost": tunnel.TargetHost, "targetPort": fmt.Sprintf("%d", tunnel.TargetPort)})
+		s.triggerNginxRegen()
 		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut+", "+http.MethodDelete)
@@ -850,7 +887,7 @@ func (s *Server) handleTunnelProbe(w http.ResponseWriter, r *http.Request, id st
 }
 
 func (s *Server) probeTunnel(ctx context.Context, tunnel types.TunnelSpec) (types.TunnelProbeResult, error) {
-	entry, err := probeTunnelEntry(tunnel)
+	entry, err := s.probeTunnelEntry(tunnel)
 	if err != nil {
 		return types.TunnelProbeResult{}, err
 	}
@@ -874,11 +911,15 @@ func (s *Server) probeTunnel(ctx context.Context, tunnel types.TunnelSpec) (type
 	return result, nil
 }
 
-func probeTunnelEntry(tunnel types.TunnelSpec) (string, error) {
+func (s *Server) probeTunnelEntry(tunnel types.TunnelSpec) (string, error) {
 	probePath := normalizeProbePath(tunnel.ProbePath)
 	switch tunnel.Type {
 	case "http":
-		return fmt.Sprintf("http://82.156.236.104:%d%s", tunnel.PublicPort, probePath), nil
+		publicHost := strings.TrimSpace(s.publicEntryHost)
+		if publicHost == "" {
+			return "", errors.New("http tunnel requires public entry host for probe")
+		}
+		return fmt.Sprintf("http://%s:%d%s", publicHost, tunnel.PublicPort, probePath), nil
 	case "https":
 		if strings.TrimSpace(tunnel.Domain) == "" {
 			return "", errors.New("https tunnel requires domain for probe")
@@ -911,6 +952,27 @@ func (s *Server) handleServerMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, types.ServerMetrics{Service: "server-api", StartedAt: s.startedAt, RegisteredNodes: counts.RegisteredNodes, OnlineNodes: counts.OnlineNodes, ConfiguredTunnels: counts.ConfiguredTunnels, ProtocolRelayCount: 3})
+}
+
+func (s *Server) handleManagedHTTPSDomains(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	user, ok := authUserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	items, err := s.store.ListManagedHTTPSDomains(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if items == nil {
+		items = []types.ManagedHTTPSDomain{}
+	}
+	writeJSON(w, http.StatusOK, types.ManagedHTTPSDomainListResponse{Items: items})
 }
 
 func (s *Server) handleTCPRoutes(w http.ResponseWriter, r *http.Request) {
@@ -1608,4 +1670,198 @@ func parseAllowedOrigins(raw string) map[string]struct{} {
 		out[origin] = struct{}{}
 	}
 	return out
+}
+
+// ─── Certificate API ───
+
+func (s *Server) handleCertificates(w http.ResponseWriter, r *http.Request) {
+	user, err := s.authenticateRequest(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.store.ListCertificates(r.Context(), user.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if items == nil {
+			items = []types.CertificateSpec{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	case http.MethodPost:
+		var spec types.CertificateSpec
+		if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid certificate payload")
+			return
+		}
+		spec.UserID = user.ID
+		spec.Domain = strings.ToLower(strings.TrimSpace(spec.Domain))
+		if spec.Domain == "" || spec.CertPEM == "" || spec.KeyPEM == "" {
+			writeError(w, http.StatusBadRequest, "domain, certPem, and keyPem are required")
+			return
+		}
+		// Parse expiration from the PEM certificate
+		if spec.ExpiresAt.IsZero() {
+			if block, _ := pem.Decode([]byte(spec.CertPEM)); block != nil {
+				if cert, err := x509.ParseCertificate(block.Bytes); err == nil && !cert.NotAfter.IsZero() {
+					spec.ExpiresAt = cert.NotAfter.UTC()
+				}
+			}
+		}
+		result, err := s.store.CreateCertificate(r.Context(), spec)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.triggerNginxRegen()
+		writeJSON(w, http.StatusCreated, result)
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+	}
+}
+
+func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request) {
+	user, err := s.authenticateRequest(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/certificates/"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "certificate id is required")
+		return
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		cert, err := s.store.GetCertificate(r.Context(), id)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		if cert.UserID != user.ID {
+			writeError(w, http.StatusForbidden, "not your certificate")
+			return
+		}
+		if err := s.store.DeleteCertificate(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.triggerNginxRegen()
+		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
+	default:
+		writeMethodNotAllowed(w, http.MethodDelete)
+	}
+}
+
+func (s *Server) handleCertificateAutoIssue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	user, err := s.authenticateRequest(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req struct {
+		Domain string `json:"domain"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	domain := strings.ToLower(strings.TrimSpace(req.Domain))
+	if domain == "" {
+		writeError(w, http.StatusBadRequest, "domain is required")
+		return
+	}
+
+	// Run certbot with HTTP-01 challenge via nginx webroot
+	certDir := filepath.Join(os.TempDir(), "certbot-"+domain)
+	os.RemoveAll(certDir)
+
+	// Ensure webroot directory exists for ACME challenge
+	webrootDir := "/www/server/nginx/html"
+	acmeDir := filepath.Join(webrootDir, ".well-known", "acme-challenge")
+	os.MkdirAll(acmeDir, 0755)
+
+	cmd := exec.CommandContext(r.Context(),
+		"certbot", "certonly",
+		"--non-interactive",
+		"--agree-tos",
+		"--email", s.acmeEmail,
+		"-d", domain,
+		"--webroot",
+		"--webroot-path", webrootDir,
+		"--cert-name", domain,
+		"--config-dir", certDir,
+		"--work-dir", filepath.Join(certDir, "work"),
+		"--logs-dir", filepath.Join(certDir, "logs"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		os.RemoveAll(certDir)
+		log.Printf("certbot auto-issue failed for %s: %s", domain, string(output))
+		writeError(w, http.StatusBadGateway, "证书自动签发失败: "+string(output))
+		return
+	}
+
+	// Read the issued certificate files
+	certPath := filepath.Join(certDir, "live", domain, "fullchain.pem")
+	keyPath := filepath.Join(certDir, "live", domain, "privkey.pem")
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		os.RemoveAll(certDir)
+		writeError(w, http.StatusInternalServerError, "读取签发证书失败")
+		return
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		os.RemoveAll(certDir)
+		writeError(w, http.StatusInternalServerError, "读取签发私钥失败")
+		return
+	}
+	os.RemoveAll(certDir)
+
+	spec := types.CertificateSpec{
+		UserID:  user.ID,
+		Domain:  domain,
+		CertPEM: string(certPEM),
+		KeyPEM:  string(keyPEM),
+	}
+	// Parse expiration
+	if block, _ := pem.Decode(certPEM); block != nil {
+		if cert, err := x509.ParseCertificate(block.Bytes); err == nil && !cert.NotAfter.IsZero() {
+			spec.ExpiresAt = cert.NotAfter.UTC()
+		}
+	}
+
+	result, err := s.store.CreateCertificate(r.Context(), spec)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.triggerNginxRegen()
+	log.Printf("auto-issued certificate for %s (expires %s)", domain, spec.ExpiresAt.Format("2006-01-02"))
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) triggerNginxRegen() {
+	if s.nginxManager == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.nginxManager.RegenerateConfig(ctx); err != nil {
+			log.Printf("nginx regen failed: %v", err)
+		}
+	}()
 }

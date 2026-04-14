@@ -1,0 +1,57 @@
+[package]
+name = "cloud-relay-publisher"
+version = "0.1.0"
+edition = "2021"
+description = "驻阡陌 — Cloud Relay Publisher for Windows"
+license = "UNLICENSED"
+authors = ["Codex"]
+
+[package.metadata.tauri]
+product-name = "驻阡陌"
+
+[package.metadata.packager]
+product-name = "驻阡陌"
+version = "0.1.0"
+identifier = "com.cloudrelay.publisher"
+publisher = "Cloud Relay"
+description = "驻阡陌 — 将本地服务发布到云端中转入口"
+long-description = "A Windows 10/11 desktop publisher for managing local services, cloud bindings, verification, and diagnostics."
+formats = ["wix"]
+out-dir = "/root/cloud-relay-platform/outputs/windows-publisher/packager"
+binaries-dir = "/root/cloud-relay-platform/apps/desktop-console/src-tauri/target/x86_64-pc-windows-msvc/release"
+target-triple = "x86_64-pc-windows-msvc"
+
+[[package.metadata.packager.binaries]]
+path = "cloud-relay-publisher"
+main = true
+
+[[package.metadata.packager.resources]]
+src = "/root/cloud-relay-platform/apps/desktop-console/src-tauri/runtime/client-agent.exe"
+target = "runtime/client-agent.exe"
+
+[[package.metadata.packager.resources]]
+src = "/root/cloud-relay-platform/deploy/windows/publisher/README.txt"
+target = "README.txt"
+
+[[package.metadata.packager.resources]]
+src = "/root/cloud-relay-platform/deploy/windows/desktop/desktop-config.json.example"
+target = "desktop-config.json"
+
+[package.metadata.packager.wix]
+languages = ["zh-CN"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.21"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Security_Cryptography", "Win32_System_Registry"] }
+
+[features]
+default = []

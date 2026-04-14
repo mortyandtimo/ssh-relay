@@ -372,11 +372,12 @@ func TestTunnelProbeSupportsHTTPAndHTTPS(t *testing.T) {
 		_ = err
 	}
 
-	httpEntry, err := probeTunnelEntry(httpTunnel)
+	server.publicEntryHost = httpURL.Hostname()
+	httpEntry, err := server.probeTunnelEntry(httpTunnel)
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpsEntry, err := probeTunnelEntry(httpsTunnel)
+	httpsEntry, err := server.probeTunnelEntry(httpsTunnel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +405,7 @@ func TestTunnelProbeSupportsHTTPAndHTTPS(t *testing.T) {
 	if !httpOut.Success || httpOut.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected http probe result: %+v", httpOut)
 	}
-	if httpOut.TargetEntry != fmt.Sprintf("http://82.156.236.104:%d/", httpPort) {
+	if httpOut.TargetEntry != fmt.Sprintf("http://%s:%d/", httpURL.Hostname(), httpPort) {
 		t.Fatalf("expected default probePath / in http targetEntry, got %q", httpOut.TargetEntry)
 	}
 	httpGetReq := httptest.NewRequest(http.MethodGet, "/api/tunnels/probe-http", nil)

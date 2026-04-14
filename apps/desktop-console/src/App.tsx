@@ -1,33 +1,39 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
 import type {
+  CertificateSpec,
   ControlActionOption,
   ControlActionRequest,
   ControlActionResponse,
   ControlPanelSummary,
-  ControlSurface,
+  ManagedHTTPSDomain,
   NodeSummary,
+  ServerMetrics,
   TunnelSpec,
   TunnelProbeResult,
-  TunnelTypeTab,
   UserSummary,
 } from "../../../packages/desktop-core/src/types";
+import { formatDate } from "../../../packages/desktop-core/src/utils";
 import {
-  capabilitySummary,
-  checkStateLabel,
-  checkStateTone,
-  controlOptionStateLabel,
-  controlOptionTone,
-  formatDate,
-  nodeAgentDeploymentLabel,
-  publicEntry,
-  resolveLocalNodeBinding,
-  runtimeLabel,
-  statusClass,
-  tunnelTabs,
-} from "../../../packages/desktop-core/src/utils";
-import { buildDesktopControlResultView } from "./controlResultView";
+  buildDiagnosticsItems,
+  buildQuickCommand,
+  buildQuickCommandWindows,
+  defaultPublicPortForProtocol,
+  deriveCloudEntry,
+  evaluateRuleState,
+  normalizeProbePath,
+  protocolCapabilitySummary,
+  protocolEntryHint,
+  type CloudEntry,
+  type DiagnosticItem,
+  type LocalServiceDraft,
+  type PublishProtocol,
+  type PublishRuleForm,
+} from "./app-services/publisherModel";
 import { ControlResultBlock } from "./controlResultBlock";
+import { createTauriDesktopTransport, ensureRuntimeStarted, loadAgentTraffic, loadDesktopAppUsage, loadDesktopHostPaths, loadRuntimeStatus, openDesktopExternal, openRuntimeLog, stopRuntime, windowMinimize, windowRequestClose, windowStartDrag, windowToggleMaximize, type AgentTrafficSnapshot, type DesktopAppUsage, type RuntimeStatus, type LoginProfilesFile, type AppConfig, readLoginProfiles, saveLoginProfile, deleteLoginProfile, decryptLoginPassword, saveAppConfig, loadAppConfig, appExit, setAutoStart } from "./desktopHost";
 
 type DesktopWindowEnv = {
   apiBaseUrl?: string;
@@ -40,22 +46,6 @@ declare global {
   }
 }
 
-const runtimeDesktopEnv = typeof window !== "undefined" ? window.__DESKTOP_ENV__ || {} : {};
-const hasRuntimeAPIBaseURL = typeof window !== "undefined" && Boolean(window.__DESKTOP_ENV__) && Object.prototype.hasOwnProperty.call(window.__DESKTOP_ENV__, "apiBaseUrl");
-const api = createDesktopApi(hasRuntimeAPIBaseURL ? runtimeDesktopEnv.apiBaseUrl || "" : import.meta.env.VITE_API_BASE_URL || "");
-const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
-const desktopPublicHost = (() => {
-  const configured = (runtimeDesktopEnv.publicEntryHost || import.meta.env.VITE_PUBLIC_ENTRY_HOST || "").trim();
-  if (configured) return configured;
-  if (typeof window !== "undefined") {
-    const hostname = window.location.hostname.trim();
-    if (hostname) return hostname;
-  }
-  return "82.156.236.104";
-})();
-
-type DesktopMode = "local-node" | "operator";
-
 type TunnelEditForm = {
   name: string;
   targetHost: string;
@@ -66,53 +56,587 @@ type TunnelEditForm = {
   transportPolicy: string;
 };
 
+type RelayEndpointPreset = {
+  id: string;
+  label: string;
+  apiBaseUrl: string;
+  publicHost: string;
+  note: string;
+};
+
+type RouteMeta = {
+  path: string;
+  key: "dashboard" | "services" | "publish" | "diagnostics" | "settings";
+  label: string;
+  icon: string;
+};
+
+
+type DrawerState =
+  | { kind: "rule"; tunnelId: string }
+  | { kind: "create-rule" }
+  | { kind: "service"; serviceId: string | null }
+  | null;
+
+const runtimeDesktopEnv = typeof window !== "undefined" ? window.__DESKTOP_ENV__ || {} : {};
+const runtimeInjectedApiBaseUrl = (runtimeDesktopEnv.apiBaseUrl || "").trim();
+const runtimeInjectedPublicEntryHost = (runtimeDesktopEnv.publicEntryHost || "").trim();
+const hasRuntimeInjectedApiBaseUrl = Boolean(runtimeInjectedApiBaseUrl);
+const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
+const defaultDesktopPublicHost = (() => {
+  const configured = (runtimeInjectedPublicEntryHost || import.meta.env.VITE_PUBLIC_ENTRY_HOST || "").trim();
+  if (configured) return configured;
+  if (typeof window !== "undefined") {
+    const hostname = window.location.hostname.trim();
+    if (hostname) return hostname;
+  }
+  return "82.156.236.104";
+})();
+
+const savedRelayEndpoint = (() => {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem("desktop-publisher-relay-endpoint");
+    return raw ? (JSON.parse(raw) as { apiBaseUrl?: string; publicHost?: string }) : null;
+  } catch {
+    return null;
+  }
+})();
+
+const publisherRoutes: RouteMeta[] = [
+  { path: "/dashboard", key: "dashboard", label: "仪表盘", icon: "fas fa-tachometer-alt" },
+  { path: "/services", key: "services", label: "本地服务", icon: "fas fa-network-wired" },
+  { path: "/publish", key: "publish", label: "发布管理", icon: "fas fa-sitemap" },
+  { path: "/diagnostics", key: "diagnostics", label: "诊断中心", icon: "fas fa-bug" },
+  { path: "/settings", key: "settings", label: "设置", icon: "fas fa-cog" },
+];
+
+const protocolList: PublishProtocol[] = ["http", "https", "tcp", "udp", "socks5"];
+
+const initialLocalServiceForm = {
+  name: "",
+  targetHost: "127.0.0.1",
+  targetPort: "",
+  note: "",
+};
+
+const initialPublishRuleForm: PublishRuleForm = {
+  localServiceId: "",
+  protocol: "http",
+  publicPort: "",
+  domain: "",
+  probePath: "/",
+  transportPolicy: "relay_only",
+};
+
+const relayEndpointPresets: RelayEndpointPreset[] = (() => {
+  const items: RelayEndpointPreset[] = [];
+  const seenApiBaseUrls = new Set<string>();
+
+  const pushPreset = (preset: RelayEndpointPreset | null) => {
+    if (!preset) return;
+    const normalizedApiBaseUrl = preset.apiBaseUrl.trim().replace(/\/+$/, "");
+    if (preset.id !== "custom") {
+      if (!normalizedApiBaseUrl || seenApiBaseUrls.has(normalizedApiBaseUrl)) return;
+      seenApiBaseUrls.add(normalizedApiBaseUrl);
+    }
+    items.push({
+      ...preset,
+      apiBaseUrl: normalizedApiBaseUrl,
+      publicHost: preset.publicHost.trim(),
+    });
+  };
+
+  pushPreset(hasRuntimeInjectedApiBaseUrl
+    ? {
+        id: "runtime",
+        label: "当前环境",
+        apiBaseUrl: runtimeInjectedApiBaseUrl,
+        publicHost: runtimeInjectedPublicEntryHost,
+        note: "",
+      }
+    : null);
+
+  pushPreset(savedRelayEndpoint?.apiBaseUrl
+    ? {
+        id: "recent",
+        label: "最近使用",
+        apiBaseUrl: (savedRelayEndpoint.apiBaseUrl || "").trim(),
+        publicHost: (savedRelayEndpoint.publicHost || "").trim(),
+        note: "",
+      }
+    : null);
+
+  pushPreset({
+    id: "custom",
+    label: "自定义",
+    apiBaseUrl: "",
+    publicHost: "",
+    note: "",
+  });
+
+  return items;
+})();
+
+const initialRelayEndpointPreset = relayEndpointPresets[0];
+
+const emptyRuntimeStatus: RuntimeStatus = {
+  available: false,
+  running: false,
+  healthy: false,
+  pid: null,
+  startedAt: null,
+  nodeId: "",
+  nodeName: "",
+  apiBaseUrl: "",
+  relayTcpUrl: "",
+  relayUdpUrl: "",
+  executablePath: "",
+  workDir: "",
+  stdoutLogPath: "",
+  stderrLogPath: "",
+  lastError: "",
+};
+
+const emptyUsage: DesktopAppUsage = {
+  available: false,
+  cpuPercent: null,
+  memoryMb: null,
+  readBytes: null,
+  writeBytes: null,
+  sampledAt: Date.now(),
+};
+
 export default function App() {
-  const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(hasRuntimeInjectedApiBaseUrl ? null : false);
   const [currentUser, setCurrentUser] = useState<UserSummary | null>(null);
   const [nodes, setNodes] = useState<NodeSummary[]>([]);
   const [tunnels, setTunnels] = useState<TunnelSpec[]>([]);
-  const [mode, setMode] = useState<DesktopMode | null>(null);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<TunnelTypeTab>("tcp");
-  const [selectedTunnelId, setSelectedTunnelId] = useState<string | null>(null);
+  const [serverMetrics, setServerMetrics] = useState<ServerMetrics | null>(null);
+  const [localServices, setLocalServices] = useState<LocalServiceDraft[]>([]);
+  const [localServiceForm, setLocalServiceForm] = useState(initialLocalServiceForm);
+  const [publishForm, setPublishForm] = useState<PublishRuleForm>(initialPublishRuleForm);
+  const [selectedRelayPresetId, setSelectedRelayPresetId] = useState(initialRelayEndpointPreset.id);
+  const [apiDraft, setApiDraft] = useState(initialRelayEndpointPreset.apiBaseUrl);
+  const [cloudPublicHost, setCloudPublicHost] = useState(initialRelayEndpointPreset.publicHost || defaultDesktopPublicHost);
+  const [connectionReady, setConnectionReady] = useState(hasRuntimeInjectedApiBaseUrl);
+  const [connectionStatus, setConnectionStatus] = useState<"idle" | "checking" | "connected" | "failed">(hasRuntimeInjectedApiBaseUrl ? "connected" : "idle");
+  const [drawerState, setDrawerState] = useState<DrawerState>(null);
   const [editForm, setEditForm] = useState<TunnelEditForm | null>(null);
+  const [probeResults, setProbeResults] = useState<Record<string, TunnelProbeResult>>({});
+  const [tunnelActionOptions, setTunnelActionOptions] = useState<ControlActionOption[]>([]);
+  const [tunnelControlPanel, setTunnelControlPanel] = useState<ControlPanelSummary | null>(null);
+  const [tunnelControlContextAt, setTunnelControlContextAt] = useState("");
+  const [controlNote, setControlNote] = useState("");
+  const [controlResult, setControlResult] = useState<ControlActionResponse | null>(null);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [toastState, setToastState] = useState<{ text: string; tone: "info" | "danger"; phase: "show" | "fade" | "gone" } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [syncIssue, setSyncIssue] = useState("");
   const [busy, setBusy] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState("");
-  const [controlNote, setControlNote] = useState("");
-  const [controlResult, setControlResult] = useState<ControlActionResponse | null>(null);
-  const [probeResults, setProbeResults] = useState<Record<string, TunnelProbeResult>>({});
-  const [nodeActionOptions, setNodeActionOptions] = useState<ControlActionOption[]>([]);
-  const [tunnelActionOptions, setTunnelActionOptions] = useState<ControlActionOption[]>([]);
-  const [nodeControlPanel, setNodeControlPanel] = useState<ControlPanelSummary | null>(null);
-  const [tunnelControlPanel, setTunnelControlPanel] = useState<ControlPanelSummary | null>(null);
-  const [nodeControlContextAt, setNodeControlContextAt] = useState("");
-  const [tunnelControlContextAt, setTunnelControlContextAt] = useState("");
+  const [desktopHostPaths, setDesktopHostPaths] = useState({ configDir: "读取中...", logDir: "读取中...", available: false });
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>(emptyRuntimeStatus);
+  const [appUsage, setAppUsage] = useState<DesktopAppUsage>(emptyUsage);
+  const [trafficRate, setTrafficRate] = useState({ downRate: 0, upRate: 0 });
+  const [agentTraffic, setAgentTraffic] = useState<AgentTrafficSnapshot | null>(null);
+  const [tunnelRates, setTunnelRates] = useState<Map<string, { downRate: number; upRate: number }>>(new Map());
+  const agentTrafficPrevRef = useRef<{ sampledAt: number; downTotal: number; upTotal: number; tunnels: Map<string, { downBytes: number; upBytes: number }> } | null>(null);
   const refreshInFlightRef = useRef(false);
+  const appUsageSampleRef = useRef<DesktopAppUsage | null>(null);
+  const [loginProfiles, setLoginProfiles] = useState<LoginProfilesFile | null>(null);
+  const [savePassword, setSavePassword] = useState(false);
+  const [autoLogin, setAutoLogin] = useState(false);
+  const [appConfig, setAppConfig] = useState<AppConfig>({ closeAction: "ask", silentStart: false });
+  const [closeDialogOpen, setCloseDialogOpen] = useState(false);
+  const [profileListOpen, setProfileListOpen] = useState(false);
+  const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<string | null>(null);
+  const [certificates, setCertificates] = useState<CertificateSpec[]>([]);
+  const [certFormDomain, setCertFormDomain] = useState("");
+  const [certFormCert, setCertFormCert] = useState("");
+  const [certFormKey, setCertFormKey] = useState("");
+  const [certBusy, setCertBusy] = useState(false);
+  const [managedHTTPSDomains, setManagedHTTPSDomains] = useState<ManagedHTTPSDomain[]>([]);
+  const managedHTTPSDomainValues = useMemo(() => managedHTTPSDomains.map((item) => item.domain), [managedHTTPSDomains]);
+
+  function clearToastTimers() {
+    if (toastTimerRef.current) { clearTimeout(toastTimerRef.current); toastTimerRef.current = null; }
+    if (fadeTimerRef.current) { clearTimeout(fadeTimerRef.current); fadeTimerRef.current = null; }
+  }
+
+  function toastAutoDismissMs(text: string) {
+    // 1.5s–3s based on character count: ~80ms per char, clamped
+    return Math.max(1500, Math.min(3000, 800 + text.length * 80));
+  }
+
+  function showToast(text: string, tone: "info" | "danger") {
+    clearToastTimers();
+    setToastState({ text, tone, phase: "show" });
+    const ms = toastAutoDismissMs(text);
+    toastTimerRef.current = setTimeout(() => {
+      setToastState((prev) => prev ? { ...prev, phase: "fade" } : null);
+      fadeTimerRef.current = setTimeout(() => {
+        setToastState(null);
+        fadeTimerRef.current = null;
+      }, 500);
+      toastTimerRef.current = null;
+    }, ms);
+  }
+
+  function handleToastMouseEnter() {
+    clearToastTimers();
+    setToastState((prev) => prev ? { ...prev, phase: "show" } : null);
+  }
+
+  function handleToastMouseLeave() {
+    if (!toastState || toastState.phase === "gone") return;
+    clearToastTimers();
+    const ms = toastAutoDismissMs(toastState.text);
+    toastTimerRef.current = setTimeout(() => {
+      setToastState((prev) => prev ? { ...prev, phase: "fade" } : null);
+      fadeTimerRef.current = setTimeout(() => {
+        setToastState(null);
+        fadeTimerRef.current = null;
+      }, 500);
+      toastTimerRef.current = null;
+    }, ms);
+  }
+
+  // Bridge: whenever error or message changes, show a toast
+  useEffect(() => {
+    if (error) showToast(error, "danger");
+  }, [error]);
+  useEffect(() => {
+    if (message) showToast(message, "info");
+  }, [message]);
+
+  // Cleanup toast timers on unmount
+  useEffect(() => () => clearToastTimers(), []);
+
+  // Load login profiles and app config on mount; attempt auto-login
+  const autoLoginAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (autoLoginAttemptedRef.current) return;
+    autoLoginAttemptedRef.current = true;
+    void (async () => {
+      const [profiles, config] = await Promise.all([
+        readLoginProfiles(),
+        loadAppConfig(),
+      ]);
+      if (profiles) setLoginProfiles(profiles);
+      if (config) setAppConfig({ closeAction: config.closeAction || "ask", silentStart: config.silentStart || false, autoStart: config.autoStart || false });
+      // Sync auto-start registry with saved config
+      if (config?.autoStart && desktopTransport) {
+        try { await setAutoStart(true); } catch { /* ignore */ }
+      }
+      // Window bounds are restored by Rust setup before first paint
+      // Pre-fill last used email and check if it has a saved password
+      if (profiles?.profiles.length) {
+        const lastEmail = profiles.lastUsedEmail || profiles.profiles[0].email;
+        const lastProfile = profiles.profiles.find((p) => p.email === lastEmail);
+        setLoginForm((prev) => ({ ...prev, email: lastEmail }));
+        if (desktopTransport && lastProfile) {
+          try {
+            const pw = await decryptLoginPassword(lastEmail);
+            if (pw) {
+              setLoginForm((prev) => ({ ...prev, password: pw }));
+              setSavePassword(true);
+              setAutoLogin(lastProfile.autoLogin);
+            } else {
+              setSavePassword(false);
+              setAutoLogin(false);
+            }
+          } catch {
+            setSavePassword(false);
+            setAutoLogin(false);
+          }
+        }
+      }
+      // Auto-login at mount: only if we already have an API base URL (e.g. from runtime env)
+      // If not, it will be retried when connection becomes ready (see effect below)
+    })();
+  }, []);
+
+  const effectiveApiBaseUrl = hasRuntimeInjectedApiBaseUrl ? runtimeInjectedApiBaseUrl : connectionReady ? apiDraft.replace(/\/$/, "") : "";
+  const desktopTransport = useMemo(() => createTauriDesktopTransport(), []);
+  const desktopApi = useMemo(() => createDesktopApi(effectiveApiBaseUrl, desktopTransport || undefined), [effectiveApiBaseUrl, desktopTransport]);
+
+  // Auto-login when connection becomes ready (user selects relay)
+  const autoLoginOnConnectRef = useRef(false);
+  useEffect(() => {
+    if (autoLoginOnConnectRef.current) return;
+    if (!connectionReady || !effectiveApiBaseUrl || currentUser) return;
+    const autoProfile = loginProfiles?.profiles.find((p) => p.autoLogin);
+    if (!autoProfile) return;
+    autoLoginOnConnectRef.current = true;
+    void (async () => {
+      try {
+        const password = await decryptLoginPassword(autoProfile.email);
+        const auth = await desktopApi.login(autoProfile.email, password);
+        setCurrentUser(auth.user);
+        if (!runtimeReady && effectiveApiBaseUrl) {
+          await startEmbeddedRuntime(effectiveApiBaseUrl, false);
+        }
+        await loadSnapshot();
+        setLoginForm({ email: autoProfile.email, password });
+        setSavePassword(true);
+        setAutoLogin(true);
+      } catch { /* auto-login failed */ }
+    })();
+  }, [connectionReady, effectiveApiBaseUrl]);
+
+  const reloadCertificateState = useCallback(async () => {
+    const [certificatesResult, managedDomainsResult] = await Promise.allSettled([
+      desktopApi.listCertificates(),
+      desktopApi.listManagedHTTPSDomains(),
+    ]);
+    if (certificatesResult.status === "fulfilled") {
+      setCertificates(certificatesResult.value.items || []);
+    }
+    if (managedDomainsResult.status === "fulfilled") {
+      setManagedHTTPSDomains(managedDomainsResult.value.items || []);
+    } else {
+      setManagedHTTPSDomains([]);
+    }
+  }, [desktopApi]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    void reloadCertificateState();
+  }, [currentUser, reloadCertificateState]);
+
+  useEffect(() => {
+    if (!desktopTransport) return;
+    let unlisten: undefined | (() => void);
+    void listen<string>("app-already-open", (event) => {
+      showToast(event.payload || "驻阡陌已经开启。", "info");
+    }).then((dispose) => {
+      unlisten = dispose;
+    }).catch(() => {
+      unlisten = undefined;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [desktopTransport]);
+
+  const runtimeNodeId = runtimeStatus.nodeId.trim();
+  const runtimeReady = runtimeStatus.available && runtimeStatus.running && runtimeStatus.healthy;
+  const runtimeRelayReady = runtimeReady && Boolean(runtimeStatus.relayTcpUrl);
+
+  useEffect(() => {
+    if (location.pathname === "/") {
+      navigate("/dashboard", { replace: true });
+      return;
+    }
+    if (!publisherRoutes.some((route) => route.path === location.pathname)) {
+      navigate("/dashboard", { replace: true });
+    }
+  }, [location.pathname, navigate]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem("desktop-publisher-local-services");
+    if (!stored) return;
+    try {
+      const parsed = JSON.parse(stored) as LocalServiceDraft[];
+      if (Array.isArray(parsed)) {
+        setLocalServices(parsed);
+      }
+    } catch {
+      setLocalServices([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("desktop-publisher-local-services", JSON.stringify(localServices));
+  }, [localServices]);
+
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadRuntime() {
+      const payload = await loadRuntimeStatus();
+      if (!cancelled) {
+        setRuntimeStatus((prev) => {
+          // Only update if key fields changed
+          if (prev.available === payload.available && prev.running === payload.running &&
+              prev.healthy === payload.healthy && prev.nodeId === payload.nodeId &&
+              prev.relayTcpUrl === payload.relayTcpUrl && prev.lastError === payload.lastError) {
+            return prev; // same reference → no re-render
+          }
+          return payload;
+        });
+      }
+    }
+    void loadRuntime();
+    const timer = window.setInterval(() => {
+      void loadRuntime();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadPaths() {
+      const payload = await loadDesktopHostPaths();
+      if (!cancelled) {
+        setDesktopHostPaths(payload);
+      }
+    }
+    void loadPaths();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollUsage() {
+      const payload = await loadDesktopAppUsage();
+      if (cancelled) return;
+      // Only update if values meaningfully changed (>1% CPU or >1MB memory)
+      const prev = appUsageSampleRef.current;
+      const cpuChanged = !prev || Math.abs((payload.cpuPercent || 0) - (prev.cpuPercent || 0)) > 1;
+      const memChanged = !prev || Math.abs((payload.memoryMb || 0) - (prev.memoryMb || 0)) > 1;
+      if (cpuChanged || memChanged) {
+        appUsageSampleRef.current = payload;
+        setAppUsage(payload);
+      }
+    }
+
+    void pollUsage();
+    const timer = window.setInterval(() => {
+      void pollUsage();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollTraffic() {
+      const snapshot = await loadAgentTraffic();
+      if (cancelled || !snapshot) return;
+
+      const now = Date.now();
+      const prev = agentTrafficPrevRef.current;
+
+      // Only update state if data actually changed
+      const totalsChanged = !prev || prev.downTotal !== snapshot.downTotal || prev.upTotal !== snapshot.upTotal;
+
+      if (totalsChanged) {
+        setAgentTraffic(snapshot);
+      }
+
+      // Calculate per-tunnel rates (only when we have a previous sample)
+      if (prev && now > prev.sampledAt && totalsChanged) {
+        const seconds = (now - prev.sampledAt) / 1000;
+        if (seconds > 0) {
+          const newRates = new Map<string, { downRate: number; upRate: number }>();
+          for (const t of snapshot.tunnels) {
+            const prevT = prev.tunnels.get(t.tunnelId);
+            newRates.set(t.tunnelId, {
+              downRate: prevT ? Math.max(0, t.downBytes - prevT.downBytes) / seconds : 0,
+              upRate: prevT ? Math.max(0, t.upBytes - prevT.upBytes) / seconds : 0,
+            });
+          }
+          setTunnelRates(newRates);
+
+          // Total rate
+          const downRate = Math.max(0, snapshot.downTotal - prev.downTotal) / seconds;
+          const upRate = Math.max(0, snapshot.upTotal - prev.upTotal) / seconds;
+          setTrafficRate({ downRate, upRate });
+        }
+      }
+
+      // Store current snapshot for next delta
+      const tunnelMap = new Map<string, { downBytes: number; upBytes: number }>();
+      for (const t of snapshot.tunnels) {
+        tunnelMap.set(t.tunnelId, { downBytes: t.downBytes, upBytes: t.upBytes });
+      }
+      agentTrafficPrevRef.current = { sampledAt: now, downTotal: snapshot.downTotal, upTotal: snapshot.upTotal, tunnels: tunnelMap };
+    }
+
+    void pollTraffic();
+    const timer = window.setInterval(() => {
+      void pollTraffic();
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  async function loadSnapshot() {
+    const [payload, metrics] = await Promise.all([
+      desktopApi.loadDesktopData(),
+      currentUser?.role === "admin" ? desktopApi.loadServerMetrics().catch(() => null) : Promise.resolve(null),
+      currentUser ? reloadCertificateState() : Promise.resolve(),
+    ]);
+    // Only update if data actually changed (shallow compare by JSON)
+    setNodes((prev) => {
+      const next = payload.nodes;
+      if (prev.length === next.length && prev.every((n, i) => n.nodeId === next[i].nodeId && n.status === next[i].status)) return prev;
+      return next;
+    });
+    setTunnels((prev) => {
+      const next = payload.tunnels;
+      if (prev.length === next.length && prev.every((t, i) => t.id === next[i].id && t.status === next[i].status && t.runtimeState === next[i].runtimeState)) return prev;
+      return next;
+    });
+    setServerMetrics(metrics);
+    setLastRefreshAt(new Date().toISOString());
+  }
 
   useEffect(() => {
     let cancelled = false;
 
     async function init() {
+      if (!connectionReady) return;
       try {
-        const status = await api.loadBootstrapStatus();
+        const status = await desktopApi.loadBootstrapStatus();
         if (cancelled) return;
         setBootstrapRequired(status.required);
         if (status.required) {
-          setError("当前仍需要先完成管理面 bootstrap，本轮桌面端不处理 bootstrap 流程。");
+          setError("仍需先完成初始化配置，请通过管理面完成。");
           return;
         }
-        const me = await api.loadCurrentUser();
-        if (cancelled) return;
-        setCurrentUser(me.user);
-        const payload = await api.loadDesktopData();
-        if (cancelled) return;
-        setNodes(payload.nodes);
-        setTunnels(payload.tunnels);
-        setLastRefreshAt(new Date().toISOString());
+        try {
+          const me = await desktopApi.loadCurrentUser();
+          if (cancelled) return;
+          setCurrentUser(me.user);
+          await loadSnapshot();
+          if (cancelled) return;
+          setError("");
+        } catch (authError) {
+          const detail = authError instanceof Error ? authError.message : "登录已失效，请重新登录。";
+          if (!cancelled && /登录已失效|401/.test(detail)) {
+            setCurrentUser(null);
+            setNodes([]);
+            setTunnels([]);
+            setServerMetrics(null);
+            setError("");
+            return;
+          }
+          throw authError;
+        }
       } catch (initError) {
         if (!cancelled) {
           setError(initError instanceof Error ? initError.message : "初始化失败");
@@ -124,161 +648,311 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [connectionReady, desktopApi]);
 
   useEffect(() => {
     if (!currentUser) return;
     const timer = window.setInterval(() => {
-      void refreshConsoleData(false, "auto");
+      void refreshPublisherData(false, "auto");
     }, 10000);
     return () => window.clearInterval(timer);
   }, [currentUser]);
 
-  const localBinding = useMemo(() => resolveLocalNodeBinding(nodes, desktopNodeId), [nodes]);
-  const bindingTone = localBinding.status === "success" ? "good" : localBinding.status === "config_error" ? "danger" : localBinding.status === "ambiguous" ? "warn" : "neutral";
-  const bindingStatusLabel = localBinding.status === "success" ? "成功" : localBinding.status === "config_error" ? "配置错误" : localBinding.status === "ambiguous" ? "不唯一" : "未完成";
+  const currentDevice = useMemo(() => {
+    if (runtimeNodeId) {
+      return nodes.find((node) => node.nodeId === runtimeNodeId) ?? null;
+    }
+    if (desktopNodeId) {
+      return nodes.find((node) => node.nodeId === desktopNodeId) ?? null;
+    }
+    const localManaged = nodes.filter((node) => node.instanceManaged && node.nodeRole === "local");
+    if (localManaged.length === 1) return localManaged[0];
+    return localManaged[0] ?? nodes[0] ?? null;
+  }, [nodes, runtimeNodeId]);
 
-  useEffect(() => {
-    if (!mode) {
-      setSelectedNodeId(null);
-      return;
+  const runtimeBoundDevice = useMemo(() => {
+    if (runtimeNodeId) {
+      return nodes.find((node) => node.nodeId === runtimeNodeId) ?? null;
     }
-    if (mode === "local-node") {
-      setSelectedNodeId(localBinding.node?.nodeId ?? null);
-      return;
+    if (desktopNodeId) {
+      return nodes.find((node) => node.nodeId === desktopNodeId) ?? null;
     }
-    setSelectedNodeId((current) => {
-      if (current && nodes.some((node) => node.nodeId === current)) {
-        return current;
+    return null;
+  }, [nodes, runtimeNodeId]);
+
+  const publishableTunnels = useMemo(() => {
+    if (!runtimeBoundDevice) return [];
+    return tunnels.filter((tunnel) => tunnel.nodeId === runtimeBoundDevice.nodeId);
+  }, [runtimeBoundDevice, tunnels]);
+
+  const diagnosticsItems = useMemo(() => buildDiagnosticsItems(publishableTunnels), [publishableTunnels]);
+  const activeRulesCount = useMemo(() => publishableTunnels.filter((item) => item.status === "active").length, [publishableTunnels]);
+  const attentionCount = useMemo(() => diagnosticsItems.filter((item) => item.tone === "danger").length, [diagnosticsItems]);
+  const currentRoute = useMemo(() => findRouteMeta(location.pathname), [location.pathname]);
+  const cloudEndpointLabel = effectiveApiBaseUrl || apiDraft.replace(/\/$/, "");
+  const cloudEndpointDisplayName = connectionReady ? relayEndpointPresets.find((p) => p.apiBaseUrl.replace(/\/$/, "") === cloudEndpointLabel)?.label || "云站点" : "未连接";
+  const runtimeBindingIssue = useMemo(() => {
+    if (!runtimeRelayReady) {
+      return runtimeStatus.lastError || "本地发布运行时未就绪，请先连接云站点并确认 runtime 已启动。";
+    }
+    if (!runtimeStatus.nodeId.trim()) {
+      return "当前 runtime 还没有稳定 nodeId，暂时不能创建或修改发布规则。";
+    }
+    if (!runtimeBoundDevice) {
+      return `等待当前发布器节点注册并上线（runtime nodeId: ${runtimeStatus.nodeId}）。`;
+    }
+    if (runtimeBoundDevice.status !== "online") {
+      return `当前发布器节点 ${runtimeBoundDevice.nodeName} (${runtimeBoundDevice.nodeId}) 还未在线，暂时不能创建或修改发布规则。`;
+    }
+    return "";
+  }, [runtimeBoundDevice, runtimeRelayReady, runtimeStatus.lastError, runtimeStatus.nodeId]);
+
+
+  const globalNextStep = useMemo(() => {
+    if (!currentUser) return "先登录并绑定当前设备。";
+    if (runtimeBindingIssue) return runtimeBindingIssue;
+    if (localServices.length === 0) return "先录入至少一个本地服务。";
+    if (publishableTunnels.length === 0) return "下一步为一个本地服务新建发布规则。";
+    const firstDanger = diagnosticsItems.find((item) => item.tone === "danger");
+    if (firstDanger) return firstDanger.nextStep;
+    return "所有规则运行正常。";
+  }, [currentUser, diagnosticsItems, localServices.length, publishableTunnels.length, runtimeBindingIssue]);
+
+  const dashboardActionLabel = useMemo(() => {
+    if (localServices.length === 0) return "添加服务";
+    if (publishableTunnels.length === 0) return "新建规则";
+    if (diagnosticsItems.length > 0) return "查看诊断";
+    return "查看设置";
+  }, [diagnosticsItems.length, localServices.length, publishableTunnels.length]);
+
+  const userInitial = useMemo(() => {
+    const source = (currentUser?.displayName || currentUser?.email || "C").trim();
+    return Array.from(source)[0]?.toUpperCase() || "C";
+  }, [currentUser]);
+
+  const localTrafficTotals = useMemo(() => {
+    if (!agentTraffic) return { downTotal: 0, upTotal: 0 };
+    return { downTotal: agentTraffic.downTotal, upTotal: agentTraffic.upTotal };
+  }, [agentTraffic]);
+
+  const localTrafficByTunnel = useMemo(() => {
+    const map = new Map<string, { downBytes: number; upBytes: number }>();
+    if (agentTraffic) {
+      for (const entry of agentTraffic.tunnels) {
+        map.set(entry.tunnelId, { downBytes: entry.downBytes, upBytes: entry.upBytes });
       }
-      return nodes[0]?.nodeId ?? null;
-    });
-  }, [localBinding.node, mode, nodes]);
-
-  const activeSurface: ControlSurface = mode === "operator" ? "operator_console" : "node_console";
-  const selectedNode = useMemo(() => {
-    if (mode === "local-node") {
-      return localBinding.node;
     }
-    return selectedNodeId ? nodes.find((node) => node.nodeId === selectedNodeId) ?? null : null;
-  }, [localBinding.node, mode, nodes, selectedNodeId]);
+    return map;
+  }, [agentTraffic]);
 
-  const selectedNodeTunnels = useMemo(() => {
-    if (!selectedNode) return [];
-    return tunnels.filter((tunnel) => tunnel.nodeId === selectedNode.nodeId);
-  }, [selectedNode, tunnels]);
-  const protocolOverviewItems = useMemo(() => selectedNode ? buildProtocolOverview(selectedNode, selectedNodeTunnels) : [], [selectedNode, selectedNodeTunnels]);
 
-  const tabTunnels = useMemo(() => selectedNodeTunnels.filter((tunnel) => tunnel.type === activeTab), [activeTab, selectedNodeTunnels]);
+
+  const effectiveTrafficRate = useMemo(() => {
+    if (publishableTunnels.length === 0) {
+      return { downRate: 0, upRate: 0 };
+    }
+    return trafficRate;
+  }, [publishableTunnels.length, trafficRate]);
+  const effectiveTrafficTotal = useMemo(() => {
+    if (publishableTunnels.length === 0) {
+      return 0;
+    }
+    return localTrafficTotals.downTotal + localTrafficTotals.upTotal;
+  }, [publishableTunnels.length, localTrafficTotals.downTotal, localTrafficTotals.upTotal]);
+  const downRateLabel = useMemo(() => formatRate(effectiveTrafficRate.downRate), [effectiveTrafficRate.downRate]);
+  const upRateLabel = useMemo(() => formatRate(effectiveTrafficRate.upRate), [effectiveTrafficRate.upRate]);
+  const totalTrafficLabel = useMemo(() => formatBytesTotal(effectiveTrafficTotal), [effectiveTrafficTotal]);
+  const currentRouteLabel = useMemo(() => `${currentRoute.label} · ${currentDevice?.nodeName || "当前设备未绑定"}`, [currentDevice, currentRoute.label]);
+
+  const drawerTunnel = useMemo(() => {
+    if (!drawerState || drawerState.kind !== "rule") return null;
+    return publishableTunnels.find((item) => item.id === drawerState.tunnelId) ?? null;
+  }, [drawerState, publishableTunnels]);
+  const drawerTunnelTrafficTotals = useMemo(() => {
+    if (!drawerTunnel) return { downTotal: 0, upTotal: 0 };
+    const entry = localTrafficByTunnel.get(drawerTunnel.id);
+    if (entry) return { downTotal: entry.downBytes, upTotal: entry.upBytes };
+    return { downTotal: 0, upTotal: 0 };
+  }, [drawerTunnel, localTrafficByTunnel]);
+
+  const drawerRuleState = drawerTunnel ? evaluateRuleState(drawerTunnel) : null;
+  const drawerCloudEntry = drawerTunnel ? deriveCloudEntry(drawerTunnel, cloudPublicHost) : null;
 
   useEffect(() => {
-    if (!tabTunnels.length) {
-      setSelectedTunnelId(null);
-      return;
+    if (!publishForm.localServiceId && localServices[0]) {
+      setPublishForm((current) => ({ ...current, localServiceId: localServices[0].id }));
     }
-    if (!selectedTunnelId || !tabTunnels.some((tunnel) => tunnel.id === selectedTunnelId)) {
-      setSelectedTunnelId(tabTunnels[0].id);
-    }
-  }, [selectedTunnelId, tabTunnels]);
-
-  const selectedTunnel = useMemo(
-    () => (selectedTunnelId ? tabTunnels.find((tunnel) => tunnel.id === selectedTunnelId) ?? null : null),
-    [selectedTunnelId, tabTunnels],
-  );
-  const selectedTunnelState = selectedTunnel ? tunnelStateEvaluation(selectedTunnel) : null;
-  const selectedTunnelActions = selectedTunnel && selectedTunnelState ? buildWorkbenchActions(selectedTunnel, selectedTunnelState, busy === selectedTunnel.id + ":probe") : [];
+  }, [localServices, publishForm.localServiceId]);
 
   useEffect(() => {
-    if (!selectedTunnel) {
+    if (!publishForm.publicPort) {
+      setPublishForm((current) => ({
+        ...current,
+        publicPort: String(defaultPublicPortForProtocol(current.protocol, publishableTunnels.length)),
+      }));
+    }
+  }, [publishForm.publicPort, publishableTunnels.length]);
+
+  useEffect(() => {
+    if (!drawerTunnel) {
       setEditForm(null);
+      setTunnelActionOptions([]);
+      setTunnelControlPanel(null);
       return;
     }
     setEditForm({
-      name: selectedTunnel.name,
-      targetHost: selectedTunnel.targetHost || "",
-      targetPort: String(selectedTunnel.targetPort || ""),
-      publicPort: String(selectedTunnel.publicPort || ""),
-      domain: selectedTunnel.domain || "",
-      probePath: selectedTunnel.probePath || "",
-      transportPolicy: selectedTunnel.transportPolicy || "relay_only",
+      name: drawerTunnel.name,
+      targetHost: drawerTunnel.targetHost || "",
+      targetPort: String(drawerTunnel.targetPort || ""),
+      publicPort: String(drawerTunnel.publicPort || ""),
+      domain: drawerTunnel.domain || "",
+      probePath: drawerTunnel.probePath || "/",
+      transportPolicy: drawerTunnel.transportPolicy || "relay_only",
     });
-  }, [selectedTunnel]);
+  }, [drawerTunnel]);
 
   useEffect(() => {
     let cancelled = false;
-    async function loadNodeControls() {
-      if (!selectedNode || !currentUser) {
-        setNodeActionOptions([]);
-        setNodeControlPanel(null);
-        return;
-      }
-      try {
-        const [options, panel] = await Promise.all([
-          api.loadNodeControlActionOptions(selectedNode.nodeId, activeSurface),
-          api.loadNodeControlPanel(selectedNode.nodeId, activeSurface),
-        ]);
-        if (cancelled) return;
-        setNodeActionOptions(options.items);
-        setNodeControlPanel(panel);
-        setNodeControlContextAt(panel.contextVersion || options.contextVersion || options.items[0]?.contextVersion || "");
-      } catch (controlError) {
-        if (!cancelled) {
-          setNodeActionOptions([]);
-          setNodeControlPanel(null);
-          setError(controlError instanceof Error ? controlError.message : "读取节点控制摘要失败");
-        }
-      }
-    }
-    void loadNodeControls();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeSurface, currentUser, selectedNode]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadTunnelControls() {
-      if (!selectedTunnel || !currentUser) {
-        setTunnelActionOptions([]);
-        setTunnelControlPanel(null);
-        return;
-      }
+    async function loadRuleExecution() {
+      if (!drawerTunnel || !currentUser || drawerState?.kind !== "rule") return;
       try {
         const [options, panel] = await Promise.all([
-          api.loadTunnelControlActionOptions(selectedTunnel.id, activeSurface),
-          api.loadTunnelControlPanel(selectedTunnel.id, activeSurface),
+          desktopApi.loadTunnelControlActionOptions(drawerTunnel.id, "node_console"),
+          desktopApi.loadTunnelControlPanel(drawerTunnel.id, "node_console"),
         ]);
         if (cancelled) return;
-        setTunnelActionOptions(options.items);
+        setTunnelActionOptions(options.items.filter((item) => item.actionKind === "pause_tunnel" || item.actionKind === "resume_tunnel"));
         setTunnelControlPanel(panel);
         setTunnelControlContextAt(panel.contextVersion || options.contextVersion || options.items[0]?.contextVersion || "");
       } catch (controlError) {
-        if (!cancelled) {
-          setTunnelActionOptions([]);
+        if (cancelled) return;
+        const detail = controlError instanceof Error ? controlError.message : "读取发布规则执行摘要失败";
+        setTunnelActionOptions([]);
+        if (/404|page not found/i.test(detail)) {
+          setTunnelControlPanel({
+            targetKind: "tunnel",
+            targetId: drawerTunnel.id,
+            sourceSurface: "node_console",
+            headline: "当前环境未提供规则动作摘要",
+            summary: "已保留发布规则展示，不再把缺失的控制摘要接口当成全局错误反复弹出。",
+            readinessState: "partial",
+            checks: [],
+            nextStep: "继续使用发布、访问验证和诊断主路径；如需暂停/恢复，再补服务端动作摘要接口。",
+            executionMode: "real",
+          });
+          setError("");
+        } else {
           setTunnelControlPanel(null);
-          setError(controlError instanceof Error ? controlError.message : "读取 tunnel 控制摘要失败");
+          setError(detail);
         }
       }
     }
-    void loadTunnelControls();
+
+    void loadRuleExecution();
     return () => {
       cancelled = true;
     };
-  }, [activeSurface, currentUser, selectedTunnel]);
+  }, [currentUser, desktopApi, drawerState, drawerTunnel]);
 
+  async function startEmbeddedRuntime(apiBaseUrlValue: string, showSuccessMessage: boolean) {
+    const normalizedApi = apiBaseUrlValue.replace(/\/$/, "");
+    const existingNodeName = runtimeStatus.nodeName.trim();
+    const fallbackNodeName = typeof window !== "undefined" ? window.navigator.userAgent.includes("Windows") ? "windows-publisher" : "desktop-publisher" : "desktop-publisher";
+    const requestedNodeName = existingNodeName || fallbackNodeName;
+    const nextStatus = await ensureRuntimeStarted({
+      apiBaseUrl: normalizedApi,
+      nodeId: runtimeStatus.nodeId,
+      nodeName: requestedNodeName,
+    });
+    setRuntimeStatus(nextStatus);
+    if (!nextStatus.healthy) {
+      throw new Error(nextStatus.lastError || "本地发布运行时未就绪");
+    }
+    if (showSuccessMessage) {
+      setMessage(`云站点连接成功，本地发布运行时已启动（node: ${nextStatus.nodeId}）。`);
+    }
+  }
+
+  async function validateCloudConnection() {
+    setBusy("connect-cloud");
+    setError("");
+    setMessage("");
+    setConnectionStatus("checking");
+    try {
+      const normalizedApi = apiDraft.trim().replace(/\/+$/, "");
+      if (!normalizedApi) {
+        throw new Error("请先填写云站点 API 地址");
+      }
+
+      let response: Awaited<ReturnType<NonNullable<typeof desktopTransport>>> | Response;
+      try {
+        response = await (desktopTransport
+          ? desktopTransport(normalizedApi + "/api/auth/bootstrap-status", { headers: { Accept: "application/json" } })
+          : fetch(normalizedApi + "/api/auth/bootstrap-status", { headers: { Accept: "application/json" } }));
+      } catch (requestError) {
+        const detail = requestError instanceof Error ? requestError.message : String(requestError || "");
+        throw new Error(detail ? `无法连接到云站点 API：${detail}` : "无法连接到云站点 API，请检查地址、端口和网络连通性。");
+      }
+
+      const payload = await response.json().catch(() => null) as { error?: unknown; required?: unknown } | null;
+      if (!response.ok) {
+        const serviceMessage = payload && typeof payload.error === "string" && payload.error.trim()
+          ? payload.error.trim()
+          : "";
+        throw new Error(serviceMessage || `云站点 API 返回异常状态（HTTP ${response.status}）`);
+      }
+      if (!payload || typeof payload.required !== "boolean") {
+        throw new Error("云站点 API 可达，但返回的 bootstrap-status 数据无效");
+      }
+
+      try {
+        await startEmbeddedRuntime(normalizedApi, false);
+      } catch (runtimeError) {
+        const detail = runtimeError instanceof Error ? runtimeError.message : "本地发布运行时未就绪";
+        throw new Error(`云站点 API 可达，但本地发布运行时启动失败：${detail}`);
+      }
+
+      window.localStorage.setItem(
+        "desktop-publisher-relay-endpoint",
+        JSON.stringify({ apiBaseUrl: normalizedApi, publicHost: cloudPublicHost.trim() || defaultDesktopPublicHost }),
+      );
+      setBootstrapRequired(payload.required);
+      setConnectionReady(true);
+      setConnectionStatus("connected");
+      setMessage(payload.required
+        ? "云站点 API 连接成功，但该环境尚未完成初始化，请先完成初始化配置。"
+        : "云站点 API 连接成功，本地发布运行时已启动。下一步登录并绑定当前设备。");
+    } catch (connectionError) {
+      setConnectionReady(false);
+      setConnectionStatus("failed");
+      setError(connectionError instanceof Error ? connectionError.message : "连接云站点 API 失败");
+    } finally {
+      setBusy("");
+    }
+  }
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy("login");
     setError("");
     setMessage("");
     try {
-      const auth = await api.login(loginForm.email, loginForm.password);
+      const auth = await desktopApi.login(loginForm.email, loginForm.password);
       setCurrentUser(auth.user);
-      const payload = await api.loadDesktopData();
-      setNodes(payload.nodes);
-      setTunnels(payload.tunnels);
-      setLastRefreshAt(new Date().toISOString());
-      setMessage("desktop-console 已接入当前管理面数据，可在本机模式和运维模式之间切换。");
+      // Always save login profile so email appears in history
+      if (desktopTransport) {
+        try {
+          const pw = savePassword ? loginForm.password : "";
+          await saveLoginProfile(loginForm.email, pw, savePassword && autoLogin);
+          const updated = await readLoginProfiles();
+          if (updated) setLoginProfiles(updated);
+        } catch { /* ignore save errors */ }
+      }
+      if (!runtimeReady && effectiveApiBaseUrl) {
+        await startEmbeddedRuntime(effectiveApiBaseUrl, false);
+      }
+      await loadSnapshot();
+      setMessage("已接入云站点，隧道同步就绪。可开始管理本地服务与发布规则。");
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "登录失败");
     } finally {
@@ -291,21 +965,19 @@ export default function App() {
     setError("");
     setMessage("");
     try {
-      await api.logout();
+      await desktopApi.logout();
       setCurrentUser(null);
-      setMode(null);
       setNodes([]);
       setTunnels([]);
-      setSelectedNodeId(null);
-      setSelectedTunnelId(null);
-      setNodeActionOptions([]);
+      setServerMetrics(null);
+      setDrawerState(null);
       setTunnelActionOptions([]);
-      setNodeControlPanel(null);
       setTunnelControlPanel(null);
       setControlResult(null);
       setControlNote("");
       setLastRefreshAt("");
-      setMessage("已退出 desktop-console。");
+      setSyncIssue("");
+      setMessage("已退出登录。");
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "退出失败");
     } finally {
@@ -313,57 +985,208 @@ export default function App() {
     }
   }
 
-  async function refreshConsoleData(showNotice: boolean, source: "manual" | "auto") {
+  async function refreshPublisherData(showNotice: boolean, source: "manual" | "auto") {
     if (!currentUser || refreshInFlightRef.current) return;
     refreshInFlightRef.current = true;
     setRefreshing(true);
-    if (showNotice) setMessage("");
-    try {
-      const payload = await api.loadDesktopData();
-      setNodes(payload.nodes);
-      setTunnels(payload.tunnels);
-      setLastRefreshAt(new Date().toISOString());
+    if (showNotice) {
       setError("");
+      setMessage("");
+    }
+    try {
+      await loadSnapshot();
+      setSyncIssue("");
       if (showNotice) {
-        setMessage("desktop-console 数据已刷新，当前模式与控制上下文已尽量保留。");
+        setMessage("当前机器的发布规则、验证结果和运行状态已刷新。");
       }
     } catch (refreshError) {
-      const prefix = source === "auto" ? "自动刷新失败，已保留当前页面数据。" : "手动刷新失败，已保留当前页面数据。";
       const detail = refreshError instanceof Error ? refreshError.message : "刷新失败";
-      setError(prefix + " " + detail);
+      if (source === "manual") {
+        setError("手动刷新失败，已保留当前发布数据。 " + detail);
+      } else {
+        setSyncIssue(detail);
+      }
     } finally {
       refreshInFlightRef.current = false;
       setRefreshing(false);
     }
   }
 
-  async function handleTunnelSave(event: FormEvent<HTMLFormElement>) {
+  function openAddServiceDrawer(serviceId: string | null = null) {
+    const service = serviceId ? localServices.find((item) => item.id === serviceId) : null;
+    setLocalServiceForm(
+      service
+        ? {
+            name: service.name,
+            targetHost: service.targetHost,
+            targetPort: service.targetPort,
+            note: service.note,
+          }
+        : initialLocalServiceForm,
+    );
+    setDrawerState({ kind: "service", serviceId });
+  }
+
+  function closeDrawer() {
+    setDrawerState(null);
+    setEditForm(null);
+    setControlNote("");
+    setControlResult(null);
+  }
+
+  function saveLocalService(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedTunnel || !selectedNode || !editForm) {
+    const host = localServiceForm.targetHost.trim();
+    const port = Number(localServiceForm.targetPort);
+    if (!host || port <= 0) {
+      setError("本地服务需要有效的 targetHost 和 targetPort。");
       return;
     }
-    setBusy("save-tunnel");
+    const editingId = drawerState?.kind === "service" ? drawerState.serviceId : null;
+    const nextItem: LocalServiceDraft = {
+      id: editingId || "local-service-" + Date.now(),
+      name: localServiceForm.name.trim() || `${host}:${port}`,
+      targetHost: host,
+      targetPort: String(port),
+      note: localServiceForm.note.trim(),
+      detectedStatus: "unverified",
+      lastCheckedAt: new Date().toISOString(),
+    };
+    setLocalServices((current) => {
+      if (!editingId) return [nextItem, ...current];
+      return current.map((item) => (item.id === editingId ? nextItem : item));
+    });
+    setPublishForm((current) => ({ ...current, localServiceId: nextItem.id || current.localServiceId }));
+    setMessage(editingId ? "本地服务已更新。" : "本地服务已加入清单。下一步去发布管理创建发布规则。");
+    setError("");
+    closeDrawer();
+  }
+
+  function deleteLocalService(id: string) {
+    setLocalServices((current) => current.filter((item) => item.id !== id));
+    setMessage("本地服务已移除。");
+    setError("");
+  }
+
+  function openCreateRuleDrawer() {
+    if (runtimeBindingIssue) {
+      setError(runtimeBindingIssue);
+      return;
+    }
+    setPublishForm((current) => ({
+      ...current,
+      localServiceId: current.localServiceId || localServices[0]?.id || "",
+      publicPort: current.publicPort || String(defaultPublicPortForProtocol(current.protocol, publishableTunnels.length)),
+    }));
+    setDrawerState({ kind: "create-rule" });
+  }
+
+  async function createPublishRule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (runtimeBindingIssue) {
+      setError(runtimeBindingIssue);
+      return;
+    }
+    if (!runtimeBoundDevice) {
+      setError("当前还没有绑定到本机 runtime 对应的设备节点。");
+      return;
+    }
+    const service = localServices.find((item) => item.id === publishForm.localServiceId) || localServices[0];
+    if (!service) {
+      setError("请先在本地服务页录入至少一个本地服务。");
+      return;
+    }
+    if (!publishForm.publicPort || Number(publishForm.publicPort) <= 0) {
+      setError("请填写有效的公网端口。");
+      return;
+    }
+    if (publishForm.protocol === "https" && !publishForm.domain.trim()) {
+      setError("HTTPS 发布规则必须填写 domain。");
+      return;
+    }
+    setBusy("create-rule");
     setError("");
     setMessage("");
     try {
-      await api.updateTunnel(selectedTunnel.id, {
-        id: selectedTunnel.id,
-        nodeId: selectedNode.nodeId,
+      await desktopApi.requestJSON<TunnelSpec>("/api/tunnels", {
+        method: "POST",
+        body: JSON.stringify({
+          nodeId: runtimeBoundDevice.nodeId,
+          name: `${service.name} ${publishForm.protocol.toUpperCase()}`,
+          type: publishForm.protocol,
+          transportPolicy: publishForm.transportPolicy,
+          targetHost: publishForm.protocol === "socks5" ? "socks5" : service.targetHost,
+          targetPort: publishForm.protocol === "socks5" ? 1080 : Number(service.targetPort),
+          publicPort: Number(publishForm.publicPort),
+          domain: publishForm.protocol === "https" ? publishForm.domain.trim() : undefined,
+          tlsMode: publishForm.protocol === "https" ? "edge_terminate" : undefined,
+          probePath: publishForm.protocol === "http" || publishForm.protocol === "https" ? normalizeProbePath(publishForm.probePath) : undefined,
+          status: "active",
+        }),
+      });
+      await refreshPublisherData(false, "manual");
+      setMessage(`发布规则已创建，并强制绑定到当前 runtime 节点 ${runtimeBoundDevice.nodeName} (${runtimeBoundDevice.nodeId})。`);
+      closeDrawer();
+      navigate("/publish");
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : "创建发布规则失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleTunnelSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!drawerTunnel || !runtimeBoundDevice || !editForm) return;
+    if (runtimeBindingIssue) {
+      setError(runtimeBindingIssue);
+      return;
+    }
+    if (drawerTunnel.type === "https" && !editForm.domain.trim()) {
+      setError("HTTPS 发布规则必须保留 domain。");
+      return;
+    }
+    setBusy("save-rule");
+    setError("");
+    setMessage("");
+    try {
+      await desktopApi.updateTunnel(drawerTunnel.id, {
+        id: drawerTunnel.id,
+        nodeId: runtimeBoundDevice.nodeId,
         name: editForm.name.trim(),
-        type: selectedTunnel.type,
-        status: selectedTunnel.status,
+        type: drawerTunnel.type,
+        status: drawerTunnel.status,
         targetHost: editForm.targetHost.trim(),
         targetPort: Number(editForm.targetPort),
         publicPort: Number(editForm.publicPort),
-        domain: selectedTunnel.type === "http" || selectedTunnel.type === "https" ? editForm.domain.trim() : "",
-        probePath: selectedTunnel.type === "http" || selectedTunnel.type === "https" ? editForm.probePath.trim() : "",
+        domain: drawerTunnel.type === "http" || drawerTunnel.type === "https" ? editForm.domain.trim() : "",
+        probePath: drawerTunnel.type === "http" || drawerTunnel.type === "https" ? normalizeProbePath(editForm.probePath) : "",
         transportPolicy: editForm.transportPolicy,
-        tlsMode: selectedTunnel.tlsMode || "",
+        tlsMode: drawerTunnel.tlsMode || "",
       });
-      await refreshConsoleData(false, "manual");
-      setMessage("当前 tunnel 的普通配置字段已提交，列表和详情已刷新。status 不会通过普通保存改变；active/paused 只能通过 pause_tunnel / resume_tunnel 控制动作切换。");
+      await refreshPublisherData(false, "manual");
+      setMessage(`发布规则已更新，并保持绑定到当前 runtime 节点 ${runtimeBoundDevice.nodeName} (${runtimeBoundDevice.nodeId})。`);
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "保存 tunnel 失败");
+      setError(saveError instanceof Error ? saveError.message : "保存发布规则失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function deletePublishRule(tunnel: TunnelSpec) {
+    if (!window.confirm(`确认删除发布规则“${tunnel.name}”？`)) return;
+    setBusy("delete-rule");
+    setError("");
+    setMessage("");
+    try {
+      await desktopApi.deleteTunnel(tunnel.id);
+      await refreshPublisherData(false, "manual");
+      setMessage("发布规则已删除。");
+      if (drawerState?.kind === "rule" && drawerState.tunnelId === tunnel.id) {
+        closeDrawer();
+      }
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "删除发布规则失败");
     } finally {
       setBusy("");
     }
@@ -375,509 +1198,1042 @@ export default function App() {
     setError("");
     setMessage("");
     try {
-      const result = await api.probeTunnel(tunnel.id);
+      const result = await desktopApi.probeTunnel(tunnel.id);
       setProbeResults((current) => ({ ...current, [tunnel.id]: result }));
-      setMessage(result.success ? "协议入口探测完成：当前入口可访问。" : "协议入口探测完成：当前入口不可访问。" );
-      await refreshConsoleData(false, "manual");
+      setMessage(result.success ? "访问验证完成：当前公网入口可访问。" : "访问验证完成：当前公网入口不可访问。");
+      await refreshPublisherData(false, "manual");
     } catch (probeError) {
-      setError(probeError instanceof Error ? probeError.message : "协议入口探测失败");
+      setError(probeError instanceof Error ? probeError.message : "访问验证失败");
     } finally {
       setBusy("");
     }
   }
 
-  async function copyToClipboard(value: string, copiedLabel: string) {
+
+  async function executeQuickToggle(tunnel: TunnelSpec) {
+    const desiredAction: ControlActionRequest["actionKind"] = tunnel.status === "active" ? "pause_tunnel" : "resume_tunnel";
+    setBusy("toggle-rule");
+    setError("");
+    setMessage("");
+    try {
+      const options = await desktopApi.loadTunnelControlActionOptions(tunnel.id, "node_console");
+      const option = options.items.find((item) => item.actionKind === desiredAction);
+      if (!option?.available) {
+        throw new Error(option?.message || "当前动作不可用");
+      }
+      const result = await desktopApi.controlAction({
+        actionKind: desiredAction,
+        targetKind: "tunnel",
+        targetId: tunnel.id,
+        sourceSurface: "node_console",
+        dryRun: false,
+        note: controlNote.trim(),
+        requestedAt: option.contextVersion || options.contextVersion,
+      });
+      setControlResult(result);
+      setMessage(result.humanMessage);
+      await refreshPublisherData(false, "manual");
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : "规则状态切换失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runRuleAction(actionKind: ControlActionRequest["actionKind"], tunnel: TunnelSpec) {
+    setBusy("control-action");
+    setError("");
+    setMessage("");
+    try {
+      const result = await desktopApi.controlAction({
+        actionKind,
+        targetKind: "tunnel",
+        targetId: tunnel.id,
+        sourceSurface: "node_console",
+        dryRun: false,
+        note: controlNote.trim(),
+        requestedAt: tunnelControlPanel?.contextVersion || tunnelActionOptions[0]?.contextVersion || tunnelControlContextAt || undefined,
+      });
+      setControlResult(result);
+      setMessage(result.humanMessage);
+      await refreshPublisherData(false, "manual");
+    } catch (controlError) {
+      setError(controlError instanceof Error ? controlError.message : "发布规则动作失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function copyToClipboard(value: string, label: string) {
     try {
       if (!navigator?.clipboard?.writeText) {
         throw new Error("clipboard unavailable");
       }
       await navigator.clipboard.writeText(value);
-      setMessage(copiedLabel + " 已复制到剪贴板。");
+      setMessage(label + " 已复制到剪贴板。");
       setError("");
     } catch (copyError) {
       setError(copyError instanceof Error ? copyError.message : "复制失败");
     }
   }
 
-  function openExternal(url: string, label: string) {
+  async function openExternal(url: string, label: string) {
     try {
-      const opened = window.open(url, "_blank", "noopener,noreferrer");
-      if (!opened) {
-        throw new Error("窗口被拦截，请允许当前桌面页打开新窗口。")
+      if (desktopTransport) {
+        await openDesktopExternal(url);
+      } else {
+        const opened = window.open(url, "_blank", "noopener,noreferrer");
+        if (!opened) {
+          throw new Error("窗口被拦截，请允许当前桌面页打开新窗口。");
+        }
       }
-      setMessage(label + " 已在新窗口打开。");
+      setMessage(label + " 已在系统默认浏览器打开。");
       setError("");
     } catch (openError) {
-      setError(openError instanceof Error ? openError.message : "打开入口失败");
+      setError(openError instanceof Error ? openError.message : "打开失败");
     }
   }
 
-  function currentControlContextAt(targetKind: ControlActionRequest["targetKind"]) {
-    if (targetKind === "tunnel") {
-      return tunnelControlPanel?.contextVersion || tunnelActionOptions[0]?.contextVersion || tunnelControlContextAt || undefined;
+  function handleDashboardAction() {
+    if (localServices.length === 0) {
+      openAddServiceDrawer(null);
+      return;
     }
-    return nodeControlPanel?.contextVersion || nodeActionOptions[0]?.contextVersion || nodeControlContextAt || undefined;
+    if (publishableTunnels.length === 0) {
+      openCreateRuleDrawer();
+      return;
+    }
+    if (diagnosticsItems.length > 0) {
+      navigate("/diagnostics");
+      return;
+    }
+    navigate("/settings");
   }
 
-  async function runControlAction(actionKind: ControlActionRequest["actionKind"], targetKind: ControlActionRequest["targetKind"], targetId: string, dryRun: boolean) {
-    setBusy("control-action");
-    setError("");
-    setMessage("");
-    try {
-      const result = await api.controlAction({
-        actionKind,
-        targetKind,
-        targetId,
-        sourceSurface: activeSurface,
-        dryRun,
-        note: controlNote.trim(),
-        requestedAt: currentControlContextAt(targetKind),
-      });
-      setControlResult(result);
-      setMessage(result.humanMessage);
-      await refreshConsoleData(false, "manual");
-    } catch (controlError) {
-      setError(controlError instanceof Error ? controlError.message : "控制动作请求失败");
-    } finally {
-      setBusy("");
+  function handleWindowDrag(event: React.MouseEvent<HTMLDivElement>) {
+    const target = event.target as HTMLElement;
+    if (target.closest(".window-controls")) return;
+    if (desktopTransport) {
+      void windowStartDrag();
     }
   }
 
-  if (bootstrapRequired === null) {
-    if (error) {
-      return <Shell><StateCard title="桌面端骨架初始化失败" body={error} /></Shell>;
+  function handleWindowToggleMaximize() {
+    if (desktopTransport) {
+      void windowToggleMaximize();
     }
-    return <Shell><StateCard title="桌面端骨架初始化中" body="正在读取现有管理面认证状态和后端基础数据。" /></Shell>;
   }
 
-  if (bootstrapRequired) {
-    return <Shell><StateCard title="当前环境仍需 bootstrap" body="这轮桌面端不处理 bootstrap 流程，请先通过现有管理面完成初始化。" /></Shell>;
+  function handleWindowMinimize() {
+    if (desktopTransport) {
+      void windowMinimize();
+    }
   }
 
-  if (!currentUser) {
+  function handleWindowClose() {
+    if (appConfig.closeAction === "ask") {
+      setCloseDialogOpen(true);
+    } else if (appConfig.closeAction === "tray") {
+      void windowRequestClose();
+    } else {
+      void appExit(); // Rust app_exit saves bounds with DPI correction
+    }
+  }
+
+  async function handleCloseDialogChoice(action: "tray" | "exit", dontAskAgain: boolean) {
+    setCloseDialogOpen(false);
+    if (dontAskAgain) {
+      const newConfig = { ...appConfig, closeAction: action === "tray" ? "tray" as const : "exit" as const };
+      setAppConfig(newConfig);
+      try { await saveAppConfig(newConfig); } catch { /* ignore */ }
+    }
+    if (action === "exit") {
+      void appExit(); // Rust app_exit saves bounds with DPI correction
+    } else {
+      void windowRequestClose(); // hide_to_tray saves bounds with DPI correction
+    }
+  }
+
+  function renderDrawer(): ReactNode {
+    if (!drawerState) return null;
+    if (drawerState.kind === "service") {
+      return (
+        <div className="drawer-overlay" onClick={(event) => event.target === event.currentTarget && closeDrawer()}>
+          <div className="drawer drawer-wide">
+            <div className="drawer-header">
+              <span className="drawer-title">{drawerState.serviceId ? "编辑本地服务" : "添加本地服务"}</span>
+              <button className="drawer-close" type="button" onClick={closeDrawer}><i className="fas fa-times" /></button>
+            </div>
+            <div className="drawer-body">
+            <form className="drawer-form" onSubmit={saveLocalService}>
+              <label>
+                <span>服务名称</span>
+                <input value={localServiceForm.name} onChange={(event) => setLocalServiceForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如 Web-Local" />
+              </label>
+              <label>
+                <span>targetHost</span>
+                <input value={localServiceForm.targetHost} onChange={(event) => setLocalServiceForm((current) => ({ ...current, targetHost: event.target.value }))} required />
+              </label>
+              <label>
+                <span>targetPort</span>
+                <input value={localServiceForm.targetPort} onChange={(event) => setLocalServiceForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required />
+              </label>
+              <label>
+                <span>备注</span>
+                <textarea value={localServiceForm.note} onChange={(event) => setLocalServiceForm((current) => ({ ...current, note: event.target.value }))} placeholder="例如 当前机器上的本地前端或数据库服务" />
+              </label>
+              <button className="btn btn-primary" type="submit"><i className="fas fa-save" /> {drawerState.serviceId ? "保存服务" : "添加服务"}</button>
+            </form>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (drawerState.kind === "create-rule") {
+      return (
+        <div className="drawer-overlay" onClick={(event) => event.target === event.currentTarget && closeDrawer()}>
+          <div className="drawer drawer-wide">
+            <div className="drawer-header">
+              <span className="drawer-title">新建发布规则</span>
+              <button className="drawer-close" type="button" onClick={closeDrawer}><i className="fas fa-times" /></button>
+            </div>
+            <div className="drawer-body">
+            <form className="drawer-form" onSubmit={createPublishRule}>
+              <label>
+                <span>本地服务</span>
+                <select value={publishForm.localServiceId} onChange={(event) => setPublishForm((current) => ({ ...current, localServiceId: event.target.value }))}>
+                  <option value="">选择本地服务</option>
+                  {localServices.map((item) => (
+                    <option key={item.id} value={item.id}>{item.name} ({item.targetHost}:{item.targetPort})</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>协议</span>
+                <select value={publishForm.protocol} onChange={(event) => setPublishForm((current) => ({ ...current, protocol: event.target.value as PublishProtocol, publicPort: String(defaultPublicPortForProtocol(event.target.value as PublishProtocol, publishableTunnels.length)) }))}>
+                  {protocolList.map((item) => <option key={item} value={item}>{item.toUpperCase()}</option>)}
+                </select>
+              </label>
+              <div className="surface-banner info protocol-entry-hint">{protocolEntryHint(publishForm.protocol)}</div>
+              <label>
+                <span>公网端口</span>
+                <input value={publishForm.publicPort} onChange={(event) => setPublishForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required />
+              </label>
+              <label>
+                <span>传输策略</span>
+                <select value={publishForm.transportPolicy} onChange={(event) => setPublishForm((current) => ({ ...current, transportPolicy: event.target.value }))}>
+                  <option value="relay_only">relay_only</option>
+                  <option value="p2p_preferred">p2p_preferred (partial)</option>
+                </select>
+              </label>
+              {publishForm.protocol === "https" ? (
+                <>
+                  <label>
+                    <span>已托管域名</span>
+                    <select value={managedHTTPSDomainValues.includes(publishForm.domain.trim().toLowerCase()) ? publishForm.domain.trim().toLowerCase() : ""} onChange={(event) => setPublishForm((current) => ({ ...current, domain: event.target.value }))}>
+                      <option value="">手动输入新域名</option>
+                      {managedHTTPSDomains.map((item) => <option key={`${item.source}:${item.domain}`} value={item.domain}>{item.domain}{item.source === "cert_keeper" ? "（证书管家）" : ""}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Domain</span>
+                    <input value={publishForm.domain} onChange={(event) => setPublishForm((current) => ({ ...current, domain: event.target.value }))} placeholder="例如 app.example.com" required />
+                  </label>
+                </>
+              ) : null}
+              {publishForm.protocol === "https" ? (() => {
+                const domainTrim = publishForm.domain.trim().toLowerCase();
+                const matchedCert = domainTrim ? certificates.find((c) => c.domain === domainTrim) : null;
+                const managedDomain = domainTrim ? managedHTTPSDomains.find((item) => item.domain === domainTrim) : null;
+                const managedByCertKeeper = managedDomain?.source === "cert_keeper" && !matchedCert;
+                return (
+                  <div className="drawer-cert-section">
+                    <div className="section-title" style={{ fontSize: 12 }}><i className="fas fa-lock" /> SSL 证书</div>
+                    {managedByCertKeeper ? (
+                      <div className="surface-banner info">该域名证书由证书管家托管，请在证书管家中维护。</div>
+                    ) : matchedCert ? (
+                      <div className="surface-banner info">
+                        域名 {matchedCert.domain} 已有证书{matchedCert.expiresAt ? `，到期: ${formatDate(matchedCert.expiresAt)}` : ""}
+                        <button className="btn btn-sm" type="button" style={{ marginLeft: 8 }} onClick={async () => {
+                          try { await desktopApi.deleteCertificate(matchedCert.id); await reloadCertificateState(); } catch (e) { setError(e instanceof Error ? e.message : "删除失败"); }
+                        }}>移除证书</button>
+                      </div>
+                    ) : (
+                      <>
+                        {!domainTrim ? <div className="surface-banner info">请先填写 Domain，再上传或自动签发证书。</div> : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <div className="surface-banner info">域名 {domainTrim} 尚未上传证书，HTTPS 将以 HTTP-only 模式运行（无 SSL 终止）。</div>
+                            <button className="btn btn-primary btn-sm" type="button" disabled={certBusy} onClick={async () => {
+                              setCertBusy(true);
+                              try {
+                                await desktopApi.autoIssueCertificate(domainTrim);
+                                await reloadCertificateState();
+                                setMessage("证书已自动签发，HTTPS 将启用 SSL 终止。");
+                              } catch (e) { setError(e instanceof Error ? e.message : "自动签发失败"); }
+                              setCertBusy(false);
+                            }}>{certBusy ? "签发中..." : "自动签发 (Let's Encrypt)"}</button>
+                            <div style={{ textAlign: "center", fontSize: 11, color: "#5a6e80" }}>— 或手动粘贴 —</div>
+                            <textarea placeholder="证书 PEM (含 -----BEGIN CERTIFICATE-----)" value={certFormDomain === domainTrim ? certFormCert : ""} onChange={(e) => { setCertFormDomain(domainTrim); setCertFormCert(e.target.value); }} rows={3} style={{ fontFamily: "monospace", fontSize: 11, resize: "vertical" }} />
+                            <textarea placeholder="私钥 PEM (含 -----BEGIN PRIVATE KEY-----)" value={certFormDomain === domainTrim ? certFormKey : ""} onChange={(e) => { setCertFormDomain(domainTrim); setCertFormKey(e.target.value); }} rows={3} style={{ fontFamily: "monospace", fontSize: 11, resize: "vertical" }} />
+                            <button className="btn btn-sm" type="button" disabled={certBusy || !certFormCert || !certFormKey} onClick={async () => {
+                              setCertBusy(true);
+                              try {
+                                await desktopApi.createCertificate({ domain: domainTrim, certPem: certFormCert, keyPem: certFormKey });
+                                await reloadCertificateState();
+                                setCertFormCert(""); setCertFormKey("");
+                                setMessage("证书已上传，HTTPS 将自动启用 SSL 终止。");
+                              } catch (e) { setError(e instanceof Error ? e.message : "上传失败"); }
+                              setCertBusy(false);
+                            }}>手动上传</button>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })() : null}
+              {publishForm.protocol === "http" || publishForm.protocol === "https" ? (
+                <label>
+                  <span>验证路径</span>
+                  <input value={publishForm.probePath} onChange={(event) => setPublishForm((current) => ({ ...current, probePath: event.target.value }))} placeholder="/" />
+                  <div className="helper-text">仅用于连通性探测和示例命令，不影响实际转发路由，默认 /。</div>
+                </label>
+              ) : null}
+              <div className="drawer-note">当前主路径继续按 HTTP / HTTPS / TCP / UDP / SOCKS5 走；P2P 仍按 partial / non-blocking 处理。</div>
+              <div className="surface-banner info">当前 runtime 节点：{runtimeBoundDevice ? `${runtimeBoundDevice.nodeName} (${runtimeBoundDevice.nodeId})` : runtimeStatus.nodeId ? `等待注册 ${runtimeStatus.nodeId}` : "未生成 nodeId"}</div>
+              {runtimeBindingIssue ? <div className="surface-banner danger">{runtimeBindingIssue}</div> : null}
+              <button className="btn btn-primary" type="submit" disabled={busy === "create-rule" || localServices.length === 0 || Boolean(runtimeBindingIssue)}><i className="fas fa-plus" /> {busy === "create-rule" ? "创建中..." : "创建规则"}</button>
+            </form>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (!drawerTunnel || !drawerRuleState || !drawerCloudEntry || !editForm) return null;
+    const linkedService = resolveLinkedService(drawerTunnel, localServices);
+    const quickCommand = buildQuickCommand(drawerTunnel, drawerCloudEntry.publicUrl, cloudPublicHost);
+    const probe = probeResults[drawerTunnel.id];
+
     return (
-      <Shell>
-        <div className="login-card">
-          <p className="eyebrow">Desktop Console V1</p>
-          <h1>统一桌面控制台</h1>
-          <p className="copy">本轮接入与 node/operator 一致的 control-v1 合同，包括 contextVersion、稳定 executeOutcome 分类和真实刷新闭环。</p>
-          <form className="login-form" onSubmit={handleLogin}>
-            <label>
-              <span>邮箱</span>
-              <input value={loginForm.email} onChange={(event) => setLoginForm((current) => ({ ...current, email: event.target.value }))} required />
+      <div className="drawer-overlay" onClick={(event) => event.target === event.currentTarget && closeDrawer()}>
+        <div className="drawer">
+          <div className="drawer-header">
+            <span className="drawer-title">{drawerTunnel.name}</span>
+            <button className="drawer-close" type="button" onClick={closeDrawer}><i className="fas fa-times" /></button>
+          </div>
+          <div className="drawer-body">
+          <div className="detail-stat">
+            <div className="detail-stat-row"><span><i className="fas fa-download" /> 规则总下载</span><strong>{formatBytesTotal(drawerTunnelTrafficTotals.downTotal)}</strong></div>
+            <div className="detail-stat-row"><span><i className="fas fa-upload" /> 规则总上传</span><strong>{formatBytesTotal(drawerTunnelTrafficTotals.upTotal)}</strong></div>
+            <div className="detail-stat-note">这里显示的是当前规则的真实累计流量，来自 agent 心跳上报；无规则流量时保持 0 KB。</div>
+          </div>
+
+          <div className="drawer-section">
+            <div className="section-title"><i className="fas fa-circle-info" /> 规则详情</div>
+            <div className="drawer-grid">
+              <MetricBox label="本地服务" value={linkedService?.name || `${drawerTunnel.targetHost}:${drawerTunnel.targetPort}`} />
+              <MetricBox label="协议" value={drawerTunnel.type.toUpperCase()} />
+              <MetricBox label="绑定节点" value={`${drawerTunnel.nodeId}${runtimeStatus.nodeId && drawerTunnel.nodeId === runtimeStatus.nodeId ? " / 当前 runtime" : runtimeStatus.nodeId ? ` / runtime=${runtimeStatus.nodeId}` : ""}`} />
+              <MetricBox label="运行状态" value={drawerTunnel.runtimeState || "尚无状态"} />
+              <MetricBox label="运行路径" value={drawerTunnel.runtimePath || "尚无路径"} />
+              <MetricBox label="失败原因" value={drawerTunnel.lastFailureReason || "尚无"} />
+            </div>
+            <div className="badge-row">
+              {drawerRuleState.badges.map((badge) => <span key={badge.label} className={`status-chip ${badge.tone}`}>{badge.label}</span>)}
+            </div>
+            {drawerRuleState.messages.map((item) => <div key={item.message} className={item.tone === "danger" ? "surface-banner danger" : "surface-banner info"}>{item.message}</div>)}
+            <div className="surface-banner info">下一步：{drawerRuleState.nextStep}</div>
+          </div>
+
+          <div className="drawer-section">
+            <div className="section-title"><i className="fas fa-wand-magic-sparkles" /> 快速操作</div>
+            <div className="drawer-action-grid">
+              <button className="btn" type="button" onClick={() => void copyToClipboard(drawerCloudEntry.publicLabel, "用户入口")}><i className="fas fa-copy" /> 复制入口</button>
+              <button className="btn" type="button" disabled={!supportsOpenEntry(drawerTunnel, drawerRuleState, drawerCloudEntry)} onClick={() => void openExternal(drawerCloudEntry.publicUrl, "用户入口")}><i className="fas fa-arrow-up-right-from-square" /> 打开入口</button>
+              <button className="btn" type="button" onClick={() => void copyToClipboard(quickCommand, "协议示例命令(Linux/Mac)")}><i className="fas fa-terminal" /> 复制命令</button>
+              <button className="btn" type="button" onClick={() => void copyToClipboard(buildQuickCommandWindows(drawerTunnel, cloudPublicHost), "验证命令(Windows)")}><i className="fas fa-terminal" /> 复制 Win 命令</button>
+              <button className="btn" type="button" disabled={!supportsProbe(drawerTunnel, drawerRuleState, drawerCloudEntry) || busy === drawerTunnel.id + ":probe"} onClick={() => void runTunnelProbe(drawerTunnel)}><i className="fas fa-satellite-dish" /> {busy === drawerTunnel.id + ":probe" ? "探测中..." : "执行探测"}</button>
+            </div>
+            <div className="command-box"><code>{quickCommand}</code></div>
+            <div className="command-box"><code>{buildQuickCommandWindows(drawerTunnel, cloudPublicHost)}</code></div>
+            {probe ? <div className={`status-badge ${probe.success ? "" : "warning"}`}>{probe.success ? `最近 probe 成功 · ${formatDate(probe.probedAt)}` : `最近 probe 失败 · ${formatDate(probe.probedAt)} · ${probe.error || "未知错误"}`}</div> : null}
+          </div>
+
+          <div className="drawer-section">
+            <div className="section-title"><i className="fas fa-pen-to-square" /> 编辑绑定</div>
+            <form className="drawer-form" onSubmit={handleTunnelSave}>
+              <label>
+                <span>规则名称</span>
+                <input value={editForm.name} onChange={(event) => setEditForm((current) => current ? { ...current, name: event.target.value } : current)} />
+              </label>
+              <label>
+                <span>targetHost</span>
+                <input value={editForm.targetHost} onChange={(event) => setEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} />
+              </label>
+              <label>
+                <span>targetPort</span>
+                <input value={editForm.targetPort} onChange={(event) => setEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" />
+              </label>
+              <label>
+                <span>公网端口</span>
+                <input value={editForm.publicPort} onChange={(event) => setEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" />
+              </label>
+              {drawerTunnel.type === "http" || drawerTunnel.type === "https" ? (
+                <>
+                  {drawerTunnel.type === "https" ? (
+                    <label>
+                      <span>已托管域名</span>
+                      <select value={managedHTTPSDomainValues.includes(editForm.domain.trim().toLowerCase()) ? editForm.domain.trim().toLowerCase() : ""} onChange={(event) => setEditForm((current) => current ? { ...current, domain: event.target.value } : current)}>
+                        <option value="">手动输入新域名</option>
+                        {managedHTTPSDomains.map((item) => <option key={`${item.source}:${item.domain}`} value={item.domain}>{item.domain}{item.source === "cert_keeper" ? "（证书管家）" : ""}</option>)}
+                      </select>
+                    </label>
+                  ) : null}
+                  <label>
+                    <span>Domain</span>
+                    <input value={editForm.domain} onChange={(event) => setEditForm((current) => current ? { ...current, domain: event.target.value } : current)} />
+                  </label>
+                </>
+              ) : null}
+              {drawerTunnel.type === "https" ? (() => {
+                const domainTrim = editForm.domain.trim().toLowerCase();
+                const matchedCert = domainTrim ? certificates.find((c) => c.domain === domainTrim) : null;
+                const managedDomain = domainTrim ? managedHTTPSDomains.find((item) => item.domain === domainTrim) : null;
+                const managedByCertKeeper = managedDomain?.source === "cert_keeper" && !matchedCert;
+                return (
+                  <div className="drawer-cert-section">
+                    <div className="section-title" style={{ fontSize: 12 }}><i className="fas fa-lock" /> SSL 证书</div>
+                    {managedByCertKeeper ? (
+                      <div className="surface-banner info">该域名证书由证书管家托管，请在证书管家中维护。</div>
+                    ) : matchedCert ? (
+                      <div className="surface-banner info">
+                        域名 {matchedCert.domain} 已有证书{matchedCert.expiresAt ? `，到期: ${formatDate(matchedCert.expiresAt)}` : ""}
+                        <button className="btn btn-sm" type="button" style={{ marginLeft: 8 }} onClick={async () => {
+                          try { await desktopApi.deleteCertificate(matchedCert.id); await reloadCertificateState(); } catch (e) { setError(e instanceof Error ? e.message : "删除失败"); }
+                        }}>移除证书</button>
+                      </div>
+                    ) : (
+                      <>
+                        {!domainTrim ? <div className="surface-banner info">请先填写 Domain，再上传或自动签发证书。</div> : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <div className="surface-banner info">域名 {domainTrim} 尚未上传证书，HTTPS 将以 HTTP-only 模式运行。</div>
+                            <button className="btn btn-primary btn-sm" type="button" disabled={certBusy} onClick={async () => {
+                              setCertBusy(true);
+                              try {
+                                await desktopApi.autoIssueCertificate(domainTrim);
+                                await reloadCertificateState();
+                                setMessage("证书已自动签发，HTTPS 将启用 SSL 终止。");
+                              } catch (e) { setError(e instanceof Error ? e.message : "自动签发失败"); }
+                              setCertBusy(false);
+                            }}>{certBusy ? "签发中..." : "自动签发 (Let's Encrypt)"}</button>
+                            <div style={{ textAlign: "center", fontSize: 11, color: "#5a6e80" }}>— 或手动粘贴 —</div>
+                            <textarea placeholder="证书 PEM (含 -----BEGIN CERTIFICATE-----)" value={certFormDomain === domainTrim ? certFormCert : ""} onChange={(e) => { setCertFormDomain(domainTrim); setCertFormCert(e.target.value); }} rows={3} style={{ fontFamily: "monospace", fontSize: 11, resize: "vertical" }} />
+                            <textarea placeholder="私钥 PEM (含 -----BEGIN PRIVATE KEY-----)" value={certFormDomain === domainTrim ? certFormKey : ""} onChange={(e) => { setCertFormDomain(domainTrim); setCertFormKey(e.target.value); }} rows={3} style={{ fontFamily: "monospace", fontSize: 11, resize: "vertical" }} />
+                            <button className="btn btn-sm" type="button" disabled={certBusy || !certFormCert || !certFormKey} onClick={async () => {
+                              setCertBusy(true);
+                              try {
+                                await desktopApi.createCertificate({ domain: domainTrim, certPem: certFormCert, keyPem: certFormKey });
+                                await reloadCertificateState();
+                                setCertFormCert(""); setCertFormKey("");
+                                setMessage("证书已上传，HTTPS 将自动启用 SSL 终止。");
+                              } catch (e) { setError(e instanceof Error ? e.message : "上传失败"); }
+                              setCertBusy(false);
+                            }}>手动上传</button>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })() : null}
+              {drawerTunnel.type === "http" || drawerTunnel.type === "https" ? (
+                <label>
+                  <span>验证路径</span>
+                  <input value={editForm.probePath} onChange={(event) => setEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} placeholder="/" />
+                  <div className="helper-text">仅用于连通性探测和示例命令，不影响实际转发路由，默认 /。</div>
+                </label>
+              ) : null}
+              <label>
+                <span>transportPolicy</span>
+                <select value={editForm.transportPolicy} onChange={(event) => setEditForm((current) => current ? { ...current, transportPolicy: event.target.value } : current)}>
+                  <option value="relay_only">relay_only</option>
+                  <option value="p2p_preferred">p2p_preferred (partial)</option>
+                </select>
+              </label>
+              <button className="btn btn-primary" type="submit" disabled={busy === "save-rule"}><i className="fas fa-save" /> {busy === "save-rule" ? "保存中..." : "保存绑定"}</button>
+            </form>
+          </div>
+
+          <div className="drawer-section">
+            <div className="section-title"><i className="fas fa-sliders" /> 规则动作</div>
+            <label className="drawer-form single-field">
+              <span>动作备注</span>
+              <textarea value={controlNote} onChange={(event) => setControlNote(event.target.value)} placeholder="记录为什么暂停或恢复当前发布规则" />
             </label>
-            <label>
-              <span>密码</span>
-              <input type="password" value={loginForm.password} onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))} required />
+            {tunnelControlPanel ? <div className="surface-banner info">{tunnelControlPanel.headline} {tunnelControlPanel.summary}</div> : null}
+            <div className="drawer-action-grid action-grid-wide">
+              {tunnelActionOptions.map((item) => (
+                <button key={item.actionKind} className="btn" type="button" disabled={!item.available || busy === "control-action"} onClick={() => void runRuleAction(item.actionKind, drawerTunnel)}>
+                  <i className={item.actionKind === "pause_tunnel" ? "fas fa-pause" : "fas fa-play"} />
+                  {busy === "control-action" ? "处理中..." : item.label}
+                </button>
+              ))}
+              <button className="btn danger-button" type="button" disabled={busy === "delete-rule"} onClick={() => void deletePublishRule(drawerTunnel)}><i className="fas fa-trash" /> 删除规则</button>
+            </div>
+            {controlResult ? <ControlResultBlock result={controlResult} /> : null}
+          </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderDashboardPage() {
+    const statusTone = syncIssue ? "warning" : "";
+    return (
+      <div className="page-panel active">
+        <div className="page-header">
+          <h1>仪表盘</h1>
+          <div><button className="btn" type="button" onClick={() => void refreshPublisherData(true, "manual")} disabled={refreshing}><i className="fas fa-sync-alt" /> {refreshing ? "刷新中..." : "刷新"}</button></div>
+        </div>
+        <div className="status-bar-card">
+          <div><span className={`status-dot ${statusTone}`} /> 云站点: {cloudEndpointDisplayName}</div>
+          <div><i className="fas fa-server" /> {currentDevice?.nodeName || "当前设备未绑定"}</div>
+          <div style={{ marginLeft: "auto" }}><i className={`fas ${syncIssue ? "fa-exclamation-triangle" : "fa-check-circle"}`} style={{ color: syncIssue ? "#dc2626" : "#f59e0b" }} /> {syncIssue ? "最近自动刷新失败" : "代理运行时正常"}</div>
+        </div>
+        <div className="cards-grid">
+          <div className="stat-card"><div className="stat-title"><i className="fas fa-database" /> 本地服务</div><div className="stat-number">{localServices.length}</div><div>{localServices.length > 0 ? "已录入本机服务" : "尚未录入"}</div></div>
+          <div className="stat-card"><div className="stat-title"><i className="fas fa-share-alt" /> 已发布规则</div><div className="stat-number">{publishableTunnels.length}</div><div>{activeRulesCount} 活跃 · {Math.max(0, publishableTunnels.length - activeRulesCount)} 非活跃</div></div>
+          <div className="stat-card"><div className="stat-title"><i className="fas fa-exclamation-triangle" /> 需关注</div><div className="stat-number">{attentionCount}</div><div>{diagnosticsItems[0]?.label || "当前没有阻塞项"}</div></div>
+          <div className="stat-card"><div className="stat-title"><i className="fas fa-chart-line" /> 总流量</div><div className="stat-number">{totalTrafficLabel}</div><div>本软件隧道总流量</div></div>
+        </div>
+
+        {publishableTunnels.length > 0 ? (
+          <div className="section-title" style={{ marginBottom: 8 }}><i className="fas fa-sitemap" /> 隧道预览</div>
+        ) : null}
+        {publishableTunnels.length > 0 ? (
+          <div className="table-wrapper">
+            <table>
+              <thead><tr><th>规则名称</th><th>协议</th><th>公网入口</th><th>状态</th><th>速率</th><th>累计流量</th></tr></thead>
+              <tbody>
+                {publishableTunnels.map((tunnel) => {
+                  const state = evaluateRuleState(tunnel);
+                  const entry = deriveCloudEntry(tunnel, cloudPublicHost);
+                  const traffic = localTrafficByTunnel.get(tunnel.id);
+                  const rate = tunnelRates.get(tunnel.id);
+                  return (
+                    <tr key={tunnel.id}>
+                      <td>{tunnel.name}</td>
+                      <td>{tunnel.type.toUpperCase()}</td>
+                      <td>{entry.publicLabel}</td>
+                      <td><span className={`status-badge ${state.attention ? "warning" : ""}`}>{tunnel.status === "active" && !state.attention ? "Active" : tunnel.status === "paused" ? "Paused" : state.attention ? "Pending" : tunnel.status}</span></td>
+                      <td>{rate ? `↓${formatRate(rate.downRate)} ↑${formatRate(rate.upRate)}` : "0 KB/s"}</td>
+                      <td>{traffic ? formatBytesTotal(traffic.downBytes + traffic.upBytes) : "0 KB"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderServicesPage() {
+    const linkedTargets = new Set(publishableTunnels.map((item) => `${item.targetHost}:${item.targetPort}`));
+    return (
+      <div className="page-panel active">
+        <div className="page-header"><h1>本地服务</h1><div><button className="btn btn-primary" type="button" onClick={() => openAddServiceDrawer(null)}><i className="fas fa-plus" /> 添加服务</button></div></div>
+        <div className="table-wrapper">
+          <table>
+            <thead><tr><th>服务名称</th><th>目标地址</th><th>状态</th><th>备注</th><th>操作</th></tr></thead>
+            <tbody>
+              {localServices.length === 0 ? <tr><td colSpan={5}>当前还没有本地服务</td></tr> : localServices.map((item) => (
+                <tr key={item.id}>
+                  <td>{item.name}</td>
+                  <td>{item.targetHost}:{item.targetPort}</td>
+                  <td><span className={`status-badge ${linkedTargets.has(`${item.targetHost}:${item.targetPort}`) ? "" : "warning"}`}>{linkedTargets.has(`${item.targetHost}:${item.targetPort}`) ? "已发布" : "未发布"}</span></td>
+                  <td>{item.note || "暂无备注"}</td>
+                  <td className="action-icons"><i className="fas fa-edit" onClick={() => openAddServiceDrawer(item.id)} /><i className="fas fa-trash" onClick={() => deleteLocalService(item.id)} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  function renderPublishPage() {
+    return (
+      <div className="page-panel active">
+        <div className="page-header"><h1>发布规则</h1><div><button className="btn btn-primary" type="button" onClick={openCreateRuleDrawer}><i className="fas fa-plus" /> 新建规则</button></div></div>
+        <div className="surface-banner info">当前 runtime 节点：{runtimeBoundDevice ? `${runtimeBoundDevice.nodeName} (${runtimeBoundDevice.nodeId})` : runtimeStatus.nodeId ? `等待注册 ${runtimeStatus.nodeId}` : "未生成 nodeId"}</div>
+        {runtimeBindingIssue ? <div className="surface-banner danger">{runtimeBindingIssue}</div> : null}
+        <div className="table-wrapper">
+          <table>
+            <thead><tr><th>本地服务</th><th>协议/入口</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>
+              {publishableTunnels.length === 0 ? <tr><td colSpan={4}>当前还没有发布规则</td></tr> : publishableTunnels.map((item) => {
+                const state = evaluateRuleState(item);
+                const entry = deriveCloudEntry(item, cloudPublicHost);
+                const service = resolveLinkedService(item, localServices);
+                return (
+                  <tr key={item.id}>
+                    <td>{service?.name || `${item.targetHost}:${item.targetPort}`}</td>
+                    <td>{item.type.toUpperCase()} · {entry.publicLabel}</td>
+                    <td><span className={`status-badge ${state.attention ? "warning" : ""}`}>{item.status === "active" && !state.attention ? "Active" : item.status === "paused" ? "Paused" : state.attention ? "Pending" : item.status}</span></td>
+                    <td className="action-icons">
+                      <i className="fas fa-chart-bar detail-trigger" onClick={() => setDrawerState({ kind: "rule", tunnelId: item.id })} />
+                      <i className={item.status === "active" ? "fas fa-pause" : "fas fa-play"} onClick={() => void executeQuickToggle(item)} />
+                      <i className="fas fa-trash" onClick={() => void deletePublishRule(item)} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  function renderDiagnosticsPage() {
+    return (
+      <div className="page-panel active">
+        <div className="page-header"><h1>诊断中心</h1><div><button className="btn" type="button"><i className="fas fa-download" /> 导出诊断包</button></div></div>
+        <div className="diagnostics-panel">
+          {diagnosticsItems.length === 0 ? (
+            <div>当前没有需要关注的问题。</div>
+          ) : diagnosticsItems.map((item) => (
+            <div key={item.id} className="diagnostic-row">
+              <i className="fas fa-exclamation-triangle" style={{ color: "#f59e0b" }} />
+              <div>
+                <strong>{item.label}</strong>
+                <div>{item.detail}</div>
+                <div className="weak-note">下一步：{item.nextStep}</div>
+              </div>
+            </div>
+          ))}
+          <div className="weak-note">全局 next-step：{globalNextStep}</div>
+          <div className="weak-note">日志目录：{desktopHostPaths.logDir}</div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderSettingsPage() {
+    return (
+      <div className="page-panel active">
+        <div className="page-header"><h1>设置</h1></div>
+        <div className="settings-panel">
+          <div className="settings-section-label">基本</div>
+          <div className="settings-row"><span>云站点</span><span>{cloudEndpointDisplayName}</span></div>
+          <div className="settings-row"><span>账号</span><span>{currentUser?.email || "未登录"}</span></div>
+          <div className="settings-row"><span>当前设备</span><span>{currentDevice?.nodeName || "未绑定"}</span></div>
+
+          <div className="settings-section-label">行为</div>
+          <div className="settings-row">
+            <span>关闭行为</span>
+            <select value={appConfig.closeAction || "ask"} onChange={async (event) => {
+              const val = event.target.value as "ask" | "tray" | "exit";
+              const newConfig = { ...appConfig, closeAction: val };
+              setAppConfig(newConfig);
+              try { await saveAppConfig(newConfig); } catch { /* ignore */ }
+            }}>
+              <option value="ask">每次询问</option>
+              <option value="tray">最小化到托盘</option>
+              <option value="exit">直接退出</option>
+            </select>
+          </div>
+          <div className="settings-row">
+            <span>静默启动</span>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input type="checkbox" checked={appConfig.silentStart || false} onChange={async (event) => {
+                const newConfig = { ...appConfig, silentStart: event.target.checked };
+                setAppConfig(newConfig);
+                try { await saveAppConfig(newConfig); } catch { /* ignore */ }
+              }} />
+              <span style={{ fontSize: 12, color: "#5a6e80" }}>启动时最小化到托盘</span>
             </label>
-            <button type="submit" disabled={busy === "login"}>{busy === "login" ? "登录中..." : "进入 desktop-console"}</button>
-          </form>
-          {error ? <div className="banner error">{error}</div> : null}
-          {message ? <div className="banner info">{message}</div> : null}
+          </div>
+          <div className="settings-row">
+            <span>开机启动</span>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input type="checkbox" checked={appConfig.autoStart || false} onChange={async (event) => {
+                const val = event.target.checked;
+                try {
+                  await setAutoStart(val);
+                  const newConfig = { ...appConfig, autoStart: val };
+                  setAppConfig(newConfig);
+                  await saveAppConfig(newConfig);
+                } catch (e) { setError(e instanceof Error ? e.message : "设置失败"); }
+              }} />
+              <span style={{ fontSize: 12, color: "#5a6e80" }}>开机时自动运行</span>
+            </label>
+          </div>
+
+          {loginProfiles && loginProfiles.profiles.length > 0 ? (
+            <>
+              <div className="settings-section-label">登录历史</div>
+              {loginProfiles.profiles.map((p) => (
+                <div key={p.email} className="settings-row">
+                  <span>{p.email}{p.autoLogin ? " (自动登录)" : ""}</span>
+                  <button className="btn btn-sm" type="button" onClick={async () => {
+                    try { await deleteLoginProfile(p.email); const updated = await readLoginProfiles(); setLoginProfiles(updated); } catch (e) { setError(e instanceof Error ? e.message : "删除失败"); }
+                  }}>移除</button>
+                </div>
+              ))}
+            </>
+          ) : null}
+
+          <div className="settings-section-label">运行时</div>
+          <div className="settings-row"><span>Runtime 状态</span><span>{runtimeReady ? "运行中" : runtimeStatus.running ? "已启动但未就绪" : "未运行"}</span></div>
+          <div className="settings-row"><span>Runtime Node ID</span><span>{runtimeStatus.nodeId || "未生成"}</span></div>
+          <div className="settings-row"><span>Relay TCP</span><span>{runtimeStatus.relayTcpUrl || "未配置"}</span></div>
+          <div className="settings-row"><span>配置目录</span><span>{desktopHostPaths.configDir}</span></div>
+          <div className="settings-row"><span>日志目录</span><span>{desktopHostPaths.logDir}</span></div>
+
+          {currentUser?.role === "admin" ? (
+            <>
+              <div className="settings-section-label">管理</div>
+              <div className="settings-row"><span>服务端指标</span><span>{serverMetrics ? `${serverMetrics.onlineNodes}/${serverMetrics.registeredNodes} 节点在线` : "未读取"}</span></div>
+              {serverMetrics ? <div className="settings-row"><span>已配置隧道</span><span>{serverMetrics.configuredTunnels}</span></div> : null}
+            </>
+          ) : null}
+          {runtimeStatus.lastError ? <div className="surface-banner danger">{runtimeStatus.lastError}</div> : null}
+          <div className="settings-actions">
+            <button className="btn" type="button" onClick={() => void startEmbeddedRuntime(cloudEndpointLabel, true)} disabled={!connectionReady || busy === "runtime-start"}>重新启动 Runtime</button>
+            <button className="btn" type="button" onClick={() => void openRuntimeLog("stdout")} disabled={!runtimeStatus.stdoutLogPath}>打开 stdout 日志</button>
+            <button className="btn" type="button" onClick={() => void openRuntimeLog("stderr")} disabled={!runtimeStatus.stderrLogPath}>打开 stderr 日志</button>
+            <button className="btn" type="button" onClick={() => void stopRuntime().then(setRuntimeStatus).catch((runtimeError) => setError(runtimeError instanceof Error ? runtimeError.message : "停止运行时失败"))} disabled={!runtimeStatus.running}>停止 Runtime</button>
+          </div>
+          <div className="settings-actions" style={{ marginTop: 12, borderTop: "1px solid rgba(0,0,0,0.06)", paddingTop: 12 }}>
+            <button className="btn btn-danger" type="button" onClick={() => void handleLogout()}>退出当前账号</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderBootstrapShell(title: string, body: string, content?: ReactNode, danger = false) {
+    return (
+      <Shell bootstrap>
+        <div className="window app-surface">
+          {toastState && toastState.phase !== "gone" ? (
+            <div
+              className={`toast-bubble ${toastState.tone} ${toastState.phase === "fade" ? "toast-fading" : ""}`}
+              onMouseEnter={handleToastMouseEnter}
+              onMouseLeave={handleToastMouseLeave}
+            >
+              <i className={toastState.tone === "danger" ? "fas fa-exclamation-circle" : "fas fa-info-circle"} />
+              {toastState.text}
+            </div>
+          ) : null}
+          <div className="title-bar" onMouseDown={handleWindowDrag} onDoubleClick={handleWindowToggleMaximize}>
+            <i className="fas fa-tower-broadcast app-icon" />
+            <span className="app-title">驻阡陌</span>            <div className="window-controls">
+              <button type="button" onClick={handleWindowMinimize}>—</button>
+              <button type="button" onClick={handleWindowToggleMaximize}>☐</button>
+              <button type="button" className="close" onClick={handleWindowClose}>✕</button>
+            </div>
+          </div>
+          <div className="bootstrap-content">
+            <div className="bootstrap-panel-shell">
+              <SurfaceCard title={title} body={body} danger={danger}>
+                {content}
+              </SurfaceCard>
+            </div>
+          </div>
+          {closeDialogOpen ? (
+            <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setCloseDialogOpen(false)}>
+              <div className="modal-dialog">
+                <h3>关闭确认</h3>
+                <p>您希望关闭时如何处理？</p>
+                <CloseDialogChoice onClick={handleCloseDialogChoice} onCancel={() => setCloseDialogOpen(false)} />
+              </div>
+            </div>
+          ) : null}
+          {deleteConfirmTarget ? (
+            <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setDeleteConfirmTarget(null)}>
+              <div className="modal-dialog">
+                <h3>确认删除</h3>
+                <p>确定删除账号 {deleteConfirmTarget} 的登录记录？</p>
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                  <button className="btn" type="button" onClick={() => setDeleteConfirmTarget(null)}>取消</button>
+                  <button className="btn btn-danger" type="button" onClick={async () => {
+                    const email = deleteConfirmTarget;
+                    setDeleteConfirmTarget(null);
+                    try {
+                      await deleteLoginProfile(email);
+                      const updated = await readLoginProfiles();
+                      setLoginProfiles(updated);
+                      if (loginForm.email === email) {
+                        setLoginForm((current) => ({ ...current, email: updated?.profiles[0]?.email || "", password: "" }));
+                        setSavePassword(false);
+                        setAutoLogin(false);
+                      }
+                      if (!updated?.profiles.length) setProfileListOpen(false);
+                    } catch (err) { setError(err instanceof Error ? err.message : "删除失败"); }
+                  }}>删除</button>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
       </Shell>
     );
   }
 
-  if (!mode) {
-    return (
-      <Shell>
-        <div className="mode-grid">
-          <ModeCard
-            title="本机模式"
-            description="映射到 node_console 语义：围绕当前机器和本机隧道工作，使用同一套 contextVersion / executeOutcome 合同。"
-            onClick={() => setMode("local-node")}
-          />
-          <ModeCard
-            title="运维模式"
-            description="映射到 operator_console 语义：先选机器，再对节点和隧道执行同一套控制动作，不再形成独立合同。"
-            onClick={() => setMode("operator")}
-          />
+  function renderCurrentPage() {
+    switch (currentRoute.key) {
+      case "services":
+        return renderServicesPage();
+      case "publish":
+        return renderPublishPage();
+      case "diagnostics":
+        return renderDiagnosticsPage();
+      case "settings":
+        return renderSettingsPage();
+      default:
+        return renderDashboardPage();
+    }
+  }
+
+  if (bootstrapRequired === null) {
+    return renderBootstrapShell("初始化中", error || "正在读取账号与设备状态…", undefined, Boolean(error));
+  }
+
+  if (bootstrapRequired) {
+    return renderBootstrapShell("需要初始化", "请先通过管理面完成初始化配置。", undefined, true);
+  }
+
+  if (!connectionReady) {
+    const isCustomPreset = selectedRelayPresetId === "custom";
+    return renderBootstrapShell(
+      "选择云站点",
+      "选择或填写云站点后连接。",
+      <>
+        <div className="surface-form">
+          <label>
+            <span>云站点</span>
+            <select value={selectedRelayPresetId} onChange={(event) => {
+              const preset = relayEndpointPresets.find((item) => item.id === event.target.value) || initialRelayEndpointPreset;
+              setSelectedRelayPresetId(preset.id);
+              setApiDraft(preset.apiBaseUrl);
+              setCloudPublicHost(preset.publicHost || defaultDesktopPublicHost);
+            }}>
+              {relayEndpointPresets.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+          </label>
+          {isCustomPreset ? (
+            <>
+              <label>
+                <span>API 地址</span>
+                <input placeholder="http://主机:端口" value={apiDraft} onChange={(event) => setApiDraft(event.target.value)} />
+              </label>
+              <label>
+                <span>公网入口服务</span>
+                <input placeholder="域名或主机" value={cloudPublicHost} onChange={(event) => setCloudPublicHost(event.target.value)} />
+              </label>
+            </>
+          ) : null}
+          <button className="btn btn-primary" type="button" onClick={() => void validateCloudConnection()} disabled={busy === "connect-cloud"}><i className="fas fa-link" /> {busy === "connect-cloud" ? "连接中..." : "连接并继续"}</button>
         </div>
-      </Shell>
+      </>,
+    );
+  }
+
+  if (!currentUser) {
+    return renderBootstrapShell(
+      "登录",
+      "登录您的账号以开始使用。",
+      <>
+        <form className="surface-form" onSubmit={handleLogin}>
+          <label>
+            <span>邮箱</span>
+            {loginProfiles && loginProfiles.profiles.length > 0 ? (
+              <div className="profile-selector">
+                <div className="profile-input-wrap">
+                  <input value={loginForm.email} onChange={(event) => setLoginForm((current) => ({ ...current, email: event.target.value }))} required onFocus={() => setProfileListOpen(false)} />
+                  <button type="button" className="profile-arrow-btn" onClick={() => setProfileListOpen(!profileListOpen)}>
+                    <i className={`fas fa-chevron-${profileListOpen ? "up" : "down"}`} />
+                  </button>
+                </div>
+                {profileListOpen ? (
+                  <div className="profile-dropdown">
+                    {loginProfiles.profiles.map((p) => (
+                      <div key={p.email} className={`profile-row${loginForm.email === p.email ? " selected" : ""}`} onClick={async () => {
+                        setLoginForm((current) => ({ ...current, email: p.email }));
+                        if (desktopTransport) {
+                          try {
+                            const pw = await decryptLoginPassword(p.email);
+                            if (pw) {
+                              setLoginForm((current) => ({ ...current, password: pw }));
+                              setSavePassword(true);
+                            } else {
+                              setLoginForm((current) => ({ ...current, password: "" }));
+                              setSavePassword(false);
+                            }
+                            setAutoLogin(p.autoLogin);
+                          } catch {
+                            setLoginForm((current) => ({ ...current, password: "" }));
+                            setSavePassword(false);
+                            setAutoLogin(false);
+                          }
+                        }
+                        setProfileListOpen(false);
+                      }}>
+                        <span className="profile-email">{p.email}</span>
+                        <button type="button" className="profile-delete-btn" onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteConfirmTarget(p.email);
+                        }}><i className="fas fa-trash-alt" /></button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <input value={loginForm.email} onChange={(event) => setLoginForm((current) => ({ ...current, email: event.target.value }))} required />
+            )}
+          </label>
+          <label>
+            <span>密码</span>
+            <input type="password" value={loginForm.password} onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))} required />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input type="checkbox" checked={savePassword} onChange={(event) => {
+              if (autoLogin && !event.target.checked) return; // can't uncheck when autoLogin is on
+              setSavePassword(event.target.checked);
+            }} disabled={autoLogin} />
+            <span style={{ fontSize: 13 }}>保存密码{autoLogin ? "（自动登录需要）" : ""}</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input type="checkbox" checked={autoLogin} onChange={(event) => {
+              const val = event.target.checked;
+              setAutoLogin(val);
+              if (val) setSavePassword(true); // auto-login requires saved password
+            }} />
+            <span style={{ fontSize: 13 }}>自动登录</span>
+          </label>
+          <button className="btn btn-primary" type="submit" disabled={busy === "login"}><i className="fas fa-right-to-bracket" /> {busy === "login" ? "登录中..." : "进入发布器"}</button>
+        </form>
+      </>,
     );
   }
 
   return (
     <Shell>
-      <div className="desktop-shell">
-        <aside className="left-rail">
-          <div className="panel brand-panel">
-            <p className="eyebrow">Desktop Console</p>
-            <h1>{mode === "local-node" ? "本机模式" : "运维模式"}</h1>
-            <p className="copy">统一桌面控制台：本机模式使用 node-console 语义，运维模式使用 operator-console 语义，控制结果分类完全由稳定机器字段驱动。</p>
+      <div className="window app-surface">
+        {toastState && toastState.phase !== "gone" ? (
+          <div
+            className={`toast-bubble ${toastState.tone} ${toastState.phase === "fade" ? "toast-fading" : ""}`}
+            onMouseEnter={handleToastMouseEnter}
+            onMouseLeave={handleToastMouseLeave}
+          >
+            <i className={toastState.tone === "danger" ? "fas fa-exclamation-circle" : "fas fa-info-circle"} />
+            {toastState.text}
+          </div>
+        ) : null}
+        {renderDrawer()}
+        <div className="title-bar" onMouseDown={handleWindowDrag} onDoubleClick={handleWindowToggleMaximize}>
+          <i className="fas fa-shield-alt app-icon" />
+          <span className="app-title">驻阡陌</span>
+          <div className="window-controls">
+            <button type="button" onClick={handleWindowMinimize}>—</button>
+            <button type="button" onClick={handleWindowToggleMaximize}>☐</button>
+            <button type="button" className="close" onClick={handleWindowClose}>✕</button>
+          </div>
+        </div>
+
+        <div className="app-main">
+          <div className="nav-sidebar">
+            <div className="nav-header">
+              <div className="device-badge">
+                <i className="fas fa-server device-icon" />
+                <div className="device-info">{currentDevice?.nodeName || "当前设备未绑定"}<small>{currentDevice ? `已绑定 · ${currentDevice.status}` : "未绑定 · 待配置"}</small></div>
+              </div>
+            </div>
+
+            <div className="nav-menu">
+              {publisherRoutes.map((route) => (
+                <NavLink key={route.key} to={route.path} className={({ isActive }) => isActive ? "nav-item active" : "nav-item"}>
+                  <i className={route.icon} /> {route.label}
+                </NavLink>
+              ))}
+            </div>
+
+            <div className="sys-res-card">
+              <div className="sys-title"><i className="fas fa-chart-bar" /> 当前软件资源</div>
+              <div className="resource-item">
+                <div className="res-header"><span>CPU</span><span>{appUsage.cpuPercent != null ? `${Math.round(appUsage.cpuPercent)}%` : "--"}</span></div>
+                <div className="progress-bar"><div className="progress-fill" style={{ width: `${Math.min(100, Math.max(0, Math.round(appUsage.cpuPercent || 0)))}%` }} /></div>
+              </div>
+              <div className="resource-item">
+                <div className="res-header"><span>内存</span><span>{appUsage.memoryMb != null ? `${Math.round(appUsage.memoryMb)} MB` : "--"}</span></div>
+                <div className="progress-bar"><div className="progress-fill" style={{ width: `${Math.min(100, Math.max(6, Math.round((appUsage.memoryMb || 0) / 4)))}%` }} /></div>
+              </div>
+            </div>
+
+            <div className="nav-footer">
+              <div className="user-profile">
+                <div className="user-avatar">{userInitial}</div>
+                <div className="user-details">
+                  <div className="user-name">{currentUser.email}</div>
+                  <div className="user-role">设备管理员</div>
+                </div>
+              </div>
+              <div className="version-tag">
+                <span>v0.1.0</span>
+                <span><i className="fas fa-circle" style={{ color: syncIssue ? "#dc2626" : "#f59e0b", fontSize: 8 }} /> {syncIssue ? "异常" : "在线"}</span>
+              </div>
+            </div>
           </div>
 
-          <div className="panel user-panel">
-            <strong>{currentUser.displayName}</strong>
-            <span className="muted-line">{currentUser.email}</span>
-            <span className="status-chip neutral">{currentUser.role}</span>
-            <span className="muted-line">surface: {activeSurface} / 自动刷新 10s{lastRefreshAt ? " / 上次成功 " + formatDate(lastRefreshAt) : " / 尚无成功刷新"}</span>
-            <div className="button-row">
-              <button className="secondary" type="button" onClick={() => void refreshConsoleData(true, "manual")} disabled={refreshing}>{refreshing ? "刷新中..." : "手动刷新"}</button>
-              <button className="secondary" type="button" onClick={() => setMode(null)}>切换模式</button>
-              <button className="secondary" type="button" onClick={() => void handleLogout()} disabled={busy === "logout"}>{busy === "logout" ? "退出中..." : "退出"}</button>
+          <div className="content-area">
+            <div className="content-scroll-area">{renderCurrentPage()}</div>
+            <div className="footer-status">
+              <i className="fas fa-circle" style={{ color: syncIssue ? "#dc2626" : "#f59e0b" }} />
+              {syncIssue ? `请求异常 · ${syncIssue}` : `在线 · ${currentRouteLabel}`}
+              <span style={{ marginLeft: 20 }}><i className="fas fa-arrow-down" /> {downRateLabel} <i className="fas fa-arrow-up" style={{ marginLeft: 16 }} /> {upRateLabel}</span>
+              <span style={{ marginLeft: "auto" }}>上次同步: {lastRefreshAt ? formatDate(lastRefreshAt) : "尚无"}</span>
             </div>
           </div>
-
-          {mode === "local-node" ? (
-            <div className="panel binding-panel">
-              <div className="panel-head small">
-                <h2>本机绑定状态</h2>
-                <span className={"status-chip " + bindingTone}>{bindingStatusLabel}</span>
-              </div>
-              <div className="detail-stack binding-grid">
-                <Metric label="绑定来源" value={localBinding.sourceLabel} />
-                <Metric label="当前配置 nodeId" value={desktopNodeId || "未配置"} />
-                <Metric label="当前受管 local 节点数" value={String(nodes.filter((node) => node.nodeRole === "local" && node.instanceManaged).length)} />
-                <Metric label="是否命中绑定节点" value={localBinding.node ? localBinding.node.nodeId : "未命中"} />
-              </div>
-              <div className="banner info binding-note">绑定原因：{localBinding.reason}</div>
-              <div className="banner info binding-note">下一步建议：{localBinding.nextAction}</div>
+        </div>
+        {closeDialogOpen ? (
+          <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setCloseDialogOpen(false)}>
+            <div className="modal-dialog">
+              <h3>关闭确认</h3>
+              <p>您希望关闭时如何处理？</p>
+              <CloseDialogChoice onClick={handleCloseDialogChoice} onCancel={() => setCloseDialogOpen(false)} />
             </div>
-          ) : (
-            <div className="panel machine-panel">
-              <div className="panel-head small">
-                <h2>机器列表</h2>
-                <span>{nodes.length} 台</span>
-              </div>
-              <div className="machine-list">
-                {nodes.map((node) => (
-                  <button
-                    key={node.nodeId}
-                    type="button"
-                    className={selectedNodeId === node.nodeId ? "machine-item active" : "machine-item"}
-                    onClick={() => setSelectedNodeId(node.nodeId)}
-                  >
-                    <div className="machine-topline">
-                      <strong>{node.nodeName}</strong>
-                      <span className={statusClass(node.status)}>{node.status}</span>
-                    </div>
-                    <div className="machine-subline">{node.nodeId}</div>
-                    <div className="machine-subline">{node.isolated ? "已隔离" : "未隔离"} / {nodeAgentDeploymentLabel(node)}</div>
-                    <div className="machine-subline">{capabilitySummary(node.capabilities)}</div>
-                    <div className="machine-subline">active {node.activeTunnels} / relay {node.runtimeSummary?.relayPathCount ?? 0} / p2p {node.runtimeSummary?.p2pPathCount ?? 0}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </aside>
-
-        <main className="main-stage">
-          {error ? <div className="banner error">{error}</div> : null}
-          {message ? <div className="banner info">{message}</div> : null}
-
-          {mode === "local-node" && !localBinding.node ? (
-            <StateCard title="尚未完成本机绑定" body={localBinding.reason + " " + localBinding.nextAction + " 本机模式不会 fallback 到 operator 机器列表。"} />
-          ) : !selectedNode ? (
-            <StateCard title="当前没有可展示的机器" body={mode === "local-node" ? "本机模式尚未选中绑定机器。" : "请在左侧机器列表中选择一台机器。"} />
-          ) : (
-            <>
-              <section className="panel hero-panel">
-                <div className="hero-head">
-                  <div>
-                    <p className="eyebrow">当前机器首页</p>
-                    <h2>{selectedNode.nodeName}</h2>
-                    <p className="copy">{selectedNode.nodeId}</p>
-                  </div>
-                  <div className="hero-chips">
-                    <span className={statusClass(selectedNode.status)}>{selectedNode.status}</span>
-                    <span className={selectedNode.isolated ? "status-chip danger" : "status-chip good"}>{selectedNode.isolated ? "已隔离" : "未隔离"}</span>
-                    <span className="status-chip neutral">{selectedNode.agentVersion || "agent 未上报"}</span>
-                    <span className="status-chip neutral">surface: {activeSurface}</span>
-                  </div>
-                </div>
-                <div className="hero-grid">
-                  <Metric label="能力摘要" value={capabilitySummary(selectedNode.capabilities)} />
-                  <Metric label="active tunnel" value={String(selectedNode.activeTunnels)} />
-                  <Metric label="deployment" value={selectedNode.deploymentMode || "尚未上报"} />
-                  <Metric label="service unit" value={selectedNode.serviceUnit || "尚未上报"} />
-                  <Metric label="instance profile" value={selectedNode.instanceProfile || "尚未上报"} />
-                  <Metric label="instance managed" value={selectedNode.instanceManaged ? "true" : "未托管"} />
-                  <Metric label="relay path" value={String(selectedNode.runtimeSummary?.relayPathCount ?? 0)} />
-                  <Metric label="p2p path" value={String(selectedNode.runtimeSummary?.p2pPathCount ?? 0)} />
-                  <Metric label="pending" value={String(selectedNode.runtimeSummary?.pendingStateCount ?? 0)} />
-                  <Metric label="unavailable" value={String(selectedNode.runtimeSummary?.unavailableStateCount ?? 0)} />
-                  <Metric label="last seen" value={formatDate(selectedNode.lastSeenAt)} />
-                  <Metric label="失败原因数" value={String(selectedNode.runtimeSummary?.failureReasonCount ?? 0)} />
-                </div>
-              </section>
-
-              <section className="panel protocol-panel">
-                <div className="panel-head small">
-                  <div>
-                    <h2>协议入口总览</h2>
-                    <p className="copy">把当前机器上 HTTP / HTTPS / UDP / SOCKS5 / TCP / P2P 的可用、空、需关注、partial 状态直接收敛成桌面入口判断，不再只在 tunnel 详情里被动拼接。</p>
-                  </div>
-                </div>
-                <div className="protocol-grid">
-                  {protocolOverviewItems.map((item) => (
-                    <div key={item.key} className="check-item">
-                      <div className="check-head">
-                        <strong>{item.label}</strong>
-                        <span className={"status-chip " + item.tone}>{item.state}</span>
-                      </div>
-                      <p className="copy">{item.summary}</p>
-                      <p className="weak-note">{item.detail}</p>
-                      {item.nextStep ? <p className="weak-note">下一步：{item.nextStep}</p> : null}
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="panel preflight-panel">
-                <div className="panel-head small">
-                  <div>
-                    <h2>节点控制区</h2>
-                    <p className="copy">panel、options、dry-run、execute 都走与 node/operator 一致的 control-v1 主链，并使用同一个 contextVersion/requestedAt 合同。</p>
-                  </div>
-                </div>
-                {nodeControlPanel ? <div className="banner info">{nodeControlPanel.headline} {nodeControlPanel.summary} 下一步：{nodeControlPanel.nextStep}</div> : null}
-                <div className="check-list">
-                  {(nodeControlPanel?.checks || []).map((item) => (
-                    <div key={item.code} className="check-item">
-                      <div className="check-head">
-                        <strong>{item.label}</strong>
-                        <span className={"status-chip " + checkStateTone(item.state)}>{checkStateLabel(item.state)}</span>
-                      </div>
-                      <p className="copy">{item.message}</p>
-                    </div>
-                  ))}
-                </div>
-                <label className="control-note-field">
-                  <span>控制动作备注</span>
-                  <textarea value={controlNote} onChange={(event) => setControlNote(event.target.value)} placeholder="可选：记录为什么要做这次控制动作" />
-                </label>
-                <div className="check-list compact-check-list">
-                  {nodeActionOptions.map((option) => (
-                    <div key={option.actionKind} className="check-item">
-                      <div className="check-head">
-                        <strong>{option.label}</strong>
-                        <span className={"status-chip " + controlOptionTone(option)}>{controlOptionStateLabel(option)}</span>
-                      </div>
-                      {nodeControlPanel?.recommendedAction === option.actionKind ? <p className="copy">推荐动作</p> : null}
-                      <p className="copy">{option.message}</p>
-                      {option.summary ? <p className="copy">{option.summary}</p> : null}
-                      {option.nextStep ? <p className="copy">下一步：{option.nextStep}</p> : null}
-                      <p className="copy">executionMode: <code>{option.executionMode}</code> / placeholderOnly: <code>{String(Boolean(option.placeholderOnly))}</code> / contextVersion: <code>{option.contextVersion || nodeControlPanel?.contextVersion || nodeControlContextAt || "-"}</code></p>
-                      <div className="button-row wrap-actions">
-                        <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
-                        <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : (option.placeholderOnly ? "占位执行 " : "执行 ") + option.label}</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="panel workbench-panel">
-                <div className="panel-head">
-                  <div>
-                    <h2>按隧道类型切换的工作区</h2>
-                    <p className="copy">当前选中隧道的详情、普通配置编辑和 tunnel control panel/options/result 全部在同一个工作区里闭环；status 切换只能走控制动作。</p>
-                  </div>
-                </div>
-
-                <div className="tab-row">
-                  {tunnelTabs.map((tab) => (
-                    <button key={tab} type="button" className={activeTab === tab ? "tab active" : "tab"} onClick={() => setActiveTab(tab)}>
-                      {tab.toUpperCase()} ({selectedNodeTunnels.filter((item) => item.type === tab).length})
-                    </button>
-                  ))}
-                </div>
-
-                <div className="workspace-grid">
-                  <div className="panel tunnel-list-panel">
-                    <div className="panel-head small">
-                      <h3>{activeTab.toUpperCase()} 列表</h3>
-                      <span>{tabTunnels.length} 条</span>
-                    </div>
-                    <div className="tunnel-list">
-                      {tabTunnels.length === 0 ? <div className="empty-inline">当前机器没有 {activeTab.toUpperCase()} tunnel。</div> : tabTunnels.map((tunnel) => (
-                        <button
-                          key={tunnel.id}
-                          type="button"
-                          className={selectedTunnelId === tunnel.id ? "tunnel-item active" : "tunnel-item"}
-                          onClick={() => setSelectedTunnelId(tunnel.id)}
-                        >
-                          <strong>{tunnel.name}</strong>
-                          <span>{tunnel.id}</span>
-                          <span>{tunnel.transportPolicy || "relay_only"}</span>
-                          <span>{runtimeLabel(tunnel)}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="panel tunnel-detail-panel">
-                    <div className="panel-head small">
-                      <h3>当前隧道详情 / 控制区</h3>
-                    </div>
-                    {!selectedTunnel ? (
-                      <WorkbenchEmptyState activeTab={activeTab} selectedNode={selectedNode} />
-                    ) : (
-                      <div className="detail-column">
-                        {selectedTunnelState?.messages.map((item) => (
-                          <div key={item.message} className={item.tone === "danger" ? "banner error" : "banner info"}>{item.message}</div>
-                        ))}
-                        <div className="detail-stack">
-                          <Metric label="name" value={selectedTunnel.name} />
-                          <Metric label="type" value={selectedTunnel.type} />
-                          <Metric label="transportPolicy" value={selectedTunnel.transportPolicy || "relay_only"} />
-                          <Metric label="runtimePath" value={selectedTunnel.runtimePath || "尚无运行态上报"} />
-                          <Metric label="runtimeState" value={selectedTunnel.runtimeState || "尚无运行态上报"} />
-                          <Metric label="lastFailureReason" value={selectedTunnel.lastFailureReason || "尚无运行态上报"} />
-                          <Metric label="public entry" value={publicEntry(selectedTunnel)} />
-                          <Metric label="target" value={selectedTunnel.targetHost + ":" + selectedTunnel.targetPort} />
-                          <Metric label="status" value={selectedTunnel.status} />
-                        </div>
-
-                        <div className="panel access-panel">
-                          <div className="panel-head small">
-                            <div>
-                              <h3>Tunnel Access Workbench</h3>
-                              <p className="copy">基于当前已验证可用的 HTTP / HTTPS / UDP / SOCKS5 能力，给桌面端一个可直接操作的协议入口工作区。P2P 当前只做降级表达，不阻塞主线。</p>
-                            </div>
-                          </div>
-                          <div className="detail-stack access-grid">
-                            <Metric label="用户入口" value={tunnelPublicEntry(selectedTunnel)} />
-                            <Metric label="入口语义" value={tunnelAccessLabel(selectedTunnel)} />
-                            <Metric label="运行事实" value={runtimeFactSummary(selectedTunnel)} />
-                            <Metric label="最近 probe" value={probeFreshnessLabel(selectedTunnel, probeResults[selectedTunnel.id])} />
-                          </div>
-                          <div className="badge-row access-badges">
-                            {selectedTunnelState?.badges.map((badge) => (
-                              <span key={badge.label} className={"status-chip " + badge.tone}>{badge.label}</span>
-                            ))}
-                          </div>
-                          <div className="banner info">{tunnelAccessGuide(selectedTunnel)}</div>
-                          {selectedTunnelState?.nextStep ? <div className="banner info">下一步：{selectedTunnelState.nextStep}</div> : null}
-                          <div className="action-card-grid">
-                            {selectedTunnelActions.map((action) => (
-                              <div key={action.key} className="check-item">
-                                <div className="check-head">
-                                  <strong>{action.label}</strong>
-                                  <span className={"status-chip " + action.tone}>{action.state}</span>
-                                </div>
-                                <p className="copy">{action.summary}</p>
-                                <p className="weak-note">{action.detail}</p>
-                                <button type="button" className="secondary" disabled={action.disabled} onClick={() => {
-                                  if (action.key === "copy-entry") {
-                                    void copyToClipboard(tunnelPublicEntry(selectedTunnel), "用户入口");
-                                    return;
-                                  }
-                                  if (action.key === "copy-command") {
-                                    void copyToClipboard(tunnelQuickCommand(selectedTunnel), "协议示例命令");
-                                    return;
-                                  }
-                                  if (action.key === "open-entry") {
-                                    openExternal(tunnelPublicEntry(selectedTunnel), "用户入口");
-                                    return;
-                                  }
-                                  if (action.key === "open-probe") {
-                                    openExternal(tunnelProbeTargetEntry(selectedTunnel, probeResults[selectedTunnel.id]), "Probe 目标");
-                                    return;
-                                  }
-                                  if (action.key === "probe-entry") {
-                                    void runTunnelProbe(selectedTunnel);
-                                  }
-                                }}>{action.buttonLabel}</button>
-                              </div>
-                            ))}
-                          </div>
-                          <div className="access-command-box">
-                            <span>协议示例命令</span>
-                            <code>{tunnelQuickCommand(selectedTunnel)}</code>
-                          </div>
-                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <div className="weak-note">probePath: <code>{normalizeProbePath(selectedTunnel.probePath)}</code></div> : null}
-                          {renderProbeSummary(selectedTunnel, probeResults[selectedTunnel.id])}
-                          <div className="weak-note runtime-note">{runtimeFactGuide(selectedTunnel)}</div>
-                          {selectedTunnel.transportPolicy === "p2p_preferred" ? <div className="banner info">P2P 当前仍为降级占位：配置意图可见，但当前不作为桌面数据面前提，也不表达成已建立 P2P 路径。</div> : null}
-                        </div>
-
-                        <form className="edit-form" onSubmit={handleTunnelSave}>
-                          <div className="panel-head small"><h3>最小编辑入口</h3></div>
-                          <label><span>tunnel 名称</span><input value={editForm?.name || ""} onChange={(event) => setEditForm((current) => current ? { ...current, name: event.target.value } : current)} /></label>
-                          <label><span>targetHost</span><input value={editForm?.targetHost || ""} onChange={(event) => setEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} /></label>
-                          <label><span>targetPort</span><input value={editForm?.targetPort || ""} onChange={(event) => setEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} /></label>
-                          <label><span>publicPort</span><input value={editForm?.publicPort || ""} onChange={(event) => setEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} /></label>
-                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>domain</span><input value={editForm?.domain || ""} onChange={(event) => setEditForm((current) => current ? { ...current, domain: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 domain。</div>}
-                          {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <label><span>probePath</span><input value={editForm?.probePath || ""} onChange={(event) => setEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} /></label> : <div className="weak-note">当前类型不适用 probePath。</div>}
-                          <label><span>transportPolicy</span><select value={editForm?.transportPolicy || "relay_only"} onChange={(event) => setEditForm((current) => current ? { ...current, transportPolicy: event.target.value } : current)}><option value="relay_only">relay_only</option><option value="p2p_preferred">p2p_preferred</option></select></label>
-                          <div className="weak-note">transportPolicy 和目标配置只代表普通配置编辑。当前 status={selectedTunnel.status} 只能通过下方 pause_tunnel / resume_tunnel 控制动作改变，不会经由普通保存提交。</div>
-
-                          {tunnelControlPanel ? <div className="banner info">{tunnelControlPanel.headline} {tunnelControlPanel.summary} 下一步：{tunnelControlPanel.nextStep}</div> : null}
-                          <div className="check-list compact-check-list">
-                            {(tunnelControlPanel?.checks || []).map((item) => (
-                              <div key={item.code} className="check-item">
-                                <div className="check-head">
-                                  <strong>{item.label}</strong>
-                                  <span className={"status-chip " + checkStateTone(item.state)}>{checkStateLabel(item.state)}</span>
-                                </div>
-                                <p className="copy">{item.message}</p>
-                              </div>
-                            ))}
-                          </div>
-                          <div className="check-list compact-check-list">
-                            {tunnelActionOptions.map((option) => (
-                              <div key={option.actionKind} className="check-item">
-                                <div className="check-head">
-                                  <strong>{option.label}</strong>
-                                  <span className={"status-chip " + controlOptionTone(option)}>{controlOptionStateLabel(option)}</span>
-                                </div>
-                                {tunnelControlPanel?.recommendedAction === option.actionKind ? <p className="copy">推荐动作</p> : null}
-                                <p className="copy">{option.message}</p>
-                                {option.summary ? <p className="copy">{option.summary}</p> : null}
-                                {option.nextStep ? <p className="copy">下一步：{option.nextStep}</p> : null}
-                                <p className="copy">executionMode: <code>{option.executionMode}</code> / placeholderOnly: <code>{String(Boolean(option.placeholderOnly))}</code> / contextVersion: <code>{option.contextVersion || tunnelControlPanel?.contextVersion || tunnelControlContextAt || "-"}</code></p>
-                                <div className="button-row wrap-actions">
-                                  <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, true)}>{busy === "control-action" ? "处理中..." : "预检 " + option.label}</button>
-                                  <button className="secondary" type="button" disabled={!option.available || busy === "control-action"} onClick={() => void runControlAction(option.actionKind, option.targetKind, option.targetId, false)}>{busy === "control-action" ? "处理中..." : (option.placeholderOnly ? "占位执行 " : "执行 ") + option.label}</button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                          <button type="submit" disabled={busy === "save-tunnel"}>{busy === "save-tunnel" ? "保存中..." : "保存当前 tunnel"}</button>
-                        </form>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </section>
-
-              {controlResult ? <ControlResultBlock result={controlResult} /> : null}
-            </>
-          )}
-        </main>
+          </div>
+        ) : null}
       </div>
     </Shell>
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
-  return <div className="desktop-root">{children}</div>;
+function Shell({ children, bootstrap = false }: { children: ReactNode; bootstrap?: boolean }) {
+  return <div className={bootstrap ? "window-shell bootstrap-shell" : "window-shell"}>{children}</div>;
 }
 
-function StateCard({ title, body }: { title: string; body: string }) {
+function SurfaceCard({ title, body, danger = false, children }: { title: string; body: string; danger?: boolean; children?: ReactNode }) {
   return (
-    <div className="panel state-card">
+    <div className="surface-card">
+      <p className="surface-eyebrow">驻阡陌</p>
       <h1>{title}</h1>
-      <p className="copy">{body}</p>
+      <p className={`surface-copy ${danger ? "surface-copy-danger" : ""}`}>{body}</p>
+      {children}
     </div>
   );
 }
 
-function ModeCard({ title, description, onClick }: { title: string; description: string; onClick: () => void }) {
-  return (
-    <button type="button" className="panel mode-card" onClick={onClick}>
-      <p className="eyebrow">模式入口</p>
-      <h2>{title}</h2>
-      <p className="copy">{description}</p>
-    </button>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
+function MetricBox({ label, value }: { label: string; value: string }) {
   return (
     <div className="metric-box">
       <span>{label}</span>
@@ -886,342 +2242,96 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function WorkbenchEmptyState({ activeTab, selectedNode }: { activeTab: TunnelTypeTab; selectedNode: NodeSummary }) {
-  const info = emptyStateForProtocol(activeTab, selectedNode);
+function CloseDialogChoice({ onClick, onCancel }: { onClick: (action: "tray" | "exit", dontAskAgain: boolean) => void; onCancel: () => void }) {
+  const [dontAsk, setDontAsk] = useState(false);
   return (
-    <div className="check-item empty-workbench-state">
-      <div className="check-head">
-        <strong>{info.title}</strong>
-        <span className={"status-chip " + info.tone}>{info.state}</span>
+    <div className="close-dialog-actions">
+      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 12 }}>
+        <input type="checkbox" checked={dontAsk} onChange={(e) => setDontAsk(e.target.checked)} />
+        <span style={{ fontSize: 13 }}>以后不再询问</span>
+      </label>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="btn btn-primary" type="button" onClick={() => onClick("tray", dontAsk)}>最小化到托盘</button>
+        <button className="btn" type="button" onClick={() => onClick("exit", dontAsk)}>退出程序</button>
+        <button className="btn" type="button" onClick={onCancel} style={{ marginLeft: "auto" }}>取消</button>
       </div>
-      <p className="copy">{info.summary}</p>
-      <p className="weak-note">{info.detail}</p>
-      {info.nextStep ? <p className="weak-note">下一步：{info.nextStep}</p> : null}
     </div>
   );
 }
 
-function tunnelPublicEntry(tunnel: TunnelSpec) {
-  if (tunnel.type === "http") {
-    return `http://${desktopPublicHost}:${tunnel.publicPort}`;
-  }
-  if (tunnel.type === "https") {
-    return tunnel.domain ? `https://${tunnel.domain}` : "https://<待绑定域名>";
-  }
-  if (tunnel.type === "udp") {
-    return `udp://${desktopPublicHost}:${tunnel.publicPort}`;
-  }
-  if (tunnel.type === "socks5") {
-    return `socks5://${desktopPublicHost}:${tunnel.publicPort}`;
-  }
-  return `${desktopPublicHost}:${tunnel.publicPort}`;
+function findRouteMeta(pathname: string) {
+  return publisherRoutes.find((item) => item.path === pathname) || publisherRoutes[0];
 }
 
-function tunnelAccessLabel(tunnel: TunnelSpec) {
-  if (tunnel.type === "http") return "HTTP Web/API 入口";
-  if (tunnel.type === "https") return "HTTPS 标准入口";
-  if (tunnel.type === "udp") return "UDP 最小数据面入口";
-  if (tunnel.type === "socks5") return "SOCKS5 CONNECT 代理入口";
-  return "TCP 端口直连入口";
+function resolveLinkedService(tunnel: TunnelSpec, services: LocalServiceDraft[]) {
+  return services.find((item) => item.targetHost === tunnel.targetHost && Number(item.targetPort) === tunnel.targetPort) || null;
 }
 
-function tunnelAccessGuide(tunnel: TunnelSpec) {
-  const state = tunnelStateEvaluation(tunnel);
-  if (tunnel.type === "http") {
-    if (!state.entryUsable && !state.domainReady) {
-      return `HTTP 当前入口配置不完整，暂时不能作为桌面入口使用。`;
+function supportsOpenEntry(tunnel: TunnelSpec, state: ReturnType<typeof evaluateRuleState>, entry: CloudEntry) {
+  return (tunnel.type === "http" || tunnel.type === "https") && state.entryUsable && Boolean(entry.publicUrl);
+}
+
+function supportsProbe(tunnel: TunnelSpec, state: ReturnType<typeof evaluateRuleState>, entry: CloudEntry) {
+  return (tunnel.type === "http" || tunnel.type === "https") && state.entryUsable && Boolean(entry.publicUrl);
+}
+
+function formatRate(bytesPerSecond: number) {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "0 KB/s";
+  if (bytesPerSecond >= 1024 * 1024) return `${(bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s`;
+  return `${Math.max(bytesPerSecond / 1024, 0).toFixed(2)} KB/s`;
+}
+
+function formatBytesTotal(bytes?: number | null) {
+  if (bytes == null || bytes <= 0) return "0 KB";
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(2)} MB`;
+  return `${Math.max(bytes / 1024, 0).toFixed(2)} KB`;
+}
+
+function metricNumber(value: string | undefined) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function sumTunnelTrafficMetrics(metrics: Record<string, string> | undefined, tunnels: TunnelSpec[]) {
+  if (!metrics || tunnels.length === 0) {
+    return { downTotal: 0, upTotal: 0 };
+  }
+  let matchedPerTunnel = false;
+  let downTotal = 0;
+  let upTotal = 0;
+  for (const tunnel of tunnels) {
+    const downKey = `traffic:down:${tunnel.id}`;
+    const upKey = `traffic:up:${tunnel.id}`;
+    const hasDown = Object.prototype.hasOwnProperty.call(metrics, downKey);
+    const hasUp = Object.prototype.hasOwnProperty.call(metrics, upKey);
+    if (hasDown || hasUp) {
+      matchedPerTunnel = true;
     }
-    if (!state.entryUsable) {
-      return `HTTP 当前处于不可直接使用状态，入口动作已按产品交互降级。`;
+    downTotal += metricNumber(metrics[downKey]);
+    upTotal += metricNumber(metrics[upKey]);
+  }
+  if (matchedPerTunnel) {
+    return { downTotal, upTotal };
+  }
+  const fallbackDown = metricNumber(metrics["traffic:down_total"]);
+  const fallbackUp = metricNumber(metrics["traffic:up_total"]);
+  if (fallbackDown > 0 || fallbackUp > 0) {
+    return { downTotal: fallbackDown, upTotal: fallbackUp };
+  }
+  const trafficKeys = Object.keys(metrics).filter((k) => k.startsWith("traffic:"));
+  for (const key of trafficKeys) {
+    const val = metricNumber(metrics[key]);
+    if (val > 0) {
+      if (key.startsWith("traffic:down:")) {
+        downTotal += val;
+      } else if (key.startsWith("traffic:up:")) {
+        upTotal += val;
+      }
     }
-    return `HTTP 已可作为当前桌面开发前提。建议先访问 ${tunnelPublicEntry(tunnel)}${normalizeProbePath(tunnel.probePath) === "/" ? "" : normalizeProbePath(tunnel.probePath)}，再按需执行 probe。`;
   }
-  if (tunnel.type === "https") {
-    if (!state.domainReady) {
-      return `HTTPS 当前还不能直接打开，因为还没有配置 domain。`;
-    }
-    if (!state.entryUsable) {
-      return `HTTPS 当前处于不可直接使用状态，入口动作已按产品交互降级。`;
-    }
-    return `HTTPS 已可作为当前桌面开发前提。标准入口使用域名 ${tunnel.domain || "<待绑定域名>"}，当前仍需环境侧证书与域名配置配合。`;
+  if (downTotal > 0 || upTotal > 0) {
+    return { downTotal, upTotal };
   }
-  if (tunnel.type === "udp") {
-    if (!state.entryUsable) {
-      return `UDP 当前处于不可直接使用状态，入口命令仅保留为参考。`;
-    }
-    return `UDP 已可作为当前桌面开发前提。当前只确认最小数据面闭环，不提供 UDP probe、复杂会话治理或 NAT 穿透。`;
-  }
-  if (tunnel.type === "socks5") {
-    if (!state.entryUsable) {
-      return `SOCKS5 当前处于不可直接使用状态，入口动作已按产品交互降级。`;
-    }
-    return `SOCKS5 已可作为当前桌面开发前提。当前只支持 CONNECT，不支持 UDP associate，也不提供高级认证或 ACL。`;
-  }
-  if (tunnel.transportPolicy === "p2p_preferred") {
-    return `当前 tunnel 配置偏好为 p2p_preferred，但 P2P 仍是 partial 能力；桌面端只展示配置意图和运行事实，不把它当作已可用的数据面。`;
-  }
-  return `TCP 端口映射当前可直接使用。适合 SSH / RDP / 数据库等原始 TCP 服务。`;
-}
-
-function tunnelQuickCommand(tunnel: TunnelSpec) {
-  const entry = tunnelPublicEntry(tunnel);
-  if (tunnel.type === "http") {
-    const path = normalizeProbePath(tunnel.probePath);
-    return `curl ${entry}${path === "/" ? "" : path}`;
-  }
-  if (tunnel.type === "https") {
-    const path = normalizeProbePath(tunnel.probePath);
-    return `curl ${entry}${path === "/" ? "" : path}`;
-  }
-  if (tunnel.type === "udp") {
-    return `echo -n "ping" | nc -u ${desktopPublicHost} ${tunnel.publicPort}`;
-  }
-  if (tunnel.type === "socks5") {
-    return `curl --proxy ${entry} https://example.com -I`;
-  }
-  return `nc ${desktopPublicHost} ${tunnel.publicPort}`;
-}
-
-function supportsCopyEntry(tunnel: TunnelSpec) {
-  return hasUsableEntry(tunnel);
-}
-
-function supportsQuickCommand(tunnel: TunnelSpec) {
-  return hasUsableEntry(tunnel);
-}
-
-function supportsOpenEntry(tunnel: TunnelSpec) {
-  return (tunnel.type === "http" || tunnel.type === "https") && tunnelStateEvaluation(tunnel).entryUsable;
-}
-
-function supportsProbeTargetOpen(tunnel: TunnelSpec) {
-  return (tunnel.type === "http" || tunnel.type === "https") && tunnelStateEvaluation(tunnel).entryUsable;
-}
-
-function supportsProbeAction(tunnel: TunnelSpec) {
-  return (tunnel.type === "http" || tunnel.type === "https") && tunnelStateEvaluation(tunnel).entryUsable;
-}
-
-function hasUsableEntry(tunnel: TunnelSpec) {
-  return tunnelStateEvaluation(tunnel).entryUsable;
-}
-
-function tunnelProbeTargetEntry(tunnel: TunnelSpec, probe: TunnelProbeResult | null | undefined) {
-  if (probe?.targetEntry) {
-    return probe.targetEntry;
-  }
-  const entry = tunnelPublicEntry(tunnel);
-  const path = normalizeProbePath(tunnel.probePath);
-  return path === "/" ? entry + "/" : entry + path;
-}
-
-function runtimeFactSummary(tunnel: TunnelSpec) {
-  const path = tunnel.runtimePath || "尚无路径上报";
-  const state = tunnel.runtimeState || "尚无状态上报";
-  return `${path} / ${state}`;
-}
-
-function buildProtocolOverview(node: NodeSummary, tunnels: TunnelSpec[]) {
-  return [
-    protocolOverviewItem("tcp", "TCP", Boolean(node.capabilities.tcpRelay), tunnels.filter((item) => item.type === "tcp")),
-    protocolOverviewItem("http", "HTTP", Boolean(node.capabilities.httpRelay), tunnels.filter((item) => item.type === "http")),
-    protocolOverviewItem("https", "HTTPS", Boolean(node.capabilities.httpsRelay || node.capabilities.httpRelay), tunnels.filter((item) => item.type === "https")),
-    protocolOverviewItem("udp", "UDP", Boolean(node.capabilities.udpRelay), tunnels.filter((item) => item.type === "udp")),
-    protocolOverviewItem("socks5", "SOCKS5", Boolean(node.capabilities.socks5Connect), tunnels.filter((item) => item.type === "socks5")),
-    p2pOverviewItem(node, tunnels),
-  ];
-}
-
-function protocolOverviewItem(key: string, label: string, supported: boolean, tunnels: TunnelSpec[]) {
-  const states = tunnels.map((item) => tunnelStateEvaluation(item));
-  const activeCount = states.filter((item) => item.active).length;
-  const attentionCount = states.filter((item) => item.attention).length;
-  if (!supported) {
-    return { key, label, tone: "danger", state: "不可用", summary: "当前节点未上报对应能力。", detail: "当前协议不应作为这台机器的桌面入口前提。", nextStep: "继续使用其它已可用协议，不要让这个能力阻塞桌面主路径。" };
-  }
-  if (tunnels.length === 0) {
-    return { key, label, tone: "neutral", state: "空", summary: "当前节点还没有对应 tunnel。", detail: "这不阻塞其它已可用协议；如需接入该协议，可后续补 tunnel。", nextStep: "如需使用这一协议，先补 tunnel，而不是中断当前桌面主线。" };
-  }
-  if (attentionCount > 0) {
-    return { key, label, tone: "danger", state: "需关注", summary: `${tunnels.length} 条 tunnel，${attentionCount} 条处于失败、非 active 或配置不完整状态。`, detail: `当前 active=${activeCount}。桌面工作区会按不可用态禁用入口动作。`, nextStep: "优先处理 active/domain/failure 等阻塞条件，再回到入口操作。" };
-  }
-  return { key, label, tone: "good", state: "可用", summary: `${tunnels.length} 条 tunnel 已可作为当前桌面入口区前提。`, detail: `当前 active=${activeCount}，可直接进入当前协议的入口操作路径。`, nextStep: "直接进入 tunnel workbench，使用 copy/open/probe 等入口动作。" };
-}
-
-function p2pOverviewItem(node: NodeSummary, tunnels: TunnelSpec[]) {
-  const preferredCount = tunnels.filter((item) => item.transportPolicy === "p2p_preferred").length;
-  if (!node.capabilities.p2pAssist && preferredCount === 0) {
-    return { key: "p2p", label: "P2P", tone: "neutral", state: "未启用", summary: "当前节点没有 P2P assist，也没有 p2p_preferred tunnel。", detail: "桌面主路径继续建立在 HTTP/HTTPS/UDP/SOCKS5 上。", nextStep: "当前无需为 P2P 停下主线开发。" };
-  }
-  return { key: "p2p", label: "P2P", tone: "neutral", state: "Partial", summary: `当前只展示配置意图与能力可见性；p2p_preferred tunnel=${preferredCount}。`, detail: "P2P 仍不是当前桌面数据面前提，不提供 live data-plane 入口动作。", nextStep: "继续沿 HTTP/HTTPS/UDP/SOCKS5 主路径做桌面产品，不等待 P2P。" };
-}
-
-function emptyStateForProtocol(activeTab: TunnelTypeTab, node: NodeSummary) {
-  const label = activeTab.toUpperCase();
-  const support = activeTab === "tcp" ? Boolean(node.capabilities.tcpRelay)
-    : activeTab === "udp" ? Boolean(node.capabilities.udpRelay)
-      : activeTab === "http" ? Boolean(node.capabilities.httpRelay)
-        : activeTab === "https" ? Boolean(node.capabilities.httpsRelay || node.capabilities.httpRelay)
-          : Boolean(node.capabilities.socks5Connect);
-  if (!support) {
-    return {
-      title: `${label} 当前不可用`,
-      state: "不可用",
-      tone: "danger",
-      summary: `当前节点还没有上报 ${label} 对应能力，当前协议不应作为这台机器的桌面入口主路径。`,
-      detail: "可以继续使用其它已可用协议，不需要等待这个协议补齐后再继续桌面开发。",
-      nextStep: "切到其它已可用协议，或先补节点能力再回到这里。",
-    };
-  }
-  return {
-    title: `${label} 当前为空`,
-    state: "空",
-    tone: "neutral",
-    summary: `当前机器还没有 ${label} tunnel，因此 workbench 暂无可操作入口。`,
-    detail: activeTab === "https"
-      ? "如果后续要使用 HTTPS，先补 tunnel 和 domain；P2P 仍不阻塞这条主路径。"
-      : activeTab === "udp"
-        ? "UDP 当前已验证可用，但这台机器还没有对应 tunnel。"
-        : activeTab === "socks5"
-          ? "SOCKS5 当前已验证可用，但这台机器还没有对应 tunnel。"
-          : "当前协议能力并不缺失，只是还没有对应 tunnel。",
-    nextStep: "如需这个协议，先补 tunnel；否则继续沿当前已可用协议推进桌面主路径。",
-  };
-}
-
-function runtimeFactGuide(tunnel: TunnelSpec) {
-  const state = tunnelStateEvaluation(tunnel);
-  const failure = tunnel.lastFailureReason || "尚无失败原因";
-  if (!state.active) {
-    return `当前 tunnel 状态是 ${tunnel.status}。在非 active 状态下，打开入口和 probe 等动作会被降级或禁用；lastFailureReason=${failure}。`;
-  }
-  if (tunnel.runtimePath || tunnel.runtimeState) {
-    return `当前运行事实来自 tunnel runtime 字段：runtimePath=${tunnel.runtimePath || "-"} / runtimeState=${tunnel.runtimeState || "-"} / lastFailureReason=${failure}。`;
-  }
-  return `当前还没有 runtimePath/runtimeState 回传。桌面端不把 transportPolicy 误当作运行事实；lastFailureReason=${failure}。`;
-}
-
-function buildWorkbenchActions(tunnel: TunnelSpec, state: ReturnType<typeof tunnelStateEvaluation>, probeBusy: boolean) {
-  const actions = [
-    workbenchActionDescriptor("copy-entry", "复制用户入口", "复制入口", supportsCopyEntry(tunnel), state, "把当前入口复制给浏览器、客户端或文档。"),
-    workbenchActionDescriptor("copy-command", "复制协议示例命令", "复制命令", supportsQuickCommand(tunnel), state, "复制一条最小验证命令，便于直接在终端里使用。"),
-  ];
-  if (tunnel.type === "http" || tunnel.type === "https") {
-    actions.push(workbenchActionDescriptor("open-entry", "打开用户入口", "打开入口", supportsOpenEntry(tunnel), state, "直接在浏览器打开当前用户入口。"));
-    actions.push(workbenchActionDescriptor("open-probe", "打开 Probe 目标", "打开目标", supportsProbeTargetOpen(tunnel), state, "直接打开 probe 目标，验证最终命中的 URL。"));
-    actions.push({
-      ...workbenchActionDescriptor("probe-entry", "探测当前入口", probeBusy ? "探测中..." : "执行探测", supportsProbeAction(tunnel) && !probeBusy, state, "向当前 HTTP/HTTPS 入口发起最小探测。"),
-      state: probeBusy ? "处理中" : workbenchActionDescriptor("probe-entry", "探测当前入口", "执行探测", supportsProbeAction(tunnel), state, "向当前 HTTP/HTTPS 入口发起最小探测。").state,
-      tone: probeBusy ? "neutral" : workbenchActionDescriptor("probe-entry", "探测当前入口", "执行探测", supportsProbeAction(tunnel), state, "向当前 HTTP/HTTPS 入口发起最小探测。").tone,
-      disabled: probeBusy || !supportsProbeAction(tunnel),
-      detail: probeBusy ? "当前 probe 正在进行中，请等待结果返回。" : workbenchActionDescriptor("probe-entry", "探测当前入口", "执行探测", supportsProbeAction(tunnel), state, "向当前 HTTP/HTTPS 入口发起最小探测。").detail,
-    });
-  }
-  return actions;
-}
-
-function workbenchActionDescriptor(key: string, label: string, buttonLabel: string, enabled: boolean, state: ReturnType<typeof tunnelStateEvaluation>, summary: string) {
-  return {
-    key,
-    label,
-    buttonLabel,
-    state: enabled ? "可用" : "禁用",
-    tone: enabled ? "good" : state.attention ? "danger" : "neutral",
-    disabled: !enabled,
-    summary,
-    detail: enabled ? "当前动作已满足前提，可以直接执行。" : state.nextStep,
-  };
-}
-
-function tunnelStateEvaluation(tunnel: TunnelSpec) {
-  const domainReady = tunnel.type !== "https" || Boolean((tunnel.domain || "").trim());
-  const active = tunnel.status === "active";
-  const hasPortEntry = tunnel.type === "http" || tunnel.type === "udp" || tunnel.type === "socks5" || tunnel.type === "tcp";
-  const entryConfigured = tunnel.type === "https" ? domainReady : !hasPortEntry || tunnel.publicPort > 0;
-  const runtimeUnavailable = tunnel.runtimeState === "unavailable";
-  const hasFailure = Boolean(tunnel.lastFailureReason);
-  const entryUsable = active && entryConfigured;
-  const attention = !active || !entryConfigured || runtimeUnavailable || hasFailure;
-  const badges = [
-    {
-      label: runtimeUnavailable ? "运行不可用" : tunnel.runtimeState === "pending" ? "运行待定" : tunnel.runtimeState === "active" ? `运行中 ${tunnel.runtimePath || "reported"}` : "运行事实未上报",
-      tone: runtimeUnavailable ? "danger" : tunnel.runtimeState === "active" ? "good" : "neutral",
-    },
-    {
-      label: !tunnel.healthStatus ? "health 未上报" : `health ${tunnel.healthStatus}`,
-      tone: !tunnel.healthStatus || tunnel.healthStatus === "healthy" ? "good" : "danger",
-    },
-    {
-      label: `transportPolicy ${tunnel.transportPolicy || "relay_only"}`,
-      tone: "neutral",
-    },
-  ];
-  const messages = [] as Array<{ tone: "danger" | "info"; message: string }>;
-  if (!active) {
-    messages.push({ tone: "danger", message: `当前 tunnel 处于非 active 状态，入口打开、示例命令和 probe 已按产品交互降级或禁用。请先通过控制动作恢复状态。` });
-  }
-  if (hasFailure) {
-    messages.push({ tone: "danger", message: `最近失败原因：${tunnel.lastFailureReason}` });
-  }
-  if (tunnel.type === "https" && !domainReady) {
-    messages.push({ tone: "info", message: "HTTPS 仍缺少 domain，打开入口和 probe 目标会继续保持禁用，直到补齐域名。" });
-  }
-  let nextStep = "直接使用当前入口动作，继续验证或访问当前 tunnel。";
-  if (!active) {
-    nextStep = "先通过 pause_tunnel / resume_tunnel 控制动作把 tunnel 恢复到 active。";
-  } else if (tunnel.type === "https" && !domainReady) {
-    nextStep = "先在普通配置区补齐 domain，再使用打开入口或 probe。";
-  } else if (runtimeUnavailable) {
-    nextStep = "先结合 runtimeState 和 lastFailureReason 排查，再决定是否继续访问当前入口。";
-  } else if (hasFailure) {
-    nextStep = "先处理最近失败原因，再决定是否继续访问或重新探测当前入口。";
-  }
-  return {
-    active,
-    domainReady,
-    entryUsable,
-    attention,
-    badges,
-    messages,
-    nextStep,
-  };
-}
-
-function normalizeProbePath(pathValue?: string) {
-  const value = (pathValue || "/").trim();
-  if (!value) return "/";
-  return value.startsWith("/") ? value : "/" + value;
-}
-
-function probeFreshnessLabel(tunnel: TunnelSpec, probe: TunnelProbeResult | null | undefined) {
-  const probedAt = probe?.probedAt || tunnel.lastProbedAt || "";
-  if (!probedAt || probedAt.startsWith("0001-01-01")) return "尚未探测";
-  const parsed = Date.parse(probedAt);
-  if (Number.isNaN(parsed)) return "探测结果时间未知";
-  const success = probe?.success ?? Boolean(tunnel.lastProbeSuccess);
-  return success ? `最近成功 / ${formatDate(probedAt)}` : `最近失败 / ${formatDate(probedAt)}`;
-}
-
-function renderProbeSummary(tunnel: TunnelSpec, probe: TunnelProbeResult | null | undefined) {
-  if (tunnel.type !== "http" && tunnel.type !== "https") {
-    return null;
-  }
-  const result = probe || (tunnel.lastProbedAt ? {
-    success: Boolean(tunnel.lastProbeSuccess),
-    statusCode: tunnel.lastProbeStatusCode,
-    error: tunnel.lastProbeError,
-    targetEntry: tunnel.lastProbeTargetEntry || tunnelPublicEntry(tunnel),
-    probedAt: tunnel.lastProbedAt,
-  } : null);
-  if (!result) {
-    return <div className="weak-note">当前还没有 probe 结果。可直接探测当前入口验证可达性。</div>;
-  }
-  return (
-    <div className={result.success ? "banner info" : "banner error"}>
-      {result.success ? "Probe 成功" : "Probe 失败"}
-      {result.statusCode ? ` / status=${result.statusCode}` : ""}
-      {result.targetEntry ? ` / target=${result.targetEntry}` : ""}
-      {result.error ? ` / error=${result.error}` : ""}
-    </div>
-  );
+  return { downTotal: 0, upTotal: 0 };
 }

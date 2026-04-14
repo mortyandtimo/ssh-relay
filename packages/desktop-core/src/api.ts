@@ -1,11 +1,42 @@
-import type { AuthUserResponse, BootstrapStatusResponse, ControlActionOptionsResponse, ControlActionRequest, ControlActionResponse, ControlPanelSummary, ControlSurface, NodeListResponse, TunnelListResponse, TunnelProbeResult } from "./types";
+import type {
+  AuthUserResponse,
+  BootstrapStatusResponse,
+  ControlActionOptionsResponse,
+  ControlActionRequest,
+  ControlActionResponse,
+  ControlPanelSummary,
+  ControlSurface,
+  NodeListResponse,
+  ServerMetrics,
+  TunnelListResponse,
+  TunnelProbeResult,
+  CertificateSpec,
+  ManagedHTTPSDomainListResponse,
+} from "./types";
 
-export function createDesktopApi(apiBaseUrl = "") {
+export type DesktopApiTransportResponse = {
+  ok: boolean;
+  status: number;
+  json(): Promise<unknown>;
+};
+
+export type DesktopApiTransport = (url: string, init?: RequestInit) => Promise<DesktopApiTransportResponse>;
+
+export function createDesktopApi(apiBaseUrl = "", transport?: DesktopApiTransport) {
   let refreshInFlight: Promise<boolean> | null = null;
 
-  async function requestJSON<T>(path: string, init?: RequestInit, allowRefresh = true): Promise<T> {
-    const response = await fetch(apiBaseUrl + path, {
+  async function send(url: string, init?: RequestInit): Promise<DesktopApiTransportResponse> {
+    if (transport) {
+      return transport(url, init);
+    }
+    return fetch(url, {
       credentials: "include",
+      ...init,
+    });
+  }
+
+  async function requestJSON<T>(path: string, init?: RequestInit, allowRefresh = true): Promise<T> {
+    const response = await send(apiBaseUrl + path, {
       ...init,
       headers: {
         Accept: "application/json",
@@ -28,7 +59,15 @@ export function createDesktopApi(apiBaseUrl = "") {
       throw new Error("登录已失效，请重新登录。");
     }
     if (!response.ok) {
-      throw new Error(payload && typeof payload.error === "string" ? payload.error : "请求失败");
+      throw new Error(
+        payload &&
+        typeof payload === "object" &&
+        payload !== null &&
+        "error" in payload &&
+        typeof (payload as { error?: unknown }).error === "string"
+          ? (payload as { error: string }).error
+          : "请求失败 (" + response.status + ")",
+      );
     }
     return payload as T;
   }
@@ -38,9 +77,8 @@ export function createDesktopApi(apiBaseUrl = "") {
       return refreshInFlight;
     }
     const task = (async () => {
-      const response = await fetch(apiBaseUrl + "/api/auth/refresh", {
+      const response = await send(apiBaseUrl + "/api/auth/refresh", {
         method: "POST",
-        credentials: "include",
         headers: { Accept: "application/json" },
       });
       return response.ok;
@@ -62,10 +100,14 @@ export function createDesktopApi(apiBaseUrl = "") {
       return requestJSON<AuthUserResponse>("/api/auth/me");
     },
     login(email: string, password: string) {
-      return requestJSON<AuthUserResponse>("/api/auth/login", {
-        method: "POST",
-        body: JSON.stringify({ email, password }),
-      }, false);
+      return requestJSON<AuthUserResponse>(
+        "/api/auth/login",
+        {
+          method: "POST",
+          body: JSON.stringify({ email, password }),
+        },
+        false,
+      );
     },
     logout() {
       return requestJSON<{ status: string }>("/api/auth/logout", { method: "POST" });
@@ -76,10 +118,18 @@ export function createDesktopApi(apiBaseUrl = "") {
     loadTunnels() {
       return requestJSON<TunnelListResponse>("/api/tunnels");
     },
+    loadServerMetrics() {
+      return requestJSON<ServerMetrics>("/api/server/metrics");
+    },
     updateTunnel(id: string, payload: Record<string, unknown>) {
       return requestJSON("/api/tunnels/" + encodeURIComponent(id), {
         method: "PUT",
         body: JSON.stringify(payload),
+      });
+    },
+    deleteTunnel(id: string) {
+      return requestJSON<{ status: string; id: string }>("/api/tunnels/" + encodeURIComponent(id), {
+        method: "DELETE",
       });
     },
     probeTunnel(id: string) {
@@ -108,6 +158,22 @@ export function createDesktopApi(apiBaseUrl = "") {
     async loadDesktopData() {
       const [nodes, tunnels] = await Promise.all([this.loadNodes(), this.loadTunnels()]);
       return { nodes: nodes.items, tunnels: tunnels.items };
+    },
+    // ─── Certificates ───
+    listCertificates() {
+      return requestJSON<{ items: CertificateSpec[] }>("/api/certificates");
+    },
+    listManagedHTTPSDomains() {
+      return requestJSON<ManagedHTTPSDomainListResponse>("/api/managed-domains/https");
+    },
+    createCertificate(spec: { domain: string; certPem: string; keyPem: string }) {
+      return requestJSON<CertificateSpec>("/api/certificates", { method: "POST", body: JSON.stringify(spec) });
+    },
+    deleteCertificate(id: string) {
+      return requestJSON<{ status: string; id: string }>("/api/certificates/" + encodeURIComponent(id), { method: "DELETE" });
+    },
+    autoIssueCertificate(domain: string) {
+      return requestJSON<CertificateSpec>("/api/certificates/auto-issue", { method: "POST", body: JSON.stringify({ domain }) });
     },
   };
 }
