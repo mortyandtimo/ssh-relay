@@ -249,7 +249,7 @@ type AuditFilterState = {
   offset: number;
 };
 
-type MainView = "overview" | "connections" | "audit" | "permissions";
+type MainView = "overview" | "connections" | "audit" | "permissions" | "releases";
 type ConnectionView = "nodes" | "tunnels";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
@@ -1189,6 +1189,7 @@ function buildAuditQuery(filter: AuditFilterState) {
           {canOperate ? <button type="button" className={mainView === "connections" ? "nav-tab active" : "nav-tab"} onClick={() => setMainView("connections")}>连接管理</button> : null}
           {canOperate ? <button type="button" className={mainView === "audit" ? "nav-tab active" : "nav-tab"} onClick={() => setMainView("audit")}>审计</button> : null}
           {canManageUsers ? <button type="button" className={mainView === "permissions" ? "nav-tab active" : "nav-tab"} onClick={() => setMainView("permissions")}>权限</button> : null}
+          {canManageUsers ? <button type="button" className={mainView === "releases" ? "nav-tab active" : "nav-tab"} onClick={() => setMainView("releases")}>发布管理</button> : null}
         </nav>
 
         {activeUser.role !== "user" ? (
@@ -2208,6 +2209,10 @@ function buildAuditQuery(filter: AuditFilterState) {
             </div>
           </section>
         ) : null}
+
+        {mainView === "releases" && canManageUsers ? (
+          <ReleaseManager apiBaseUrl={apiBaseUrl} />
+        ) : null}
       </main>
     </div>
   );
@@ -3103,4 +3108,188 @@ function formatDate(value: string) {
     return value;
   }
   return parsed.toLocaleString();
+}
+
+// ─── Release Manager Component ───
+
+type ReleaseArtifact = {
+  product: string;
+  version: string;
+  channel: string;
+  fileName: string;
+  size: number;
+  sha256: string;
+  downloadUrl: string;
+  uploadedAt: string;
+};
+
+function ReleaseManager({ apiBaseUrl }: { apiBaseUrl: string }) {
+  const [artifacts, setArtifacts] = useState<ReleaseArtifact[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [uploadProduct, setUploadProduct] = useState("publisher");
+  const [uploadChannel, setUploadChannel] = useState("setup");
+  const [uploadVersion, setUploadVersion] = useState("");
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [clientHash, setClientHash] = useState("");
+  const [serverHash, setServerHash] = useState("");
+  const [uploadProgress, setUploadProgress] = useState("");
+
+  const loadArtifacts = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(apiBaseUrl + "/api/admin/release-artifacts", { credentials: "include" });
+      if (!res.ok) throw new Error("加载失败");
+      const data = await res.json();
+      setArtifacts(data.items || []);
+    } catch (e: any) {
+      setError(e.message);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { void loadArtifacts(); }, []);
+
+  const computeSHA256 = async (file: File): Promise<string> => {
+    const buffer = await file.arrayBuffer();
+    const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+    return Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  };
+
+  const handleFileSelect = async (file: File | null) => {
+    setUploadFile(file);
+    setClientHash("");
+    setServerHash("");
+    if (file) {
+      setUploadProgress("正在计算文件 SHA256...");
+      const hash = await computeSHA256(file);
+      setClientHash(hash);
+      setUploadProgress("");
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!uploadFile || !uploadVersion.trim()) return;
+    setUploading(true);
+    setError("");
+    setMessage("");
+    setServerHash("");
+    setUploadProgress("上传中...");
+    try {
+      const form = new FormData();
+      form.append("product", uploadProduct);
+      form.append("channel", uploadChannel);
+      form.append("version", uploadVersion.trim());
+      form.append("file", uploadFile);
+      if (clientHash) form.append("sha256", clientHash);
+
+      const res = await fetch(apiBaseUrl + "/api/admin/release-artifacts/upload", {
+        method: "POST",
+        credentials: "include",
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "上传失败");
+
+      setServerHash(data.sha256 || "");
+      if (clientHash && data.sha256 && clientHash.toLowerCase() === data.sha256.toLowerCase()) {
+        setMessage(`上传成功，SHA256 校验通过: ${data.sha256}`);
+      } else if (data.sha256) {
+        setMessage(`上传成功，服务端 SHA256: ${data.sha256}`);
+      } else {
+        setMessage("上传成功");
+      }
+      setUploadFile(null);
+      setClientHash("");
+      setUploadVersion("");
+      void loadArtifacts();
+    } catch (e: any) {
+      setError(e.message);
+    }
+    setUploading(false);
+    setUploadProgress("");
+  };
+
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / 1024 / 1024).toFixed(1) + " MB";
+  };
+
+  const acceptExt = uploadChannel === "setup" ? ".exe" : ".zip";
+
+  return (
+    <section className="workspace-panel">
+      <div className="section-head">
+        <div>
+          <p className="eyebrow">发布</p>
+          <h2>发布管理</h2>
+        </div>
+        <span className="muted-line">上传打包产物并管理下载链接</span>
+      </div>
+      <div className="split-layout">
+        <section className="subpanel form-panel">
+          <h3>上传产物</h3>
+          {error ? <div className="error">{error}</div> : null}
+          {message ? <div className="notice">{message}</div> : null}
+          <div className="form-grid">
+            <label>
+              <span>产品</span>
+              <select value={uploadProduct} onChange={(e) => setUploadProduct(e.target.value)}>
+                <option value="publisher">驻阡陌 (Publisher)</option>
+                <option value="cert-keeper">证书管家 (CertKeeper)</option>
+              </select>
+            </label>
+            <label>
+              <span>渠道</span>
+              <select value={uploadChannel} onChange={(e) => setUploadChannel(e.target.value)}>
+                <option value="setup">安装包 (.exe)</option>
+                <option value="portable">便携版 (.zip)</option>
+              </select>
+            </label>
+            <label>
+              <span>版本号</span>
+              <input value={uploadVersion} onChange={(e) => setUploadVersion(e.target.value)} placeholder="例如 0.1.0" required />
+            </label>
+            <label>
+              <span>文件 ({acceptExt})</span>
+              <input type="file" accept={acceptExt} onChange={(e) => void handleFileSelect(e.target.files?.[0] || null)} />
+            </label>
+            {clientHash ? <div style={{ fontSize: 11, wordBreak: "break-all" }}><strong>客户端 SHA256:</strong> {clientHash}</div> : null}
+            {serverHash ? <div style={{ fontSize: 11, wordBreak: "break-all" }}><strong>服务端 SHA256:</strong> {serverHash}</div> : null}
+            {uploadProgress ? <div style={{ fontSize: 12 }}>{uploadProgress}</div> : null}
+            <button type="button" disabled={uploading || !uploadFile || !uploadVersion.trim()} onClick={() => void handleUpload()}>
+              {uploading ? "上传中..." : "上传"}
+            </button>
+          </div>
+        </section>
+        <section className="subpanel">
+          <h3>已上传产物 <button type="button" className="secondary" style={{ marginLeft: 8, fontSize: 11 }} onClick={() => void loadArtifacts()} disabled={loading}>{loading ? "刷新中..." : "刷新"}</button></h3>
+          <div className="table-wrap compact-table">
+            <table>
+              <thead>
+                <tr><th>产品</th><th>版本</th><th>渠道</th><th>文件</th><th>大小</th><th>SHA256</th><th>下载</th><th>上传时间</th></tr>
+              </thead>
+              <tbody>
+                {artifacts.length === 0 ? <tr><td colSpan={8}>暂无上传产物。</td></tr> : artifacts.map((item, idx) => (
+                  <tr key={idx}>
+                    <td>{item.product === "publisher" ? "驻阡陌" : "证书管家"}</td>
+                    <td>{item.version}</td>
+                    <td>{item.channel === "setup" ? "安装包" : "便携版"}</td>
+                    <td style={{ fontSize: 11 }}>{item.fileName}</td>
+                    <td>{formatSize(item.size)}</td>
+                    <td style={{ fontSize: 10, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.sha256}>{item.sha256 ? item.sha256.slice(0, 12) + "..." : "-"}</td>
+                    <td><a href={item.downloadUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11 }}>下载</a> <button type="button" className="secondary" style={{ fontSize: 10, padding: "1px 4px" }} onClick={() => { void navigator.clipboard.writeText(item.downloadUrl); }}>复制</button></td>
+                    <td style={{ fontSize: 11 }}>{formatDate(item.uploadedAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
+  );
 }

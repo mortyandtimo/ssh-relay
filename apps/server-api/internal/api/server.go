@@ -150,6 +150,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/control-actions", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleControlActions)))
 	s.mux.Handle("/api/server/metrics", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleServerMetrics)))
 	s.mux.Handle("/api/admin/release-artifacts/upload", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleReleaseArtifactUpload)))
+	s.mux.Handle("/api/admin/release-artifacts", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleReleaseArtifactList)))
 	s.mux.Handle("/downloads/releases/", s.releaseArtifactDownloadHandler())
 	s.mux.Handle("/api/managed-domains/https", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleManagedHTTPSDomains)))
 	s.mux.Handle("/api/relay/tcp/runtime", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleRelayTCPRuntime)))
@@ -274,6 +275,7 @@ func (s *Server) handleReleaseArtifactUpload(w http.ResponseWriter, r *http.Requ
 	product := strings.TrimSpace(r.FormValue("product"))
 	channel := strings.TrimSpace(r.FormValue("channel"))
 	version := strings.TrimSpace(r.FormValue("version"))
+	clientSHA256 := strings.TrimSpace(r.FormValue("sha256"))
 	if product == "" || channel == "" || version == "" {
 		writeError(w, http.StatusBadRequest, "product, channel, and version are required")
 		return
@@ -308,6 +310,21 @@ func (s *Server) handleReleaseArtifactUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Read file into memory to compute sha256 before writing to disk
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read uploaded file")
+		return
+	}
+	serverHash := sha256.Sum256(fileBytes)
+	serverSHA256 := hex.EncodeToString(serverHash[:])
+
+	// Verify client-provided sha256 if present
+	if clientSHA256 != "" && !strings.EqualFold(clientSHA256, serverSHA256) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("sha256 mismatch: client=%s server=%s", clientSHA256, serverSHA256))
+		return
+	}
+
 	fileName := releaseArtifactFileName(product, channel, version, ext)
 	targetDir := filepath.Join(s.releaseUploadDir, product, version)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
@@ -315,10 +332,12 @@ func (s *Server) handleReleaseArtifactUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	targetPath := filepath.Join(targetDir, fileName)
-	if err := writeUploadedFile(targetPath, file, 0o644); err != nil {
+	if err := os.WriteFile(targetPath, fileBytes, 0o644); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to store uploaded file")
 		return
 	}
+	// Write sha256 sidecar file
+	_ = os.WriteFile(targetPath+".sha256", []byte(serverSHA256), 0o644)
 
 	downloadPath := "/downloads/releases/" + product + "/" + version + "/" + fileName
 	resp := map[string]any{
@@ -326,6 +345,8 @@ func (s *Server) handleReleaseArtifactUpload(w http.ResponseWriter, r *http.Requ
 		"channel":      channel,
 		"version":      version,
 		"fileName":     fileName,
+		"size":         len(fileBytes),
+		"sha256":       serverSHA256,
 		"storedPath":   targetPath,
 		"downloadPath": downloadPath,
 	}
@@ -333,6 +354,84 @@ func (s *Server) handleReleaseArtifactUpload(w http.ResponseWriter, r *http.Requ
 		resp["downloadUrl"] = s.releasePublicBaseURL + downloadPath
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) handleReleaseArtifactList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if strings.TrimSpace(s.releaseUploadDir) == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
+		return
+	}
+	type artifactEntry struct {
+		Product     string `json:"product"`
+		Version     string `json:"version"`
+		Channel     string `json:"channel"`
+		FileName    string `json:"fileName"`
+		Size        int64  `json:"size"`
+		SHA256      string `json:"sha256"`
+		DownloadURL string `json:"downloadUrl"`
+		UploadedAt  string `json:"uploadedAt"`
+	}
+	var items []artifactEntry
+	products := []string{"publisher", "cert-keeper"}
+	for _, product := range products {
+		productDir := filepath.Join(s.releaseUploadDir, product)
+		versions, err := os.ReadDir(productDir)
+		if err != nil {
+			continue
+		}
+		for _, vEntry := range versions {
+			if !vEntry.IsDir() {
+				continue
+			}
+			version := vEntry.Name()
+			files, err := os.ReadDir(filepath.Join(productDir, version))
+			if err != nil {
+				continue
+			}
+			for _, fEntry := range files {
+				if fEntry.IsDir() || strings.HasSuffix(fEntry.Name(), ".sha256") {
+					continue
+				}
+				info, err := fEntry.Info()
+				if err != nil {
+					continue
+				}
+				filePath := filepath.Join(productDir, version, fEntry.Name())
+				sha256Hex := ""
+				if data, err := os.ReadFile(filePath + ".sha256"); err == nil {
+					sha256Hex = strings.TrimSpace(string(data))
+				}
+				ext := strings.ToLower(filepath.Ext(fEntry.Name()))
+				channel := "portable"
+				if ext == ".exe" {
+					channel = "setup"
+				}
+				downloadPath := "/downloads/releases/" + product + "/" + version + "/" + fEntry.Name()
+				downloadURL := downloadPath
+				if s.releasePublicBaseURL != "" {
+					downloadURL = s.releasePublicBaseURL + downloadPath
+				}
+				items = append(items, artifactEntry{
+					Product:     product,
+					Version:     version,
+					Channel:     channel,
+					FileName:    fEntry.Name(),
+					Size:        info.Size(),
+					SHA256:      sha256Hex,
+					DownloadURL: downloadURL,
+					UploadedAt:  info.ModTime().UTC().Format(time.RFC3339),
+				})
+			}
+		}
+	}
+	if items == nil {
+		items = []artifactEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) releaseArtifactDownloadHandler() http.Handler {
