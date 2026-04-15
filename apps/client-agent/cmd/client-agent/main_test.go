@@ -34,7 +34,7 @@ func TestServeSOCKS5Connect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() {
-		_ = serveSOCKS5(ctx, serverConn)
+		_ = serveSOCKS5(ctx, serverConn, "socks-test", nil)
 	}()
 
 	port := targetLn.Addr().(*net.TCPAddr).Port
@@ -64,7 +64,7 @@ func TestServeSOCKS5RejectsNonConnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() {
-		_ = serveSOCKS5(ctx, serverConn)
+		_ = serveSOCKS5(ctx, serverConn, "socks-test", nil)
 	}()
 
 	reader := bufio.NewReader(clientConn)
@@ -107,7 +107,7 @@ func TestServeUDPRelayRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() {
-		_ = serveUDPRelay(ctx, serverConn, "udp-test", 12054, "127.0.0.1", udpTarget.LocalAddr().(*net.UDPAddr).Port, 2*time.Second)
+		_ = serveUDPRelay(ctx, serverConn, "udp-test", 12054, "127.0.0.1", udpTarget.LocalAddr().(*net.UDPAddr).Port, 2*time.Second, nil)
 	}()
 	go func() {
 		_ = writeUDPFrame(clientConn, types.UDPDatagramFrame{SessionID: "s1", Payload: []byte("ping")})

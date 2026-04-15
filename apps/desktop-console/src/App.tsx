@@ -33,7 +33,7 @@ import {
   type PublishRuleForm,
 } from "./app-services/publisherModel";
 import { ControlResultBlock } from "./controlResultBlock";
-import { createTauriDesktopTransport, ensureRuntimeStarted, loadAgentTraffic, loadDesktopAppUsage, loadDesktopHostPaths, loadRuntimeStatus, openDesktopExternal, openRuntimeLog, stopRuntime, windowMinimize, windowRequestClose, windowStartDrag, windowToggleMaximize, type AgentTrafficSnapshot, type DesktopAppUsage, type RuntimeStatus, type LoginProfilesFile, type AppConfig, readLoginProfiles, saveLoginProfile, deleteLoginProfile, decryptLoginPassword, saveAppConfig, loadAppConfig, appExit, setAutoStart } from "./desktopHost";
+import { createTauriDesktopTransport, ensureRuntimeStarted, loadAgentTraffic, loadAutoStartEnabled, loadDesktopAppUsage, loadDesktopHostPaths, loadRuntimeStatus, openDesktopExternal, openRuntimeLog, stopRuntime, windowMinimize, windowRequestClose, windowStartDrag, windowToggleMaximize, type AgentTrafficSnapshot, type DesktopAppUsage, type RuntimeStatus, type LoginProfilesFile, type AppConfig, readLoginProfiles, saveLoginProfile, deleteLoginProfile, decryptLoginPassword, saveAppConfig, loadAppConfig, appExit, setAutoStart } from "./desktopHost";
 
 type DesktopWindowEnv = {
   apiBaseUrl?: string;
@@ -78,26 +78,62 @@ type DrawerState =
   | { kind: "service"; serviceId: string | null }
   | null;
 
+const desktopPublisherApiBaseUrl = "https://publisher.manage.020309.top";
+const desktopPublisherHost = "publisher.manage.020309.top";
+const desktopManagePortalHost = "manage.020309.top";
+
+function normalizeDesktopApiBaseUrl(value?: string) {
+  const trimmed = (value || "").trim();
+  if (!trimmed) return "";
+  const normalized = trimmed.replace(/\/+$/, "");
+  if (normalized === desktopManagePortalHost) {
+    return desktopPublisherApiBaseUrl;
+  }
+  if (!/^https?:\/\//i.test(normalized)) {
+    return normalized;
+  }
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.hostname === desktopManagePortalHost) {
+      return desktopPublisherApiBaseUrl;
+    }
+  } catch {
+    // keep custom values as-is; connect validation handles invalid input later
+  }
+  return normalized;
+}
+
+function normalizeDesktopPublicHost(value?: string) {
+  const trimmed = (value || "").trim();
+  if (!trimmed) return "";
+  return trimmed === desktopManagePortalHost ? desktopPublisherHost : trimmed;
+}
+
 const runtimeDesktopEnv = typeof window !== "undefined" ? window.__DESKTOP_ENV__ || {} : {};
-const runtimeInjectedApiBaseUrl = (runtimeDesktopEnv.apiBaseUrl || "").trim();
-const runtimeInjectedPublicEntryHost = (runtimeDesktopEnv.publicEntryHost || "").trim();
+const runtimeInjectedApiBaseUrl = normalizeDesktopApiBaseUrl(runtimeDesktopEnv.apiBaseUrl || "");
+const runtimeInjectedPublicEntryHost = normalizeDesktopPublicHost(runtimeDesktopEnv.publicEntryHost || "");
 const hasRuntimeInjectedApiBaseUrl = Boolean(runtimeInjectedApiBaseUrl);
 const desktopNodeId = (import.meta.env.VITE_DESKTOP_NODE_ID || "").trim();
 const defaultDesktopPublicHost = (() => {
-  const configured = (runtimeInjectedPublicEntryHost || import.meta.env.VITE_PUBLIC_ENTRY_HOST || "").trim();
+  const configured = normalizeDesktopPublicHost(runtimeInjectedPublicEntryHost || import.meta.env.VITE_PUBLIC_ENTRY_HOST || "");
   if (configured) return configured;
   if (typeof window !== "undefined") {
-    const hostname = window.location.hostname.trim();
+    const hostname = normalizeDesktopPublicHost(window.location.hostname.trim());
     if (hostname) return hostname;
   }
-  return "82.156.236.104";
+  return desktopPublisherHost;
 })();
 
 const savedRelayEndpoint = (() => {
   if (typeof window === "undefined") return null;
   try {
     const raw = window.localStorage.getItem("desktop-publisher-relay-endpoint");
-    return raw ? (JSON.parse(raw) as { apiBaseUrl?: string; publicHost?: string }) : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { apiBaseUrl?: string; publicHost?: string };
+    return {
+      apiBaseUrl: normalizeDesktopApiBaseUrl(parsed.apiBaseUrl),
+      publicHost: normalizeDesktopPublicHost(parsed.publicHost),
+    };
   } catch {
     return null;
   }
@@ -135,7 +171,8 @@ const relayEndpointPresets: RelayEndpointPreset[] = (() => {
 
   const pushPreset = (preset: RelayEndpointPreset | null) => {
     if (!preset) return;
-    const normalizedApiBaseUrl = preset.apiBaseUrl.trim().replace(/\/+$/, "");
+    const normalizedApiBaseUrl = normalizeDesktopApiBaseUrl(preset.apiBaseUrl);
+    const normalizedPublicHost = normalizeDesktopPublicHost(preset.publicHost);
     if (preset.id !== "custom") {
       if (!normalizedApiBaseUrl || seenApiBaseUrls.has(normalizedApiBaseUrl)) return;
       seenApiBaseUrls.add(normalizedApiBaseUrl);
@@ -143,7 +180,7 @@ const relayEndpointPresets: RelayEndpointPreset[] = (() => {
     items.push({
       ...preset,
       apiBaseUrl: normalizedApiBaseUrl,
-      publicHost: preset.publicHost.trim(),
+      publicHost: normalizedPublicHost,
     });
   };
 
@@ -166,6 +203,14 @@ const relayEndpointPresets: RelayEndpointPreset[] = (() => {
         note: "",
       }
     : null);
+
+  pushPreset({
+    id: "publisher-manage",
+    label: "驻阡陌管理域名",
+    apiBaseUrl: "https://publisher.manage.020309.top",
+    publicHost: "publisher.manage.020309.top",
+    note: "推荐默认入口",
+  });
 
   pushPreset({
     id: "custom",
@@ -249,6 +294,9 @@ export default function App() {
   const [tunnelRates, setTunnelRates] = useState<Map<string, { downRate: number; upRate: number }>>(new Map());
   const agentTrafficPrevRef = useRef<{ sampledAt: number; downTotal: number; upTotal: number; tunnels: Map<string, { downBytes: number; upBytes: number }> } | null>(null);
   const refreshInFlightRef = useRef(false);
+  const runtimePollInFlightRef = useRef(false);
+  const usagePollInFlightRef = useRef(false);
+  const trafficPollInFlightRef = useRef(false);
   const appUsageSampleRef = useRef<DesktopAppUsage | null>(null);
   const [loginProfiles, setLoginProfiles] = useState<LoginProfilesFile | null>(null);
   const [savePassword, setSavePassword] = useState(false);
@@ -263,6 +311,7 @@ export default function App() {
   const [certFormKey, setCertFormKey] = useState("");
   const [certBusy, setCertBusy] = useState(false);
   const [managedHTTPSDomains, setManagedHTTPSDomains] = useState<ManagedHTTPSDomain[]>([]);
+  const managedDomainsRefreshingRef = useRef(false);
   const managedHTTPSDomainValues = useMemo(() => managedHTTPSDomains.map((item) => item.domain), [managedHTTPSDomains]);
 
   function clearToastTimers() {
@@ -325,15 +374,20 @@ export default function App() {
     if (autoLoginAttemptedRef.current) return;
     autoLoginAttemptedRef.current = true;
     void (async () => {
-      const [profiles, config] = await Promise.all([
+      const [profiles, config, autoStartEnabled] = await Promise.all([
         readLoginProfiles(),
         loadAppConfig(),
+        desktopTransport ? loadAutoStartEnabled() : Promise.resolve(false),
       ]);
       if (profiles) setLoginProfiles(profiles);
-      if (config) setAppConfig({ closeAction: config.closeAction || "ask", silentStart: config.silentStart || false, autoStart: config.autoStart || false });
-      // Sync auto-start registry with saved config
-      if (config?.autoStart && desktopTransport) {
-        try { await setAutoStart(true); } catch { /* ignore */ }
+      if (config) {
+        setAppConfig({
+          closeAction: config.closeAction || "ask",
+          silentStart: config.silentStart || false,
+          autoStart: desktopTransport ? autoStartEnabled : config.autoStart || false,
+        });
+      } else if (desktopTransport) {
+        setAppConfig((current) => ({ ...current, autoStart: autoStartEnabled }));
       }
       // Window bounds are restored by Rust setup before first paint
       // Pre-fill last used email and check if it has a saved password
@@ -363,7 +417,9 @@ export default function App() {
     })();
   }, []);
 
-  const effectiveApiBaseUrl = hasRuntimeInjectedApiBaseUrl ? runtimeInjectedApiBaseUrl : connectionReady ? apiDraft.replace(/\/$/, "") : "";
+  const normalizedApiDraft = normalizeDesktopApiBaseUrl(apiDraft);
+  const normalizedCloudPublicHost = normalizeDesktopPublicHost(cloudPublicHost) || defaultDesktopPublicHost;
+  const effectiveApiBaseUrl = hasRuntimeInjectedApiBaseUrl ? runtimeInjectedApiBaseUrl : connectionReady ? normalizedApiDraft : "";
   const desktopTransport = useMemo(() => createTauriDesktopTransport(), []);
   const desktopApi = useMemo(() => createDesktopApi(effectiveApiBaseUrl, desktopTransport || undefined), [effectiveApiBaseUrl, desktopTransport]);
 
@@ -406,6 +462,17 @@ export default function App() {
     }
   }, [desktopApi]);
 
+  const refreshManagedHTTPSDomains = useCallback(async () => {
+    if (!currentUser || managedDomainsRefreshingRef.current) return;
+    managedDomainsRefreshingRef.current = true;
+    try {
+      const result = await desktopApi.listManagedHTTPSDomains();
+      setManagedHTTPSDomains(result.items || []);
+    } finally {
+      managedDomainsRefreshingRef.current = false;
+    }
+  }, [currentUser, desktopApi]);
+
   useEffect(() => {
     if (!currentUser) return;
     void reloadCertificateState();
@@ -426,8 +493,30 @@ export default function App() {
     };
   }, [desktopTransport]);
 
+  useEffect(() => {
+    if (!desktopTransport) return;
+    let unlisten: undefined | (() => void);
+    void listen("app-close-requested", () => {
+      if (appConfig.closeAction === "ask") {
+        setCloseDialogOpen(true);
+      } else if (appConfig.closeAction === "tray") {
+        void windowRequestClose();
+      } else {
+        void appExit();
+      }
+    }).then((dispose) => {
+      unlisten = dispose;
+    }).catch(() => {
+      unlisten = undefined;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [desktopTransport, appConfig.closeAction]);
+
   const runtimeNodeId = runtimeStatus.nodeId.trim();
-  const runtimeReady = runtimeStatus.available && runtimeStatus.running && runtimeStatus.healthy;
+  const runtimeRunning = runtimeStatus.available && runtimeStatus.running;
+  const runtimeReady = runtimeRunning && runtimeStatus.healthy;
   const runtimeRelayReady = runtimeReady && Boolean(runtimeStatus.relayTcpUrl);
 
   useEffect(() => {
@@ -463,17 +552,22 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     async function loadRuntime() {
-      const payload = await loadRuntimeStatus();
-      if (!cancelled) {
-        setRuntimeStatus((prev) => {
-          // Only update if key fields changed
-          if (prev.available === payload.available && prev.running === payload.running &&
-              prev.healthy === payload.healthy && prev.nodeId === payload.nodeId &&
-              prev.relayTcpUrl === payload.relayTcpUrl && prev.lastError === payload.lastError) {
-            return prev; // same reference → no re-render
-          }
-          return payload;
-        });
+      if (runtimePollInFlightRef.current) return;
+      runtimePollInFlightRef.current = true;
+      try {
+        const payload = await loadRuntimeStatus();
+        if (!cancelled) {
+          setRuntimeStatus((prev) => {
+            if (prev.available === payload.available && prev.running === payload.running &&
+                prev.healthy === payload.healthy && prev.nodeId === payload.nodeId &&
+                prev.relayTcpUrl === payload.relayTcpUrl && prev.lastError === payload.lastError) {
+              return prev;
+            }
+            return payload;
+          });
+        }
+      } finally {
+        runtimePollInFlightRef.current = false;
       }
     }
     void loadRuntime();
@@ -504,15 +598,20 @@ export default function App() {
     let cancelled = false;
 
     async function pollUsage() {
-      const payload = await loadDesktopAppUsage();
-      if (cancelled) return;
-      // Only update if values meaningfully changed (>1% CPU or >1MB memory)
-      const prev = appUsageSampleRef.current;
-      const cpuChanged = !prev || Math.abs((payload.cpuPercent || 0) - (prev.cpuPercent || 0)) > 1;
-      const memChanged = !prev || Math.abs((payload.memoryMb || 0) - (prev.memoryMb || 0)) > 1;
-      if (cpuChanged || memChanged) {
-        appUsageSampleRef.current = payload;
-        setAppUsage(payload);
+      if (usagePollInFlightRef.current) return;
+      usagePollInFlightRef.current = true;
+      try {
+        const payload = await loadDesktopAppUsage();
+        if (cancelled) return;
+        const prev = appUsageSampleRef.current;
+        const cpuChanged = !prev || Math.abs((payload.cpuPercent || 0) - (prev.cpuPercent || 0)) > 1;
+        const memChanged = !prev || Math.abs((payload.memoryMb || 0) - (prev.memoryMb || 0)) > 1;
+        if (cpuChanged || memChanged) {
+          appUsageSampleRef.current = payload;
+          setAppUsage(payload);
+        }
+      } finally {
+        usagePollInFlightRef.current = false;
       }
     }
 
@@ -531,64 +630,74 @@ export default function App() {
     let cancelled = false;
 
     async function pollTraffic() {
-      const snapshot = await loadAgentTraffic();
-      if (cancelled || !snapshot) return;
+      if (!currentUser || !runtimeRunning || trafficPollInFlightRef.current) return;
+      trafficPollInFlightRef.current = true;
+      try {
+        const snapshot = await loadAgentTraffic();
+        if (cancelled || !snapshot) return;
 
-      const now = Date.now();
-      const prev = agentTrafficPrevRef.current;
+        const now = Date.now();
+        const prev = agentTrafficPrevRef.current;
+        const totalsChanged = !prev || prev.downTotal !== snapshot.downTotal || prev.upTotal !== snapshot.upTotal;
 
-      // Only update state if data actually changed
-      const totalsChanged = !prev || prev.downTotal !== snapshot.downTotal || prev.upTotal !== snapshot.upTotal;
-
-      if (totalsChanged) {
-        setAgentTraffic(snapshot);
-      }
-
-      // Calculate per-tunnel rates (only when we have a previous sample)
-      if (prev && now > prev.sampledAt && totalsChanged) {
-        const seconds = (now - prev.sampledAt) / 1000;
-        if (seconds > 0) {
-          const newRates = new Map<string, { downRate: number; upRate: number }>();
-          for (const t of snapshot.tunnels) {
-            const prevT = prev.tunnels.get(t.tunnelId);
-            newRates.set(t.tunnelId, {
-              downRate: prevT ? Math.max(0, t.downBytes - prevT.downBytes) / seconds : 0,
-              upRate: prevT ? Math.max(0, t.upBytes - prevT.upBytes) / seconds : 0,
-            });
-          }
-          setTunnelRates(newRates);
-
-          // Total rate
-          const downRate = Math.max(0, snapshot.downTotal - prev.downTotal) / seconds;
-          const upRate = Math.max(0, snapshot.upTotal - prev.upTotal) / seconds;
-          setTrafficRate({ downRate, upRate });
+        if (totalsChanged) {
+          setAgentTraffic(snapshot);
         }
-      }
 
-      // Store current snapshot for next delta
-      const tunnelMap = new Map<string, { downBytes: number; upBytes: number }>();
-      for (const t of snapshot.tunnels) {
-        tunnelMap.set(t.tunnelId, { downBytes: t.downBytes, upBytes: t.upBytes });
+        if (prev && now > prev.sampledAt && totalsChanged) {
+          const seconds = (now - prev.sampledAt) / 1000;
+          if (seconds > 0) {
+            const newRates = new Map<string, { downRate: number; upRate: number }>();
+            for (const t of snapshot.tunnels) {
+              const prevT = prev.tunnels.get(t.tunnelId);
+              newRates.set(t.tunnelId, {
+                downRate: prevT ? Math.max(0, t.downBytes - prevT.downBytes) / seconds : 0,
+                upRate: prevT ? Math.max(0, t.upBytes - prevT.upBytes) / seconds : 0,
+              });
+            }
+            setTunnelRates(newRates);
+
+            const downRate = Math.max(0, snapshot.downTotal - prev.downTotal) / seconds;
+            const upRate = Math.max(0, snapshot.upTotal - prev.upTotal) / seconds;
+            setTrafficRate({ downRate, upRate });
+          }
+        }
+
+        const tunnelMap = new Map<string, { downBytes: number; upBytes: number }>();
+        for (const t of snapshot.tunnels) {
+          tunnelMap.set(t.tunnelId, { downBytes: t.downBytes, upBytes: t.upBytes });
+        }
+        agentTrafficPrevRef.current = { sampledAt: now, downTotal: snapshot.downTotal, upTotal: snapshot.upTotal, tunnels: tunnelMap };
+      } finally {
+        trafficPollInFlightRef.current = false;
       }
-      agentTrafficPrevRef.current = { sampledAt: now, downTotal: snapshot.downTotal, upTotal: snapshot.upTotal, tunnels: tunnelMap };
+    }
+
+    if (!currentUser || !runtimeRunning) {
+      setAgentTraffic(null);
+      setTunnelRates(new Map());
+      setTrafficRate({ downRate: 0, upRate: 0 });
+      agentTrafficPrevRef.current = null;
+      return () => {
+        cancelled = true;
+      };
     }
 
     void pollTraffic();
     const timer = window.setInterval(() => {
       void pollTraffic();
-    }, 500);
+    }, 1500);
 
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [currentUser, runtimeRunning]);
 
   async function loadSnapshot() {
     const [payload, metrics] = await Promise.all([
       desktopApi.loadDesktopData(),
       currentUser?.role === "admin" ? desktopApi.loadServerMetrics().catch(() => null) : Promise.resolve(null),
-      currentUser ? reloadCertificateState() : Promise.resolve(),
     ]);
     // Only update if data actually changed (shallow compare by JSON)
     setNodes((prev) => {
@@ -689,7 +798,7 @@ export default function App() {
   const activeRulesCount = useMemo(() => publishableTunnels.filter((item) => item.status === "active").length, [publishableTunnels]);
   const attentionCount = useMemo(() => diagnosticsItems.filter((item) => item.tone === "danger").length, [diagnosticsItems]);
   const currentRoute = useMemo(() => findRouteMeta(location.pathname), [location.pathname]);
-  const cloudEndpointLabel = effectiveApiBaseUrl || apiDraft.replace(/\/$/, "");
+  const cloudEndpointLabel = effectiveApiBaseUrl || normalizedApiDraft;
   const cloudEndpointDisplayName = connectionReady ? relayEndpointPresets.find((p) => p.apiBaseUrl.replace(/\/$/, "") === cloudEndpointLabel)?.label || "云站点" : "未连接";
   const runtimeBindingIssue = useMemo(() => {
     if (!runtimeRelayReady) {
@@ -776,7 +885,18 @@ export default function App() {
   }, [drawerTunnel, localTrafficByTunnel]);
 
   const drawerRuleState = drawerTunnel ? evaluateRuleState(drawerTunnel) : null;
-  const drawerCloudEntry = drawerTunnel ? deriveCloudEntry(drawerTunnel, cloudPublicHost) : null;
+  const drawerCloudEntry = drawerTunnel ? deriveCloudEntry(drawerTunnel, normalizedCloudPublicHost) : null;
+
+  useEffect(() => {
+    if (!currentUser) return;
+    if (drawerState?.kind === "create-rule" && publishForm.protocol === "https") {
+      void refreshManagedHTTPSDomains();
+      return;
+    }
+    if (drawerState?.kind === "rule" && drawerTunnel?.type === "https") {
+      void refreshManagedHTTPSDomains();
+    }
+  }, [currentUser, drawerState, publishForm.protocol, drawerTunnel?.id, drawerTunnel?.type, refreshManagedHTTPSDomains]);
 
   useEffect(() => {
     if (!publishForm.localServiceId && localServices[0]) {
@@ -856,7 +976,10 @@ export default function App() {
   }, [currentUser, desktopApi, drawerState, drawerTunnel]);
 
   async function startEmbeddedRuntime(apiBaseUrlValue: string, showSuccessMessage: boolean) {
-    const normalizedApi = apiBaseUrlValue.replace(/\/$/, "");
+    const normalizedApi = normalizeDesktopApiBaseUrl(apiBaseUrlValue);
+    if (!normalizedApi) {
+      throw new Error("请先填写云站点 API 地址");
+    }
     const existingNodeName = runtimeStatus.nodeName.trim();
     const fallbackNodeName = typeof window !== "undefined" ? window.navigator.userAgent.includes("Windows") ? "windows-publisher" : "desktop-publisher" : "desktop-publisher";
     const requestedNodeName = existingNodeName || fallbackNodeName;
@@ -880,7 +1003,7 @@ export default function App() {
     setMessage("");
     setConnectionStatus("checking");
     try {
-      const normalizedApi = apiDraft.trim().replace(/\/+$/, "");
+      const normalizedApi = normalizeDesktopApiBaseUrl(apiDraft);
       if (!normalizedApi) {
         throw new Error("请先填写云站点 API 地址");
       }
@@ -913,10 +1036,13 @@ export default function App() {
         throw new Error(`云站点 API 可达，但本地发布运行时启动失败：${detail}`);
       }
 
+      const normalizedPublicHost = normalizedCloudPublicHost;
       window.localStorage.setItem(
         "desktop-publisher-relay-endpoint",
-        JSON.stringify({ apiBaseUrl: normalizedApi, publicHost: cloudPublicHost.trim() || defaultDesktopPublicHost }),
+        JSON.stringify({ apiBaseUrl: normalizedApi, publicHost: normalizedPublicHost }),
       );
+      setApiDraft(normalizedApi);
+      setCloudPublicHost(normalizedPublicHost);
       setBootstrapRequired(payload.required);
       setConnectionReady(true);
       setConnectionStatus("connected");
@@ -977,6 +1103,8 @@ export default function App() {
       setControlNote("");
       setLastRefreshAt("");
       setSyncIssue("");
+      setCertificates([]);
+      setManagedHTTPSDomains([]);
       setMessage("已退出登录。");
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "退出失败");
@@ -994,10 +1122,13 @@ export default function App() {
       setMessage("");
     }
     try {
-      await loadSnapshot();
+      await Promise.all([
+        loadSnapshot(),
+        source === "manual" ? reloadCertificateState() : Promise.resolve(),
+      ]);
       setSyncIssue("");
       if (showNotice) {
-        setMessage("当前机器的发布规则、验证结果和运行状态已刷新。");
+        setMessage("当前机器的发布规则、验证结果、运行状态和托管域名已刷新。");
       }
     } catch (refreshError) {
       const detail = refreshError instanceof Error ? refreshError.message : "刷新失败";
@@ -1068,10 +1199,15 @@ export default function App() {
     setError("");
   }
 
-  function openCreateRuleDrawer() {
+  async function openCreateRuleDrawer() {
     if (runtimeBindingIssue) {
       setError(runtimeBindingIssue);
       return;
+    }
+    try {
+      await reloadCertificateState();
+    } catch {
+      // keep existing cached managed domains if refresh fails
     }
     setPublishForm((current) => ({
       ...current,
@@ -1411,7 +1547,13 @@ export default function App() {
               </label>
               <label>
                 <span>协议</span>
-                <select value={publishForm.protocol} onChange={(event) => setPublishForm((current) => ({ ...current, protocol: event.target.value as PublishProtocol, publicPort: String(defaultPublicPortForProtocol(event.target.value as PublishProtocol, publishableTunnels.length)) }))}>
+                <select value={publishForm.protocol} onChange={(event) => {
+                  const nextProtocol = event.target.value as PublishProtocol;
+                  setPublishForm((current) => ({ ...current, protocol: nextProtocol, publicPort: String(defaultPublicPortForProtocol(nextProtocol, publishableTunnels.length)) }));
+                  if (nextProtocol === "https") {
+                    void refreshManagedHTTPSDomains();
+                  }
+                }}>
                   {protocolList.map((item) => <option key={item} value={item}>{item.toUpperCase()}</option>)}
                 </select>
               </label>
@@ -1438,7 +1580,7 @@ export default function App() {
                   </label>
                   <label>
                     <span>Domain</span>
-                    <input value={publishForm.domain} onChange={(event) => setPublishForm((current) => ({ ...current, domain: event.target.value }))} placeholder="例如 app.example.com" required />
+                    <input value={publishForm.domain} onChange={(event) => setPublishForm((current) => ({ ...current, domain: event.target.value }))} onBlur={() => { void refreshManagedHTTPSDomains(); }} onPaste={() => { void refreshManagedHTTPSDomains(); }} placeholder="例如 app.example.com" required />
                   </label>
                 </>
               ) : null}
@@ -1502,7 +1644,7 @@ export default function App() {
               ) : null}
               <div className="drawer-note">当前主路径继续按 HTTP / HTTPS / TCP / UDP / SOCKS5 走；P2P 仍按 partial / non-blocking 处理。</div>
               <div className="surface-banner info">当前 runtime 节点：{runtimeBoundDevice ? `${runtimeBoundDevice.nodeName} (${runtimeBoundDevice.nodeId})` : runtimeStatus.nodeId ? `等待注册 ${runtimeStatus.nodeId}` : "未生成 nodeId"}</div>
-              {runtimeBindingIssue ? <div className="surface-banner danger">{runtimeBindingIssue}</div> : null}
+              {runtimeBindingIssue ? <div className="surface-banner danger">{runtimeBindingIssue}{runtimeStatus.stderrLogPath ? <button className="btn btn-link-inline" type="button" onClick={() => void openRuntimeLog("stderr")}>打开 stderr 日志</button> : null}</div> : null}
               <button className="btn btn-primary" type="submit" disabled={busy === "create-rule" || localServices.length === 0 || Boolean(runtimeBindingIssue)}><i className="fas fa-plus" /> {busy === "create-rule" ? "创建中..." : "创建规则"}</button>
             </form>
             </div>
@@ -1513,7 +1655,7 @@ export default function App() {
 
     if (!drawerTunnel || !drawerRuleState || !drawerCloudEntry || !editForm) return null;
     const linkedService = resolveLinkedService(drawerTunnel, localServices);
-    const quickCommand = buildQuickCommand(drawerTunnel, drawerCloudEntry.publicUrl, cloudPublicHost);
+    const quickCommand = buildQuickCommand(drawerTunnel, drawerCloudEntry.publicUrl, normalizedCloudPublicHost);
     const probe = probeResults[drawerTunnel.id];
 
     return (
@@ -1553,11 +1695,11 @@ export default function App() {
               <button className="btn" type="button" onClick={() => void copyToClipboard(drawerCloudEntry.publicLabel, "用户入口")}><i className="fas fa-copy" /> 复制入口</button>
               <button className="btn" type="button" disabled={!supportsOpenEntry(drawerTunnel, drawerRuleState, drawerCloudEntry)} onClick={() => void openExternal(drawerCloudEntry.publicUrl, "用户入口")}><i className="fas fa-arrow-up-right-from-square" /> 打开入口</button>
               <button className="btn" type="button" onClick={() => void copyToClipboard(quickCommand, "协议示例命令(Linux/Mac)")}><i className="fas fa-terminal" /> 复制命令</button>
-              <button className="btn" type="button" onClick={() => void copyToClipboard(buildQuickCommandWindows(drawerTunnel, cloudPublicHost), "验证命令(Windows)")}><i className="fas fa-terminal" /> 复制 Win 命令</button>
+              <button className="btn" type="button" onClick={() => void copyToClipboard(buildQuickCommandWindows(drawerTunnel, normalizedCloudPublicHost), "验证命令(Windows)")}><i className="fas fa-terminal" /> 复制 Win 命令</button>
               <button className="btn" type="button" disabled={!supportsProbe(drawerTunnel, drawerRuleState, drawerCloudEntry) || busy === drawerTunnel.id + ":probe"} onClick={() => void runTunnelProbe(drawerTunnel)}><i className="fas fa-satellite-dish" /> {busy === drawerTunnel.id + ":probe" ? "探测中..." : "执行探测"}</button>
             </div>
             <div className="command-box"><code>{quickCommand}</code></div>
-            <div className="command-box"><code>{buildQuickCommandWindows(drawerTunnel, cloudPublicHost)}</code></div>
+            <div className="command-box"><code>{buildQuickCommandWindows(drawerTunnel, normalizedCloudPublicHost)}</code></div>
             {probe ? <div className={`status-badge ${probe.success ? "" : "warning"}`}>{probe.success ? `最近 probe 成功 · ${formatDate(probe.probedAt)}` : `最近 probe 失败 · ${formatDate(probe.probedAt)} · ${probe.error || "未知错误"}`}</div> : null}
           </div>
 
@@ -1593,7 +1735,7 @@ export default function App() {
                   ) : null}
                   <label>
                     <span>Domain</span>
-                    <input value={editForm.domain} onChange={(event) => setEditForm((current) => current ? { ...current, domain: event.target.value } : current)} />
+                    <input value={editForm.domain} onChange={(event) => setEditForm((current) => current ? { ...current, domain: event.target.value } : current)} onBlur={() => { void refreshManagedHTTPSDomains(); }} onPaste={() => { void refreshManagedHTTPSDomains(); }} />
                   </label>
                 </>
               ) : null}
@@ -1720,7 +1862,7 @@ export default function App() {
               <tbody>
                 {publishableTunnels.map((tunnel) => {
                   const state = evaluateRuleState(tunnel);
-                  const entry = deriveCloudEntry(tunnel, cloudPublicHost);
+                  const entry = deriveCloudEntry(tunnel, normalizedCloudPublicHost);
                   const traffic = localTrafficByTunnel.get(tunnel.id);
                   const rate = tunnelRates.get(tunnel.id);
                   return (
@@ -1770,16 +1912,16 @@ export default function App() {
   function renderPublishPage() {
     return (
       <div className="page-panel active">
-        <div className="page-header"><h1>发布规则</h1><div><button className="btn btn-primary" type="button" onClick={openCreateRuleDrawer}><i className="fas fa-plus" /> 新建规则</button></div></div>
+        <div className="page-header"><h1>发布规则</h1><div><button className="btn btn-primary" type="button" onClick={() => void openCreateRuleDrawer()}><i className="fas fa-plus" /> 新建规则</button></div></div>
         <div className="surface-banner info">当前 runtime 节点：{runtimeBoundDevice ? `${runtimeBoundDevice.nodeName} (${runtimeBoundDevice.nodeId})` : runtimeStatus.nodeId ? `等待注册 ${runtimeStatus.nodeId}` : "未生成 nodeId"}</div>
-        {runtimeBindingIssue ? <div className="surface-banner danger">{runtimeBindingIssue}</div> : null}
+        {runtimeBindingIssue ? <div className="surface-banner danger">{runtimeBindingIssue}{runtimeStatus.stderrLogPath ? <button className="btn btn-link-inline" type="button" onClick={() => void openRuntimeLog("stderr")}>打开 stderr 日志</button> : null}</div> : null}
         <div className="table-wrapper">
           <table>
             <thead><tr><th>本地服务</th><th>协议/入口</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
               {publishableTunnels.length === 0 ? <tr><td colSpan={4}>当前还没有发布规则</td></tr> : publishableTunnels.map((item) => {
                 const state = evaluateRuleState(item);
-                const entry = deriveCloudEntry(item, cloudPublicHost);
+                const entry = deriveCloudEntry(item, normalizedCloudPublicHost);
                 const service = resolveLinkedService(item, localServices);
                 return (
                   <tr key={item.id}>
@@ -2033,11 +2175,11 @@ export default function App() {
             <>
               <label>
                 <span>API 地址</span>
-                <input placeholder="http://主机:端口" value={apiDraft} onChange={(event) => setApiDraft(event.target.value)} />
+                <input placeholder="https://publisher.manage.020309.top" value={apiDraft} onChange={(event) => setApiDraft(event.target.value)} />
               </label>
               <label>
                 <span>公网入口服务</span>
-                <input placeholder="域名或主机" value={cloudPublicHost} onChange={(event) => setCloudPublicHost(event.target.value)} />
+                <input placeholder="publisher.manage.020309.top" value={cloudPublicHost} onChange={(event) => setCloudPublicHost(event.target.value)} />
               </label>
             </>
           ) : null}

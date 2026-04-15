@@ -1,8 +1,8 @@
 Cloud Relay Desktop Console Portable
 
 1. Edit desktop-config.json before first launch.
-2. Set apiBaseUrl to your upstream server-api base URL, for example http://82.156.236.104:7710. The desktop page itself stays on the local launcher origin and reaches the server through the launcher's /api reverse proxy.
-3. Optionally set publicEntryHost to the public relay host shown in workbench entries.
+2. Set apiBaseUrl to your upstream server-api base URL, for example https://publisher.manage.020309.top. The desktop page itself stays on the local launcher origin and reaches the server through the launcher's /api reverse proxy.
+3. Optionally set publicEntryHost to the relay host shown in workbench entries, for example publisher.manage.020309.top.
 4. Start desktop-launcher.exe. With openBrowser=true, the launcher will prefer Microsoft Edge or Google Chrome on Windows before falling back to the system default browser.
 5. If the page still opens in an old browser, manually open http://127.0.0.1:5180/ in Edge or Chrome. Legacy browsers will only show a compatibility notice.
 

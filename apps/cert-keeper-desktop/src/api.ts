@@ -87,17 +87,27 @@ export async function apiRequest(
   return result;
 }
 
+function parseErrorMessage(status: number, body: string) {
+  let msg = `HTTP ${status}`;
+  try {
+    const payload = JSON.parse(body);
+    msg = payload.error || msg;
+  } catch {
+    // ignore invalid JSON payloads
+  }
+  return msg;
+}
+
 export async function apiJson<T>(method: string, path: string, options: RequestOptions = {}): Promise<T> {
-  const result = await apiRequest(method, path, options);
-  if (!result.ok) {
-    let msg = `HTTP ${result.status}`;
-    try {
-      const payload = JSON.parse(result.body);
-      msg = payload.error || msg;
-    } catch {
-      // ignore invalid JSON payloads
+  let result = await apiRequest(method, path, options);
+  if (result.status === 401 && path !== "/api/auth/login" && path !== "/api/auth/bootstrap" && path !== "/api/auth/refresh") {
+    const refreshResult = await apiRequest("POST", "/api/auth/refresh", { body: {} });
+    if (refreshResult.ok) {
+      result = await apiRequest(method, path, options);
     }
-    throw new Error(msg);
+  }
+  if (!result.ok) {
+    throw new Error(parseErrorMessage(result.status, result.body));
   }
   return JSON.parse(result.body) as T;
 }

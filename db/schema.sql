@@ -107,3 +107,16 @@ create table if not exists web_sessions (
 );
 
 create index if not exists idx_web_sessions_user_id on web_sessions(user_id);
+
+create table if not exists user_certificates (
+    id text primary key,
+    user_id text not null references users(id) on delete cascade,
+    domain text not null,
+    cert_pem text not null,
+    key_pem text not null,
+    expires_at timestamptz,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create unique index if not exists idx_user_certs_user_domain on user_certificates(user_id, domain);

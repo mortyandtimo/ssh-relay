@@ -77,7 +77,7 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 		mux:                  http.NewServeMux(),
 		accessSecret:         envOrDefault("SERVER_API_ACCESS_SECRET", "cloud-relay-access-secret-dev"),
 		adminWebDir:          envOrDefault("SERVER_API_ADMIN_WEB_DIR", "/opt/cloud-relay-platform/admin-web"),
-		publicEntryHost:      envOrDefault("SERVER_API_PUBLIC_ENTRY_HOST", "82.156.236.104"),
+		publicEntryHost:      envOrDefault("SERVER_API_PUBLIC_ENTRY_HOST", "publisher.manage.020309.top"),
 		accessTokenTTL:       15 * time.Minute,
 		refreshTokenTTL:      7 * 24 * time.Hour,
 		adminBootstrapSecret: strings.TrimSpace(os.Getenv("SERVER_API_ADMIN_BOOTSTRAP_SECRET")),

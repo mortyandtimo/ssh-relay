@@ -1,0 +1,53 @@
+#!/bin/bash
+set -e
+
+echo "=== CertKeeper API Deploy ==="
+
+# Build
+cd /root/cloud-relay-platform/apps/cert-keeper-api
+CGO_ENABLED=0 go build -o /opt/cert-keeper/cert-keeper-api ./cmd/cert-keeper-api/
+echo "Built cert-keeper-api"
+
+# DB schema
+echo "Applying database schema..."
+PGPASSWORD=CloudRelay2024! psql -h 127.0.0.1 -U cloudrelay -d cloudrelay -f /root/cloud-relay-platform/db/cert-keeper-schema.sql
+
+# Nginx include
+NGINX_CONF=/www/server/nginx/conf/nginx.conf
+NGINX_BIN=/www/server/nginx/sbin/nginx
+INCLUDE_LINE="include /etc/cloud-relay/cert-keeper/nginx/*.conf;"
+if ! grep -Fq "$INCLUDE_LINE" "$NGINX_CONF" 2>/dev/null; then
+    if grep -Fq 'include /www/server/panel/vhost/nginx/*.conf;' "$NGINX_CONF"; then
+        sed -i '/include \/www\/server\/panel\/vhost\/nginx\/\*\.conf;/a\    include /etc/cloud-relay/cert-keeper/nginx/*.conf;' "$NGINX_CONF"
+    elif grep -Fq 'include /etc/cloud-relay/nginx/*.conf;' "$NGINX_CONF"; then
+        sed -i '/include \/etc\/cloud-relay\/nginx\/\*\.conf;/i\    include /etc/cloud-relay/cert-keeper/nginx/*.conf;' "$NGINX_CONF"
+    else
+        echo "Failed to find nginx include anchor in $NGINX_CONF" >&2
+        exit 1
+    fi
+    echo "Added nginx include"
+fi
+
+# Directories
+mkdir -p /etc/cloud-relay/cert-keeper/certs
+mkdir -p /etc/cloud-relay/cert-keeper/nginx
+mkdir -p /opt/cert-keeper
+
+# Systemd
+cp /root/cloud-relay-platform/deploy/cert-keeper/cert-keeper-api.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable cert-keeper-api
+systemctl restart cert-keeper-api
+echo "cert-keeper-api service started"
+
+# Health check
+sleep 2
+curl -sf http://127.0.0.1:7720/healthz && echo " — health OK" || echo " — health check failed"
+
+# Live nginx verification
+$NGINX_BIN -t
+if ! $NGINX_BIN -T 2>/dev/null | grep -Fq "$INCLUDE_LINE"; then
+    echo "CertKeeper nginx include is not active in live nginx config" >&2
+    exit 1
+fi
+echo "CertKeeper nginx include verified in live config"

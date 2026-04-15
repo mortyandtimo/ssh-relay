@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import type { MouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -10,8 +10,17 @@ type Page = "loading" | "certs" | "add" | "setup" | "login" | "settings";
 type ReopenDialogChoice = "cancel" | "new-window";
 type CloseAction = "ask" | "tray" | "exit";
 
-const defaultApiUrl = "http://82.156.236.104:7720";
+const legacyDefaultApiUrl = "http://82.156.236.104:7720";
+const defaultApiUrl = "https://cert.manage.020309.top";
 const defaultCloseAction: CloseAction = "ask";
+
+function normalizeApiBaseUrl(value?: string) {
+  const normalized = (value || "").trim();
+  if (!normalized || normalized === legacyDefaultApiUrl) {
+    return defaultApiUrl;
+  }
+  return normalized;
+}
 
 export default function App() {
   const [page, setPage] = useState<Page>("loading");
@@ -20,10 +29,12 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [selectedCert, setSelectedCert] = useState<Certificate | null>(null);
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
   const [reopenDialogOpen, setReopenDialogOpen] = useState(false);
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<string | null>(null);
+  const [updatingCertId, setUpdatingCertId] = useState<string | null>(null);
   const [appConfig, setAppConfig] = useState<AppConfig>({ apiBaseUrl: defaultApiUrl, closeAction: defaultCloseAction });
   const [loginProfiles, setLoginProfiles] = useState<LoginProfilesFile | null>(null);
   const [savePassword, setSavePassword] = useState(false);
@@ -71,7 +82,7 @@ export default function App() {
 
   const persistConfig = useCallback(async (nextConfig: AppConfig) => {
     const normalized: AppConfig = {
-      apiBaseUrl: (nextConfig.apiBaseUrl || defaultApiUrl).trim() || defaultApiUrl,
+      apiBaseUrl: normalizeApiBaseUrl(nextConfig.apiBaseUrl),
       closeAction: (nextConfig.closeAction || defaultCloseAction) as CloseAction,
     };
     setAppConfig(normalized);
@@ -81,7 +92,7 @@ export default function App() {
   }, []);
 
   const checkAuth = useCallback(async (targetApiUrl?: string): Promise<"authed" | "setup" | "login"> => {
-    const normalizedApiUrl = (targetApiUrl || apiUrl).trim() || defaultApiUrl;
+    const normalizedApiUrl = normalizeApiBaseUrl(targetApiUrl || apiUrl);
     api.setBaseUrl(normalizedApiUrl);
     try {
       const currentUser = await api.me();
@@ -91,16 +102,25 @@ export default function App() {
       return "authed";
     } catch {
       try {
-        const bootstrap = await api.bootstrapStatus();
-        setUser(null);
-        setPage(bootstrap.required ? "setup" : "login");
+        await api.refresh();
+        const currentUser = await api.me();
+        setUser(currentUser);
+        setPage("certs");
         setError("");
-        return bootstrap.required ? "setup" : "login";
-      } catch (authError) {
-        setUser(null);
-        setPage("login");
-        setError(authError instanceof Error ? authError.message : "无法连接证书服务");
-        return "login";
+        return "authed";
+      } catch {
+        try {
+          const bootstrap = await api.bootstrapStatus();
+          setUser(null);
+          setPage(bootstrap.required ? "setup" : "login");
+          setError("");
+          return bootstrap.required ? "setup" : "login";
+        } catch (authError) {
+          setUser(null);
+          setPage("login");
+          setError(authError instanceof Error ? authError.message : "无法连接证书服务");
+          return "login";
+        }
       }
     }
   }, [apiUrl]);
@@ -114,7 +134,7 @@ export default function App() {
           readLoginProfiles(),
         ]);
         if (cancelled) return;
-        const normalizedApiUrl = (config?.apiBaseUrl || defaultApiUrl).trim() || defaultApiUrl;
+        const normalizedApiUrl = normalizeApiBaseUrl(config?.apiBaseUrl || defaultApiUrl);
         const closeAction = (config?.closeAction || defaultCloseAction) as CloseAction;
         const nextConfig = { apiBaseUrl: normalizedApiUrl, closeAction };
         setAppConfig(nextConfig);
@@ -197,7 +217,7 @@ export default function App() {
       const items = await api.listCertificates();
       setCerts(items);
     } catch (e: any) {
-      setError(e.message);
+      setError(e instanceof Error ? e.message : String(e));
     }
     setLoading(false);
   };
@@ -209,7 +229,7 @@ export default function App() {
   }, [page, user]);
 
   const saveConfig = async (url: string) => {
-    await persistConfig({ ...appConfig, apiBaseUrl: url.trim() || defaultApiUrl });
+    await persistConfig({ ...appConfig, apiBaseUrl: normalizeApiBaseUrl(url) });
   };
 
   const setCloseAction = async (value: CloseAction) => {
@@ -236,7 +256,7 @@ export default function App() {
       setPage("certs");
       await rememberProfile(loginEmail, loginPassword, savePassword, autoLogin);
     } catch (e: any) {
-      setError(e.message);
+      setError(e instanceof Error ? e.message : String(e));
     }
     setLoading(false);
   };
@@ -252,7 +272,7 @@ export default function App() {
       await rememberProfile(loginEmail, loginPassword, savePassword, autoLogin);
       setProfileListOpen(false);
     } catch (e: any) {
-      setError(e.message);
+      setError(e instanceof Error ? e.message : String(e));
     }
     setLoading(false);
   };
@@ -272,14 +292,20 @@ export default function App() {
   const handleAutoIssue = async () => {
     setLoading(true);
     setError("");
+    setNotice("");
     try {
-      await api.autoIssue(addDomain);
+      const created = await api.autoIssue(addDomain);
+      await loadCerts();
+      setSelectedCert(created);
       setAddDomain("");
+      setDnsResult(null);
       setPage("certs");
+      setNotice(`证书已签发：${created.domain}`);
     } catch (e: any) {
-      setError(e.message);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleManualAdd = async () => {
@@ -292,7 +318,7 @@ export default function App() {
       setAddKeyPem("");
       setPage("certs");
     } catch (e: any) {
-      setError(e.message);
+      setError(e instanceof Error ? e.message : String(e));
     }
     setLoading(false);
   };
@@ -313,7 +339,23 @@ export default function App() {
       await loadCerts();
       if (selectedCert?.id === id) setSelectedCert(null);
     } catch (e: any) {
-      setError(e.message);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleAutoRenewToggle = async (cert: Certificate, nextValue: boolean) => {
+    setUpdatingCertId(cert.id);
+    setError("");
+    setNotice("");
+    try {
+      const updated = await api.updateCertificate(cert.id, { autoRenew: nextValue });
+      setCerts((items) => items.map((item) => item.id === updated.id ? updated : item));
+      setSelectedCert(updated);
+      setNotice(`${updated.domain} 已${updated.autoRenew ? "开启" : "关闭"}自动续期`);
+    } catch (e: any) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setUpdatingCertId(null);
     }
   };
 
@@ -388,6 +430,13 @@ export default function App() {
     return Math.ceil(diff / 86400000);
   };
 
+  const selectedCertLive = useMemo(() => {
+    if (!selectedCert) return null;
+    return certs.find((item) => item.id === selectedCert.id) || selectedCert;
+  }, [certs, selectedCert]);
+
+  const selectedCertSupportsAutoRenew = (selectedCertLive?.issuer || "").toLowerCase() === "letsencrypt";
+
   const statusBadge = (cert: Certificate) => {
     const days = daysUntil(cert.expiresAt);
     if (cert.renewError) return <span className="badge badge-error">续期失败</span>;
@@ -423,6 +472,7 @@ export default function App() {
 
       <div className="main">
         {error && <div className="error-bar" onClick={() => setError("")}>{error}</div>}
+        {notice && <div className="success-bar" onClick={() => setNotice("")}>{notice}</div>}
 
         {initializing || page === "loading" ? (
           <div className="card">
@@ -435,7 +485,8 @@ export default function App() {
           <div className="card">
             <h2>初始化管理员</h2>
             <label>API 地址</label>
-            <input value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="http://host:7720" />
+            <input value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="https://cert.manage.020309.top" />
+            <div className="helper-text">建议使用证书管家专用域名入口，不再直接暴露公网 IP 或裸端口。</div>
             <label>引导密钥</label>
             <input value={bootstrapSecret} onChange={e => setBootstrapSecret(e.target.value)} placeholder="X-Bootstrap-Secret" />
             <label>邮箱</label>
@@ -465,7 +516,8 @@ export default function App() {
           <div className="card">
             <h2>登录</h2>
             <label>API 地址</label>
-            <input value={apiUrl} onChange={e => setApiUrl(e.target.value)} />
+            <input value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="https://cert.manage.020309.top" />
+            <div className="helper-text">默认推荐走证书管家专用域名入口。</div>
             <label>邮箱</label>
             {loginProfiles && loginProfiles.profiles.length > 0 ? (
               <div className="profile-selector">
@@ -525,7 +577,7 @@ export default function App() {
               <thead><tr><th>域名</th><th>签发方</th><th>到期</th><th>状态</th><th>操作</th></tr></thead>
               <tbody>
                 {certs.map(c => (
-                  <tr key={c.id} onClick={() => setSelectedCert(c)} className={selectedCert?.id === c.id ? "selected" : ""}>
+                  <tr key={c.id} onClick={() => setSelectedCert(c)} className={selectedCertLive?.id === c.id ? "selected" : ""}>
                     <td>{c.domain}</td>
                     <td>{c.issuer || "手动上传"}</td>
                     <td>{c.expiresAt ? new Date(c.expiresAt).toLocaleDateString() : "—"}</td>
@@ -535,17 +587,30 @@ export default function App() {
                 ))}
               </tbody>
             </table>
-            {selectedCert && (
+            {selectedCertLive && (
               <div className="cert-detail">
-                <h3>{selectedCert.domain}</h3>
+                <h3>{selectedCertLive.domain}</h3>
                 <div className="detail-grid">
-                  <span className="label">ID</span><span>{selectedCert.id}</span>
-                  <span className="label">签发方</span><span>{selectedCert.issuer || "手动上传"}</span>
-                  <span className="label">到期时间</span><span>{selectedCert.expiresAt ? new Date(selectedCert.expiresAt).toLocaleString() : "未知"}</span>
-                  <span className="label">自动续期</span><span>{selectedCert.autoRenew ? "是" : "否"}</span>
-                  <span className="label">DNS验证</span><span>{selectedCert.dnsVerifiedAt ? new Date(selectedCert.dnsVerifiedAt).toLocaleString() : "未验证"}</span>
-                  <span className="label">上次续期</span><span>{selectedCert.lastRenewedAt ? new Date(selectedCert.lastRenewedAt).toLocaleString() : "—"}</span>
-                  {selectedCert.renewError && <><span className="label">续期错误</span><span className="error-text">{selectedCert.renewError}</span></>}
+                  <span className="label">ID</span><span>{selectedCertLive.id}</span>
+                  <span className="label">签发方</span><span>{selectedCertLive.issuer || "手动上传"}</span>
+                  <span className="label">到期时间</span><span>{selectedCertLive.expiresAt ? new Date(selectedCertLive.expiresAt).toLocaleString() : "未知"}</span>
+                  <span className="label">自动续期</span>
+                  {selectedCertSupportsAutoRenew ? (
+                    <label className={`toggle-row${updatingCertId === selectedCertLive.id ? " disabled" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={selectedCertLive.autoRenew}
+                        disabled={updatingCertId === selectedCertLive.id}
+                        onChange={(event) => void handleAutoRenewToggle(selectedCertLive, event.target.checked)}
+                      />
+                      <span>{selectedCertLive.autoRenew ? "已开启" : "已关闭"}</span>
+                    </label>
+                  ) : (
+                    <span>仅 Let's Encrypt 证书支持</span>
+                  )}
+                  <span className="label">DNS验证</span><span>{selectedCertLive.dnsVerifiedAt ? new Date(selectedCertLive.dnsVerifiedAt).toLocaleString() : "未验证"}</span>
+                  <span className="label">上次续期</span><span>{selectedCertLive.lastRenewedAt ? new Date(selectedCertLive.lastRenewedAt).toLocaleString() : "—"}</span>
+                  {selectedCertLive.renewError && <><span className="label">续期错误</span><span className="error-text">{selectedCertLive.renewError}</span></>}
                 </div>
               </div>
             )}
@@ -576,7 +641,8 @@ export default function App() {
                     }
                   </div>
                 )}
-                <button className="primary" disabled={!addDomain || loading} onClick={() => void handleAutoIssue()}>
+                {loading ? <div className="loading-inline">正在向 Let's Encrypt 发起验证并签发证书，请稍候…</div> : null}
+                <button className={`primary${loading ? " loading-busy" : ""}`} disabled={!addDomain || loading} onClick={() => void handleAutoIssue()}>
                   {loading ? "签发中..." : "自动签发证书"}
                 </button>
               </>
@@ -600,7 +666,8 @@ export default function App() {
           <div className="card">
             <h2>设置</h2>
             <label>API 地址</label>
-            <input value={apiUrl} onChange={e => setApiUrl(e.target.value)} />
+            <input value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="https://cert.manage.020309.top" />
+            <div className="helper-text">建议优先使用专用管理域名接入证书管家。</div>
             <label>关闭行为</label>
             <select className="settings-select" value={appConfig.closeAction || defaultCloseAction} onChange={event => void setCloseAction(event.target.value as CloseAction)}>
               <option value="ask">每次询问</option>

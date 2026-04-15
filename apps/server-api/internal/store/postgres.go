@@ -1014,7 +1014,7 @@ func (s *PostgresStore) FindCertificateByDomain(ctx context.Context, domain stri
 
 func (s *PostgresStore) ListManagedHTTPSDomains(ctx context.Context, userID string) ([]types.ManagedHTTPSDomain, error) {
 	rows, err := s.pool.Query(ctx, `
-		with current_user as (
+		with current_account as (
 			select id, lower(email) as email
 			from users
 			where id = $1
@@ -1024,7 +1024,7 @@ func (s *PostgresStore) ListManagedHTTPSDomains(ctx context.Context, userID stri
 			where user_id = $1
 		), cert_keeper_domains as (
 			select lower(c.domain) as domain, 'cert_keeper'::text as source
-			from current_user u
+			from current_account u
 			join ck_users cu on lower(cu.email) = u.email
 			join ck_certificates c on c.user_id = cu.id
 		), merged as (

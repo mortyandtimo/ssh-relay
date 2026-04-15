@@ -42,6 +42,7 @@ const AGENT_RELATIVE_PATH: &str = "runtime/client-agent.exe";
 const AGENT_RELAY_CONNECT_PATH: &str = "/agent/reverse-tcp";
 const AGENT_UDP_RELAY_CONNECT_PATH: &str = "/agent/reverse-udp";
 const AGENT_WEB_RELAY_CONNECT_PATH: &str = "/agent/reverse-web";
+const INSTALLER_QUIT_ARG: &str = "--quit-for-install";
 
 struct AppHttpState {
     client: Client,
@@ -348,25 +349,85 @@ fn window_request_close(window: Window) -> Result<(), String> {
 
 #[tauri::command]
 fn app_exit(app: AppHandle) -> Result<(), String> {
-    // Save window bounds before exit (same logic as hide_to_tray)
-    if let Some(window) = app.get_webview_window("main") {
-        if let Ok(pos) = window.outer_position() {
-            let scale = window.scale_factor().unwrap_or(1.0);
-            if let Ok(size) = window.inner_size() {
-                let maximized = window.is_maximized().unwrap_or(false);
-                let bounds = WindowBounds {
-                    x: pos.x,
-                    y: pos.y,
-                    width: (size.width as f64 / scale) as u32,
-                    height: (size.height as f64 / scale) as u32,
-                    maximized,
-                };
-                let _ = save_window_bounds(app.clone(), bounds);
-            }
-        }
-    }
+    save_bounds_on_exit(&app);
     app.exit(0);
     Ok(())
+}
+
+#[tauri::command]
+fn auto_start_enabled() -> Result<bool, String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|err| err.to_string())?
+        .to_string_lossy()
+        .to_string();
+    let key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    let value_name = "ZhuQianMo";
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Registry::*;
+        let mut h_key: HKEY = core::ptr::null_mut();
+        let result = unsafe {
+            RegOpenKeyExW(HKEY_CURRENT_USER, encode_wide(key).as_ptr(), 0, KEY_QUERY_VALUE, &mut h_key)
+        };
+        if result == 2 {
+            return Ok(false);
+        }
+        if result != 0 {
+            return Err(format!("RegOpenKeyEx failed: {}", result));
+        }
+
+        let mut kind: u32 = 0;
+        let mut byte_len: u32 = 0;
+        let result = unsafe {
+            RegQueryValueExW(
+                h_key,
+                encode_wide(value_name).as_ptr(),
+                core::ptr::null_mut(),
+                &mut kind,
+                core::ptr::null_mut(),
+                &mut byte_len,
+            )
+        };
+        if result == 2 {
+            unsafe { RegCloseKey(h_key) };
+            return Ok(false);
+        }
+        if result != 0 {
+            unsafe { RegCloseKey(h_key) };
+            return Err(format!("RegQueryValueEx failed: {}", result));
+        }
+        if byte_len == 0 {
+            unsafe { RegCloseKey(h_key) };
+            return Ok(false);
+        }
+
+        let mut buffer = vec![0u16; (byte_len as usize / 2).max(1)];
+        let result = unsafe {
+            RegQueryValueExW(
+                h_key,
+                encode_wide(value_name).as_ptr(),
+                core::ptr::null_mut(),
+                &mut kind,
+                buffer.as_mut_ptr() as *mut u8,
+                &mut byte_len,
+            )
+        };
+        unsafe { RegCloseKey(h_key) };
+        if result != 0 {
+            return Err(format!("RegQueryValueEx failed: {}", result));
+        }
+
+        let raw = String::from_utf16_lossy(&buffer)
+            .trim_end_matches('\0')
+            .trim()
+            .trim_matches('"')
+            .to_string();
+        return Ok(raw.eq_ignore_ascii_case(&exe_path));
+    }
+
+    #[allow(unreachable_code)]
+    Ok(false)
 }
 
 #[tauri::command]
@@ -421,9 +482,7 @@ fn set_auto_start(enable: bool) -> Result<(), String> {
             if result != 0 {
                 return Err(format!("RegOpenKeyEx failed: {}", result));
             }
-            let result = unsafe {
-                RegDeleteValueW(h_key, encode_wide(value_name).as_ptr())
-            };
+            let result = unsafe { RegDeleteValueW(h_key, encode_wide(value_name).as_ptr()) };
             unsafe { RegCloseKey(h_key) };
             if result != 0 && result != 2 {
                 return Err(format!("RegDeleteValue failed: {}", result));
@@ -540,6 +599,34 @@ fn agent_traffic(runtime: State<'_, RuntimeManagerState>) -> Result<AgentTraffic
     Ok(snapshot)
 }
 
+fn recent_log_excerpt(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let Ok(content) = fs::read_to_string(trimmed) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines
+        .iter()
+        .rev()
+        .take(3)
+        .copied()
+        .collect::<Vec<&str>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<&str>>()
+        .join(" | ")
+}
+
 fn current_runtime_status(
     app: &AppHandle,
     runtime: &RuntimeManagerState,
@@ -556,9 +643,15 @@ fn current_runtime_status(
         match child.try_wait() {
             Ok(Some(status)) => {
                 launch.pid = None;
-                if launch.last_error.is_empty() {
-                    launch.last_error = format!("本地发布运行时已退出: {status}");
+                let stderr_excerpt = recent_log_excerpt(&launch.stderr_log_path);
+                let mut detail = format!("本地发布运行时已退出: {status}");
+                if !launch.stderr_log_path.trim().is_empty() {
+                    detail.push_str(&format!(" / stderr: {}", launch.stderr_log_path));
                 }
+                if !stderr_excerpt.is_empty() {
+                    detail.push_str(&format!(" / 摘要: {}", stderr_excerpt));
+                }
+                launch.last_error = detail;
                 *child_slot = None;
                 false
             }
@@ -611,6 +704,7 @@ fn stop_runtime_process(runtime: &RuntimeManagerState) -> Result<(), String> {
     }
     let mut launch = runtime.launch.lock().map_err(|_| "runtime 锁不可用".to_string())?;
     launch.pid = None;
+    launch.last_error.clear();
     Ok(())
 }
 
@@ -778,6 +872,18 @@ fn notify_existing_instance(app: &AppHandle) {
     }
 }
 
+fn installer_requested_quit(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == INSTALLER_QUIT_ARG)
+}
+
+fn handle_installer_quit_request(app: &AppHandle) {
+    if let Some(runtime) = app.try_state::<RuntimeManagerState>() {
+        let _ = stop_runtime_process(&runtime);
+    }
+    save_bounds_on_exit(app);
+    app.exit(0);
+}
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
     let open_logs_item = MenuItem::with_id(app, "open_logs", "打开日志目录", true, None::<&str>)?;
@@ -832,23 +938,27 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn hide_to_tray(window: &Window) {
-    // Save window bounds before hiding (use logical size for DPI independence)
-    if let Ok(pos) = window.outer_position() {
-        let scale = window.scale_factor().unwrap_or(1.0);
-        if let Ok(size) = window.inner_size() {
-            let maximized = window.is_maximized().unwrap_or(false);
-            let bounds = WindowBounds {
-                x: pos.x,
-                y: pos.y,
-                width: (size.width as f64 / scale) as u32,
-                height: (size.height as f64 / scale) as u32,
-                maximized,
-            };
-            let app = window.app_handle();
-            let _ = save_window_bounds(app.clone(), bounds);
+fn save_bounds_on_exit(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(pos) = window.outer_position() {
+            let scale = window.scale_factor().unwrap_or(1.0);
+            if let Ok(size) = window.inner_size() {
+                let maximized = window.is_maximized().unwrap_or(false);
+                let bounds = WindowBounds {
+                    x: pos.x,
+                    y: pos.y,
+                    width: (size.width as f64 / scale) as u32,
+                    height: (size.height as f64 / scale) as u32,
+                    maximized,
+                };
+                let _ = save_window_bounds(app.clone(), bounds);
+            }
         }
     }
+}
+
+fn hide_to_tray(window: &Window) {
+    save_bounds_on_exit(&window.app_handle());
     let _ = window.hide();
 }
 
@@ -1188,16 +1298,25 @@ fn load_app_config(app: AppHandle) -> Result<AppConfig, String> {
 
 fn main() {
     let http_state = AppHttpState::new().expect("failed to create desktop HTTP client");
+    let installer_quit_on_launch = installer_requested_quit(&std::env::args().skip(1).collect::<Vec<_>>());
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if installer_requested_quit(&args) {
+                handle_installer_quit_request(app);
+                return;
+            }
             notify_existing_instance(app);
         }))
         .manage(http_state)
         .manage(ResourceSampleState::default())
         .manage(RuntimeManagerState::default())
-        .setup(|app| {
+        .setup(move |app| {
             ensure_runtime_dirs(app.handle())
                 .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+            if installer_quit_on_launch {
+                handle_installer_quit_request(app.handle());
+                return Ok(());
+            }
             setup_tray(app.handle())?;
             // Restore saved window bounds, then show window (avoids flash at default position)
             if let Some(window) = app.get_webview_window("main") {
@@ -1225,7 +1344,7 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                hide_to_tray(window);
+                let _ = window.emit("app-close-requested", ());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1240,6 +1359,7 @@ fn main() {
             window_toggle_maximize,
             window_request_close,
             app_exit,
+            auto_start_enabled,
             set_auto_start,
             open_external,
             http_request,

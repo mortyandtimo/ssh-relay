@@ -28,7 +28,7 @@ import (
 const (
 	agentVersion           = "0.1.0"
 	tunnelPollInterval     = 5 * time.Second
-	defaultReversePoolSize = 2
+	defaultReversePoolSize = 4
 	defaultRelayTimeout    = 10 * time.Second
 )
 
@@ -36,6 +36,7 @@ type reverseManager struct {
 	baseURL            string
 	relayURL           string
 	udpRelayURL        string
+	relayWebURL        string
 	httpClient         *http.Client
 	poolSize           int
 	connectTimout      time.Duration
@@ -44,6 +45,7 @@ type reverseManager struct {
 	mu               sync.Mutex
 	workers          map[string]managedTunnel
 	httpProbeMetrics map[string]string
+	tunnelTraffic    map[string]trafficCounter
 	active           int64
 	activeTunnels    int64
 }
@@ -53,6 +55,11 @@ type managedTunnel struct {
 	cancel context.CancelFunc
 }
 
+type trafficCounter struct {
+	downBytes uint64
+	upBytes   uint64
+}
+
 func main() {
 	once := flag.Bool("once", false, "register and send a single heartbeat")
 	flag.Parse()
@@ -60,6 +67,7 @@ func main() {
 	baseURL := config.GetEnv("CLOUD_RELAY_API_URL", "http://localhost:8080")
 	relayURL := config.GetEnv("RELAY_TCP_CONNECT_URL", deriveRelayURL(baseURL))
 	udpRelayURL := config.GetEnv("RELAY_UDP_CONNECT_URL", deriveUDPRelayURL(baseURL))
+	relayWebURL := config.GetEnv("RELAY_WEB_CONNECT_URL", deriveRelayWebURL(baseURL))
 	nodeName := config.GetEnv("CLIENT_NODE_NAME", defaultNodeName())
 	nodeID := config.GetEnv("CLIENT_NODE_ID", "")
 	deploymentMode := config.GetEnv("CLIENT_DEPLOYMENT_MODE", "managed")
@@ -74,11 +82,21 @@ func main() {
 	client := &http.Client{Timeout: 10 * time.Second}
 	registeredID, err := register(client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile)
 	if err != nil {
-		log.Fatal(err)
+		if *once {
+			log.Fatal(err)
+		}
+		for {
+			log.Printf("register failed: %v", err)
+			time.Sleep(5 * time.Second)
+			registeredID, err = register(client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile)
+			if err == nil {
+				break
+			}
+		}
 	}
 	log.Printf("agent registered as %s", registeredID)
 	if *once {
-		if err := heartbeat(client, baseURL, registeredID, 0, nil); err != nil {
+		if err := heartbeat(client, baseURL, registeredID, 0, map[string]string{}); err != nil {
 			log.Fatal(err)
 		}
 		log.Printf("heartbeat accepted for %s", registeredID)
@@ -86,24 +104,42 @@ func main() {
 	}
 
 	manager := &reverseManager{
-		baseURL:          baseURL,
-		relayURL:         relayURL,
-		udpRelayURL:      udpRelayURL,
-		httpClient:       client,
-		poolSize:         reversePoolSize,
-		connectTimout:    defaultRelayTimeout,
+		baseURL:            baseURL,
+		relayURL:           relayURL,
+		udpRelayURL:        udpRelayURL,
+		relayWebURL:        relayWebURL,
+		httpClient:         client,
+		poolSize:           reversePoolSize,
+		connectTimout:      defaultRelayTimeout,
 		workers:            make(map[string]managedTunnel),
 		httpProbeMetrics:   make(map[string]string),
+		tunnelTraffic:      make(map[string]trafficCounter),
 		udpResponseTimeout: 3 * time.Second,
 	}
+
+	localAddr := config.GetEnv("AGENT_LOCAL_LISTEN", "127.0.0.1:5180")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/agent/traffic", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(manager.TrafficSnapshot())
+	})
 
 	if err := manager.syncTunnels(context.Background(), registeredID); err != nil {
 		log.Printf("initial tunnel sync failed: %v", err)
 	}
-	if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount(), manager.HTTPProbeMetrics()); err != nil {
-		log.Fatal(err)
+	if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount(), manager.HeartbeatMetrics()); err != nil {
+		log.Printf("initial heartbeat failed: %v", err)
+	} else {
+		log.Printf("heartbeat accepted for %s", registeredID)
 	}
-	log.Printf("heartbeat accepted for %s", registeredID)
+
+	localServer := &http.Server{Addr: localAddr, Handler: mux}
+	go func() {
+		if err := localServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("local traffic server error: %v", err)
+		}
+	}()
+	log.Printf("local traffic endpoint listening on %s", localAddr)
 
 	heartbeatTicker := time.NewTicker(heartbeatEvery)
 	tunnelTicker := time.NewTicker(tunnelPollInterval)
@@ -113,7 +149,7 @@ func main() {
 	for {
 		select {
 		case <-heartbeatTicker.C:
-			if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount(), manager.HTTPProbeMetrics()); err != nil {
+			if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount(), manager.HeartbeatMetrics()); err != nil {
 				log.Printf("heartbeat failed: %v", err)
 				continue
 			}
@@ -139,13 +175,13 @@ func register(client *http.Client, baseURL, nodeID, nodeName, deploymentMode, se
 			SOCKS5Connect: true,
 		},
 		Metadata: map[string]string{
-			"hostname":         defaultNodeName(),
-			"os":               runtime.GOOS,
-			"arch":             runtime.GOARCH,
-			"deploymentMode":   strings.TrimSpace(deploymentMode),
-			"serviceUnit":      strings.TrimSpace(serviceUnit),
-			"instanceProfile":  strings.TrimSpace(instanceProfile),
-			"instanceManaged":  fmt.Sprintf("%t", strings.TrimSpace(serviceUnit) != ""),
+			"hostname":        defaultNodeName(),
+			"os":              runtime.GOOS,
+			"arch":            runtime.GOARCH,
+			"deploymentMode":  strings.TrimSpace(deploymentMode),
+			"serviceUnit":     strings.TrimSpace(serviceUnit),
+			"instanceProfile": strings.TrimSpace(instanceProfile),
+			"instanceManaged": fmt.Sprintf("%t", strings.TrimSpace(serviceUnit) != ""),
 		},
 	}
 	body, err := json.Marshal(payload)
@@ -206,14 +242,77 @@ func (m *reverseManager) ActiveTunnelCount() int {
 	return int(atomic.LoadInt64(&m.activeTunnels))
 }
 
-func (m *reverseManager) HTTPProbeMetrics() map[string]string {
+func (m *reverseManager) HeartbeatMetrics() map[string]string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := map[string]string{}
 	for key, value := range m.httpProbeMetrics {
 		out[key] = value
 	}
+	var totalDown uint64
+	var totalUp uint64
+	for tunnelID, counter := range m.tunnelTraffic {
+		out["traffic:down:"+tunnelID] = fmt.Sprintf("%d", counter.downBytes)
+		out["traffic:up:"+tunnelID] = fmt.Sprintf("%d", counter.upBytes)
+		totalDown += counter.downBytes
+		totalUp += counter.upBytes
+	}
+	out["traffic:down_total"] = fmt.Sprintf("%d", totalDown)
+	out["traffic:up_total"] = fmt.Sprintf("%d", totalUp)
 	return out
+}
+
+func (m *reverseManager) addTraffic(tunnelID string, downBytes uint64, upBytes uint64) {
+	if tunnelID == "" || (downBytes == 0 && upBytes == 0) {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	counter := m.tunnelTraffic[tunnelID]
+	counter.downBytes += downBytes
+	counter.upBytes += upBytes
+	m.tunnelTraffic[tunnelID] = counter
+}
+
+type TunnelTrafficEntry struct {
+	TunnelID  string `json:"tunnelId"`
+	DownBytes uint64 `json:"downBytes"`
+	UpBytes   uint64 `json:"upBytes"`
+}
+
+type TrafficSnapshot struct {
+	Tunnels   []TunnelTrafficEntry `json:"tunnels"`
+	DownTotal uint64               `json:"downTotal"`
+	UpTotal   uint64               `json:"upTotal"`
+	SampledAt int64                `json:"sampledAt"`
+}
+
+func (m *reverseManager) TrafficSnapshot() TrafficSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snapshot := TrafficSnapshot{
+		SampledAt: time.Now().UnixMilli(),
+	}
+	for tunnelID, counter := range m.tunnelTraffic {
+		snapshot.Tunnels = append(snapshot.Tunnels, TunnelTrafficEntry{
+			TunnelID:  tunnelID,
+			DownBytes: counter.downBytes,
+			UpBytes:   counter.upBytes,
+		})
+		snapshot.DownTotal += counter.downBytes
+		snapshot.UpTotal += counter.upBytes
+	}
+	return snapshot
+}
+
+func (m *reverseManager) resetTrafficForDesired(desired map[string]types.TunnelSpec) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for tunnelID := range m.tunnelTraffic {
+		if _, ok := desired[tunnelID]; !ok {
+			delete(m.tunnelTraffic, tunnelID)
+		}
+	}
 }
 
 func (m *reverseManager) refreshHTTPProbeMetrics(desired map[string]types.TunnelSpec) {
@@ -252,13 +351,22 @@ func (m *reverseManager) syncTunnels(ctx context.Context, nodeID string) error {
 	}
 	desired := make(map[string]types.TunnelSpec, len(items))
 	for _, item := range items {
-		if (item.Type != "tcp" && item.Type != "udp" && item.Type != "socks5" && item.Type != "http") || item.Status != "active" || item.PublicPort == 0 {
+		if item.Status != "active" {
+			continue
+		}
+		isWebTunnel := item.Type == "http" || item.Type == "https"
+		isPortTunnel := item.Type == "tcp" || item.Type == "udp" || item.Type == "socks5"
+		if !isWebTunnel && !isPortTunnel {
+			continue
+		}
+		if isPortTunnel && item.PublicPort == 0 {
 			continue
 		}
 		desired[item.ID] = item
 	}
 
 	m.refreshHTTPProbeMetrics(desired)
+	m.resetTrafficForDesired(desired)
 
 	toStart := make([]struct {
 		ctx    context.Context
@@ -356,9 +464,14 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 	connectURL := m.relayURL
 	if tunnel.Type == "udp" {
 		connectURL = m.udpRelayURL
+	} else if tunnel.Type == "http" || tunnel.Type == "https" {
+		connectURL = m.relayWebURL
 	}
 	if tunnel.Type == "udp" {
 		log.Printf("udp reverse session dialing: tunnel=%s publicPort=%d relay=%s", tunnel.ID, tunnel.PublicPort, connectURL)
+	}
+	if tunnel.Type == "http" || tunnel.Type == "https" {
+		log.Printf("web reverse session dialing: tunnel=%s type=%s relay=%s", tunnel.ID, tunnel.Type, connectURL)
 	}
 	conn, err := dialRelayUpgrade(ctx, connectURL, tunnelUpgradeHello(tunnel))
 	if err != nil {
@@ -381,10 +494,10 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 	}
 
 	if tunnel.Type == "socks5" {
-		return serveSOCKS5(ctx, conn)
+		return serveSOCKS5(ctx, conn, tunnel.ID, m)
 	}
 	if tunnel.Type == "udp" {
-		return serveUDPRelay(ctx, conn, tunnel.ID, tunnel.PublicPort, tunnel.TargetHost, tunnel.TargetPort, m.udpResponseTimeout)
+		return serveUDPRelay(ctx, conn, tunnel.ID, tunnel.PublicPort, tunnel.TargetHost, tunnel.TargetPort, m.udpResponseTimeout, m)
 	}
 
 	targetConn, err := (&net.Dialer{Timeout: m.connectTimout}).DialContext(ctx, "tcp", net.JoinHostPort(tunnel.TargetHost, fmt.Sprintf("%d", tunnel.TargetPort)))
@@ -395,7 +508,7 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 	stopTargetCancel := closeConnOnCancel(ctx, targetConn)
 	defer stopTargetCancel()
 
-	proxyReverseConnection(conn, targetConn)
+	proxyReverseConnection(conn, targetConn, tunnel.ID, m)
 	return nil
 }
 
@@ -432,6 +545,8 @@ func dialRelayUpgrade(ctx context.Context, relayURL string, hello any) (net.Conn
 	upgradeHeader := types.AgentRelayUpgrade
 	if strings.Contains(path, "reverse-udp") {
 		upgradeHeader = types.AgentUDPRelayUpgrade
+	} else if strings.Contains(path, "reverse-web") {
+		upgradeHeader = types.AgentWebRelayUpgrade
 	}
 	request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", path, parsed.Host, upgradeHeader, len(body), body)
 	if _, err := io.WriteString(conn, request); err != nil {
@@ -469,15 +584,24 @@ func waitForStart(ctx context.Context, conn net.Conn) error {
 	return nil
 }
 
-func proxyReverseConnection(relayConn net.Conn, targetConn net.Conn) {
+func proxyReverseConnection(relayConn net.Conn, targetConn net.Conn, tunnelID string, manager *reverseManager) {
+	buf1 := make([]byte, 32*1024)
+	buf2 := make([]byte, 32*1024)
+
 	errCh := make(chan error, 2)
 	go func() {
-		_, copyErr := io.Copy(targetConn, relayConn)
+		n, copyErr := io.CopyBuffer(targetConn, relayConn, buf1)
+		if manager != nil && n > 0 {
+			manager.addTraffic(tunnelID, uint64(n), 0)
+		}
 		errCh <- copyErr
 		closeWrite(targetConn)
 	}()
 	go func() {
-		_, copyErr := io.Copy(relayConn, targetConn)
+		n, copyErr := io.CopyBuffer(relayConn, targetConn, buf2)
+		if manager != nil && n > 0 {
+			manager.addTraffic(tunnelID, 0, uint64(n))
+		}
 		errCh <- copyErr
 		closeWrite(relayConn)
 	}()
@@ -491,7 +615,7 @@ func proxyReverseConnection(relayConn net.Conn, targetConn net.Conn) {
 	}
 }
 
-func serveSOCKS5(ctx context.Context, relayConn net.Conn) error {
+func serveSOCKS5(ctx context.Context, relayConn net.Conn, tunnelID string, manager *reverseManager) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = relayConn.SetDeadline(deadline)
 	}
@@ -550,7 +674,7 @@ func serveSOCKS5(ctx context.Context, relayConn net.Conn) error {
 	if _, err := relayConn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return err
 	}
-	proxyReverseConnection(&bufferedConn{Conn: relayConn, reader: reader}, targetConn)
+	proxyReverseConnection(&bufferedConn{Conn: relayConn, reader: reader}, targetConn, tunnelID, manager)
 	return nil
 }
 
@@ -650,6 +774,7 @@ func enableTCPKeepalive(conn net.Conn) {
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		_ = tcpConn.SetKeepAlive(true)
 		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		_ = tcpConn.SetNoDelay(true)
 	}
 }
 
@@ -699,6 +824,22 @@ func deriveRelayURL(baseURL string) string {
 	}).String()
 }
 
+func deriveRelayWebURL(baseURL string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "http://127.0.0.1:9094" + types.AgentWebRelayConnectPath
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return (&url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort(host, "9094"),
+		Path:   types.AgentWebRelayConnectPath,
+	}).String()
+}
+
 func tunnelUpgradeHello(tunnel types.TunnelSpec) any {
 	if tunnel.Type == "udp" {
 		return types.AgentUDPRelayHello{NodeID: tunnel.NodeID, TunnelID: tunnel.ID, PublicPort: tunnel.PublicPort, TargetHost: tunnel.TargetHost, TargetPort: tunnel.TargetPort}
@@ -723,8 +864,7 @@ func defaultNodeName() string {
 	return hostname
 }
 
-
-func serveUDPRelay(ctx context.Context, relayConn net.Conn, tunnelID string, publicPort int, targetHost string, targetPort int, responseTimeout time.Duration) error {
+func serveUDPRelay(ctx context.Context, relayConn net.Conn, tunnelID string, publicPort int, targetHost string, targetPort int, responseTimeout time.Duration, manager *reverseManager) error {
 	udpTarget, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP(targetHost), Port: targetPort})
 	if err != nil {
 		resolved, resolveErr := net.ResolveUDPAddr("udp", net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort)))
@@ -747,6 +887,9 @@ func serveUDPRelay(ctx context.Context, relayConn net.Conn, tunnelID string, pub
 			return err
 		}
 		log.Printf("udp frame received from relay: tunnel=%s publicPort=%d session=%s bytes=%d", tunnelID, publicPort, frame.SessionID, len(frame.Payload))
+		if manager != nil && len(frame.Payload) > 0 {
+			manager.addTraffic(tunnelID, uint64(len(frame.Payload)), 0)
+		}
 		if len(frame.Payload) == 0 {
 			if err := writeUDPFrame(relayConn, types.UDPDatagramFrame{SessionID: frame.SessionID}); err != nil {
 				return err
@@ -771,6 +914,9 @@ func serveUDPRelay(ctx context.Context, relayConn net.Conn, tunnelID string, pub
 			continue
 		}
 		log.Printf("udp response from target: tunnel=%s publicPort=%d session=%s bytes=%d", tunnelID, publicPort, frame.SessionID, n)
+		if manager != nil && n > 0 {
+			manager.addTraffic(tunnelID, 0, uint64(n))
+		}
 		if err := writeUDPFrame(relayConn, types.UDPDatagramFrame{SessionID: frame.SessionID, Payload: append([]byte(nil), respBuf[:n]...)}); err != nil {
 			return err
 		}

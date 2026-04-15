@@ -313,6 +313,14 @@ export async function loadAppConfig(): Promise<AppConfig | null> {
   catch { return null; }
 }
 
+export async function loadAutoStartEnabled(): Promise<boolean> {
+  try {
+    return await invoke<boolean>("auto_start_enabled");
+  } catch {
+    return false;
+  }
+}
+
 export async function setAutoStart(enable: boolean): Promise<void> {
   await invoke("set_auto_start", { enable });
 }

@@ -17,6 +17,8 @@ use tauri::{
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
 };
 
+const INSTALLER_QUIT_ARG: &str = "--quit-for-install";
+
 struct AppHttpState {
     client: Client,
 }
@@ -25,7 +27,7 @@ impl AppHttpState {
     fn new() -> Result<Self, String> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
-            .timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(120))
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self { client })
@@ -237,6 +239,73 @@ fn open_additional_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_auto_start(enable: bool) -> Result<(), String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .to_string();
+    let key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    let value_name = "CertKeeperDesktop";
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Registry::*;
+        let mut h_key: HKEY = core::ptr::null_mut();
+        let result = unsafe {
+            RegOpenKeyExW(HKEY_CURRENT_USER, encode_wide(key).as_ptr(), 0, KEY_SET_VALUE, &mut h_key)
+        };
+        if result != 0 {
+            return Err(format!("RegOpenKeyEx failed: {}", result));
+        }
+        unsafe { RegCloseKey(h_key) };
+
+        if enable {
+            let mut h_key: HKEY = core::ptr::null_mut();
+            let result = unsafe {
+                RegOpenKeyExW(HKEY_CURRENT_USER, encode_wide(key).as_ptr(), 0, KEY_SET_VALUE, &mut h_key)
+            };
+            if result != 0 {
+                return Err(format!("RegOpenKeyEx failed: {}", result));
+            }
+            let data = encode_wide(&format!("\"{}\"", exe_path));
+            let result = unsafe {
+                RegSetValueExW(
+                    h_key,
+                    encode_wide(value_name).as_ptr(),
+                    0,
+                    REG_SZ as u32,
+                    data.as_ptr() as *const u8,
+                    (data.len() * 2) as u32,
+                )
+            };
+            unsafe { RegCloseKey(h_key) };
+            if result != 0 {
+                return Err(format!("RegSetValueEx failed: {}", result));
+            }
+        } else {
+            let mut h_key: HKEY = core::ptr::null_mut();
+            let result = unsafe {
+                RegOpenKeyExW(HKEY_CURRENT_USER, encode_wide(key).as_ptr(), 0, KEY_SET_VALUE, &mut h_key)
+            };
+            if result != 0 {
+                return Err(format!("RegOpenKeyEx failed: {}", result));
+            }
+            let result = unsafe { RegDeleteValueW(h_key, encode_wide(value_name).as_ptr()) };
+            unsafe { RegCloseKey(h_key) };
+            if result != 0 && result != 2 {
+                return Err(format!("RegDeleteValue failed: {}", result));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn encode_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0u16)).collect()
+}
+
+#[tauri::command]
 fn config_dir(app: AppHandle) -> Result<String, String> {
     app.path()
         .app_config_dir()
@@ -444,6 +513,15 @@ fn request_second_launch_confirmation(app: &AppHandle) {
     }
 }
 
+fn installer_requested_quit(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == INSTALLER_QUIT_ARG)
+}
+
+fn handle_installer_quit_request(app: &AppHandle) {
+    save_bounds_on_exit(app);
+    app.exit(0);
+}
+
 fn ensure_window_visible(window: &WebviewWindow) {
     let _ = window.show();
     let _ = window.unminimize();
@@ -537,15 +615,24 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
 fn main() {
     let http_state = AppHttpState::new().expect("failed to create HTTP client");
+    let installer_quit_on_launch = installer_requested_quit(&std::env::args().skip(1).collect::<Vec<_>>());
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if installer_requested_quit(args) {
+                handle_installer_quit_request(app);
+                return;
+            }
             request_second_launch_confirmation(app);
         }))
         .manage(http_state)
         .manage(WindowState::default())
-        .setup(|app| {
+        .setup(move |app| {
             ensure_config_dir(app.handle())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            if installer_quit_on_launch {
+                handle_installer_quit_request(app.handle());
+                return Ok(());
+            }
             setup_tray(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(bounds) = load_window_bounds(app.handle().clone()) {
@@ -578,6 +665,7 @@ fn main() {
             window_request_close,
             app_exit,
             open_additional_window,
+            set_auto_start,
             config_dir,
             save_app_config,
             load_app_config,

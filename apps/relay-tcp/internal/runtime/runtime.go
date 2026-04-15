@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +9,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,10 +19,10 @@ import (
 
 const (
 	routeSyncInterval     = 5 * time.Second
-	standbyPoolTargetSize = 8
-	standbyPoolMaxSize    = 16
-	globalMaxStandby      = 200
-	standbyConnMaxAge     = 90 * time.Second
+	standbyPoolTargetSize = 12
+	standbyPoolMaxSize    = 20
+	globalMaxStandby      = 300
+	standbyConnMaxAge     = 60 * time.Second
 	defaultAcquireTimeout = 10 * time.Second
 )
 
@@ -158,20 +156,14 @@ func (p *standbyPool) oldestIndexLocked() int {
 
 var ErrPoolEmpty = errors.New("standby pool empty")
 
-type routeTargetStatus struct {
-	health    types.TunnelHealthStatus
-	checkedAt time.Time
-}
-
 type Service struct {
 	apiBaseURL string
 	httpClient *http.Client
 
-	mu             sync.Mutex
-	listeners      map[int]net.Listener
-	routes         map[int]types.TunnelSpec
-	pools          map[string]*standbyPool
-	targetStatuses map[string]routeTargetStatus
+	mu        sync.Mutex
+	listeners map[int]net.Listener
+	routes    map[int]types.TunnelSpec
+	pools     map[string]*standbyPool
 
 	acquireTimeout time.Duration
 }
@@ -186,7 +178,6 @@ func NewService(apiBaseURL string) *Service {
 		listeners:      make(map[int]net.Listener),
 		routes:         make(map[int]types.TunnelSpec),
 		pools:          make(map[string]*standbyPool),
-		targetStatuses: make(map[string]routeTargetStatus),
 		acquireTimeout: defaultAcquireTimeout,
 	}
 }
@@ -298,6 +289,10 @@ func (s *Service) syncRoutes(ctx context.Context) error {
 
 	desired := make(map[int]types.TunnelSpec)
 	for _, item := range payload.Items {
+		// Skip HTTP/HTTPS routes — handled by relay-web
+		if item.Type == "http" || item.Type == "https" {
+			continue
+		}
 		if item.PublicPort == 0 || item.NodeID == "" {
 			continue
 		}
@@ -363,118 +358,9 @@ func (s *Service) syncRoutes(ctx context.Context) error {
 		s.drainPool(key)
 	}
 	for _, start := range starts {
-		if start.route.Type == "http" {
-			go s.serveHTTPRoute(start.listener, start.route)
-			continue
-		}
 		go s.acceptLoop(start.listener, start.route)
 	}
 	return nil
-}
-
-func (s *Service) serveHTTPRoute(listener net.Listener, route types.TunnelSpec) {
-	server := &http.Server{
-		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.handleHTTPRequest(w, r, route) }),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       30 * time.Second,
-	}
-	server.SetKeepAlivesEnabled(false)
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
-		log.Printf("http serve failed on %s: %v", listener.Addr().String(), err)
-	}
-}
-
-func (s *Service) handleHTTPRequest(w http.ResponseWriter, r *http.Request, route types.TunnelSpec) {
-	reqID := atomic.AddUint64(&connectionCounter, 1)
-	startedAt := time.Now()
-	log.Printf("http request %d accepted from %s method=%s host=%s path=%s for node=%s publicPort=%d", reqID, r.RemoteAddr, r.Method, r.Host, r.URL.RequestURI(), route.NodeID, route.PublicPort)
-	standby, poolSize, totalStandbyCount, err := s.acquireStandbyConn(r.Context(), route)
-	if err != nil {
-		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
-		log.Printf("http request %d no standby reverse connection for node=%s publicPort=%d: %v", reqID, route.NodeID, route.PublicPort, err)
-		http.Error(w, "http relay standby unavailable", http.StatusBadGateway)
-		return
-	}
-	if err := standby.prepareForStart(); err != nil {
-		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
-		log.Printf("http request %d discarded stale standby reverse connection for tunnel %s poolSize=%d totalStandby=%d: %v", reqID, route.ID, poolSize, totalStandbyCount, err)
-		_ = standby.conn.Close()
-		http.Error(w, "http relay standby stale", http.StatusBadGateway)
-		return
-	}
-	if _, err := standby.conn.Write([]byte{types.AgentRelayStartByte}); err != nil {
-		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
-		log.Printf("http request %d failed to start reverse session for tunnel %s poolSize=%d totalStandby=%d: %v", reqID, route.ID, poolSize, totalStandbyCount, err)
-		_ = standby.conn.Close()
-		http.Error(w, "http relay start failed", http.StatusBadGateway)
-		return
-	}
-	defer standby.conn.Close()
-	upstreamReq := cloneHTTPRequestForRelay(r, route)
-	if err := upstreamReq.Write(standby.conn); err != nil {
-		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
-		log.Printf("http request %d write upstream request failed for tunnel %s: %v", reqID, route.ID, err)
-		http.Error(w, "http relay write failed", http.StatusBadGateway)
-		return
-	}
-	resp, err := http.ReadResponse(bufio.NewReader(standby.conn), upstreamReq)
-	if err != nil {
-		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
-		log.Printf("http request %d read upstream response failed for tunnel %s: %v", reqID, route.ID, err)
-		http.Error(w, "http relay response failed", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-	copyHTTPResponse(w, resp)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		s.recordTargetHealth(route, types.TunnelHealthTargetUnreachable)
-		log.Printf("http request %d copy response body failed for tunnel %s: %v", reqID, route.ID, err)
-		return
-	}
-	s.recordTargetHealth(route, types.TunnelHealthHealthy)
-	log.Printf("http request %d completed with status=%d after %s", reqID, resp.StatusCode, time.Since(startedAt))
-}
-
-func cloneHTTPRequestForRelay(r *http.Request, route types.TunnelSpec) *http.Request {
-	out := r.Clone(r.Context())
-	out.URL = &url.URL{Path: r.URL.Path, RawPath: r.URL.RawPath, RawQuery: r.URL.RawQuery, ForceQuery: r.URL.ForceQuery}
-	out.RequestURI = ""
-	out.Host = net.JoinHostPort(route.TargetHost, itoa(route.TargetPort))
-	out.Close = true
-	return out
-}
-
-func copyHTTPResponse(w http.ResponseWriter, resp *http.Response) {
-	for key, values := range resp.Header {
-		if isHopByHopHeader(key) {
-			continue
-		}
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-}
-
-func isHopByHopHeader(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "connection", "proxy-connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *Service) recordTargetHealth(route types.TunnelSpec, health types.TunnelHealthStatus) {
-	if route.Type != "http" {
-		return
-	}
-	s.mu.Lock()
-	if s.targetStatuses == nil {
-		s.targetStatuses = make(map[string]routeTargetStatus)
-	}
-	s.targetStatuses[routePoolKey(route.NodeID, route.PublicPort)] = routeTargetStatus{health: health, checkedAt: time.Now().UTC()}
-	s.mu.Unlock()
 }
 
 func (s *Service) acceptLoop(listener net.Listener, route types.TunnelSpec) {
@@ -521,17 +407,29 @@ func (s *Service) handlePublicConnection(src net.Conn, route types.TunnelSpec) {
 	}
 }
 
+func setNoDelay(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+	}
+}
+
 func proxyConnections(connID uint64, left net.Conn, right net.Conn, startedAt time.Time) {
+	setNoDelay(left)
+	setNoDelay(right)
+
+	buf1 := make([]byte, 32*1024)
+	buf2 := make([]byte, 32*1024)
+
 	errCh := make(chan error, 2)
 	go func() {
-		_, copyErr := io.Copy(right, left)
+		_, copyErr := io.CopyBuffer(right, left, buf1)
 		errCh <- copyErr
 		if tcpConn, ok := right.(*net.TCPConn); ok {
 			_ = tcpConn.CloseWrite()
 		}
 	}()
 	go func() {
-		_, copyErr := io.Copy(left, right)
+		_, copyErr := io.CopyBuffer(left, right, buf2)
 		errCh <- copyErr
 		if tcpConn, ok := left.(*net.TCPConn); ok {
 			_ = tcpConn.CloseWrite()
@@ -678,10 +576,6 @@ func (s *Service) RuntimeSummary() types.RelayRuntimeSummary {
 			StandbyCount: standbyCount,
 			TargetSize:   targetSize,
 			MaxSize:      maxSize,
-		}
-		if status, ok := s.targetStatuses[key]; ok {
-			summary.TargetHealth = status.health
-			summary.TargetCheckedAt = status.checkedAt
 		}
 		pools = append(pools, summary)
 	}
