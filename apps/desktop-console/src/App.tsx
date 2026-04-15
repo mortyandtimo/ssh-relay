@@ -1587,35 +1587,18 @@ export default function App() {
               {publishForm.protocol === "https" ? (() => {
                 const domainTrim = publishForm.domain.trim().toLowerCase();
                 const matchedCert = domainTrim ? certificates.find((c) => c.domain === domainTrim) : null;
-                const managedDomain = domainTrim ? managedHTTPSDomains.find((item) => item.domain === domainTrim) : null;
-                const managedByCertKeeper = managedDomain?.source === "cert_keeper" && !matchedCert;
                 return (
                   <div className="drawer-cert-section">
                     <div className="section-title" style={{ fontSize: 12 }}><i className="fas fa-lock" /> SSL 证书</div>
-                    {managedByCertKeeper ? (
-                      <div className="surface-banner info">该域名证书由证书管家托管，请在证书管家中维护。</div>
-                    ) : matchedCert ? (
+                    {matchedCert ? (
                       <div className="surface-banner info">
-                        域名 {matchedCert.domain} 已有证书{matchedCert.expiresAt ? `，到期: ${formatDate(matchedCert.expiresAt)}` : ""}
-                        <button className="btn btn-sm" type="button" style={{ marginLeft: 8 }} onClick={async () => {
-                          try { await desktopApi.deleteCertificate(matchedCert.id); await reloadCertificateState(); } catch (e) { setError(e instanceof Error ? e.message : "删除失败"); }
-                        }}>移除证书</button>
+                        域名 {matchedCert.domain} 已有证书（证书管家托管）{matchedCert.expiresAt ? `，到期: ${formatDate(matchedCert.expiresAt)}` : ""}
                       </div>
                     ) : (
                       <>
-                        {!domainTrim ? <div className="surface-banner info">请先填写 Domain，再上传或自动签发证书。</div> : (
+                        {!domainTrim ? <div className="surface-banner info">请先填写 Domain，再上传证书。</div> : (
                           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                            <div className="surface-banner info">域名 {domainTrim} 尚未上传证书，HTTPS 将以 HTTP-only 模式运行（无 SSL 终止）。</div>
-                            <button className="btn btn-primary btn-sm" type="button" disabled={certBusy} onClick={async () => {
-                              setCertBusy(true);
-                              try {
-                                await desktopApi.autoIssueCertificate(domainTrim);
-                                await reloadCertificateState();
-                                setMessage("证书已自动签发，HTTPS 将启用 SSL 终止。");
-                              } catch (e) { setError(e instanceof Error ? e.message : "自动签发失败"); }
-                              setCertBusy(false);
-                            }}>{certBusy ? "签发中..." : "自动签发 (Let's Encrypt)"}</button>
-                            <div style={{ textAlign: "center", fontSize: 11, color: "#5a6e80" }}>— 或手动粘贴 —</div>
+                            <div className="surface-banner info">域名 {domainTrim} 尚无证书。可在证书管家中自动签发，或在此手动上传。</div>
                             <textarea placeholder="证书 PEM (含 -----BEGIN CERTIFICATE-----)" value={certFormDomain === domainTrim ? certFormCert : ""} onChange={(e) => { setCertFormDomain(domainTrim); setCertFormCert(e.target.value); }} rows={3} style={{ fontFamily: "monospace", fontSize: 11, resize: "vertical" }} />
                             <textarea placeholder="私钥 PEM (含 -----BEGIN PRIVATE KEY-----)" value={certFormDomain === domainTrim ? certFormKey : ""} onChange={(e) => { setCertFormDomain(domainTrim); setCertFormKey(e.target.value); }} rows={3} style={{ fontFamily: "monospace", fontSize: 11, resize: "vertical" }} />
                             <button className="btn btn-sm" type="button" disabled={certBusy || !certFormCert || !certFormKey} onClick={async () => {
@@ -1624,7 +1607,7 @@ export default function App() {
                                 await desktopApi.createCertificate({ domain: domainTrim, certPem: certFormCert, keyPem: certFormKey });
                                 await reloadCertificateState();
                                 setCertFormCert(""); setCertFormKey("");
-                                setMessage("证书已上传，HTTPS 将自动启用 SSL 终止。");
+                                setMessage("证书已上传至证书管家，HTTPS 将自动启用 SSL 终止。");
                               } catch (e) { setError(e instanceof Error ? e.message : "上传失败"); }
                               setCertBusy(false);
                             }}>手动上传</button>
@@ -1742,35 +1725,18 @@ export default function App() {
               {drawerTunnel.type === "https" ? (() => {
                 const domainTrim = editForm.domain.trim().toLowerCase();
                 const matchedCert = domainTrim ? certificates.find((c) => c.domain === domainTrim) : null;
-                const managedDomain = domainTrim ? managedHTTPSDomains.find((item) => item.domain === domainTrim) : null;
-                const managedByCertKeeper = managedDomain?.source === "cert_keeper" && !matchedCert;
                 return (
                   <div className="drawer-cert-section">
                     <div className="section-title" style={{ fontSize: 12 }}><i className="fas fa-lock" /> SSL 证书</div>
-                    {managedByCertKeeper ? (
-                      <div className="surface-banner info">该域名证书由证书管家托管，请在证书管家中维护。</div>
-                    ) : matchedCert ? (
+                    {matchedCert ? (
                       <div className="surface-banner info">
-                        域名 {matchedCert.domain} 已有证书{matchedCert.expiresAt ? `，到期: ${formatDate(matchedCert.expiresAt)}` : ""}
-                        <button className="btn btn-sm" type="button" style={{ marginLeft: 8 }} onClick={async () => {
-                          try { await desktopApi.deleteCertificate(matchedCert.id); await reloadCertificateState(); } catch (e) { setError(e instanceof Error ? e.message : "删除失败"); }
-                        }}>移除证书</button>
+                        域名 {matchedCert.domain} 已有证书（证书管家托管）{matchedCert.expiresAt ? `，到期: ${formatDate(matchedCert.expiresAt)}` : ""}
                       </div>
                     ) : (
                       <>
-                        {!domainTrim ? <div className="surface-banner info">请先填写 Domain，再上传或自动签发证书。</div> : (
+                        {!domainTrim ? <div className="surface-banner info">请先填写 Domain，再上传证书。</div> : (
                           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                            <div className="surface-banner info">域名 {domainTrim} 尚未上传证书，HTTPS 将以 HTTP-only 模式运行。</div>
-                            <button className="btn btn-primary btn-sm" type="button" disabled={certBusy} onClick={async () => {
-                              setCertBusy(true);
-                              try {
-                                await desktopApi.autoIssueCertificate(domainTrim);
-                                await reloadCertificateState();
-                                setMessage("证书已自动签发，HTTPS 将启用 SSL 终止。");
-                              } catch (e) { setError(e instanceof Error ? e.message : "自动签发失败"); }
-                              setCertBusy(false);
-                            }}>{certBusy ? "签发中..." : "自动签发 (Let's Encrypt)"}</button>
-                            <div style={{ textAlign: "center", fontSize: 11, color: "#5a6e80" }}>— 或手动粘贴 —</div>
+                            <div className="surface-banner info">域名 {domainTrim} 尚无证书。可在证书管家中自动签发，或在此手动上传。</div>
                             <textarea placeholder="证书 PEM (含 -----BEGIN CERTIFICATE-----)" value={certFormDomain === domainTrim ? certFormCert : ""} onChange={(e) => { setCertFormDomain(domainTrim); setCertFormCert(e.target.value); }} rows={3} style={{ fontFamily: "monospace", fontSize: 11, resize: "vertical" }} />
                             <textarea placeholder="私钥 PEM (含 -----BEGIN PRIVATE KEY-----)" value={certFormDomain === domainTrim ? certFormKey : ""} onChange={(e) => { setCertFormDomain(domainTrim); setCertFormKey(e.target.value); }} rows={3} style={{ fontFamily: "monospace", fontSize: 11, resize: "vertical" }} />
                             <button className="btn btn-sm" type="button" disabled={certBusy || !certFormCert || !certFormKey} onClick={async () => {
@@ -1779,7 +1745,7 @@ export default function App() {
                                 await desktopApi.createCertificate({ domain: domainTrim, certPem: certFormCert, keyPem: certFormKey });
                                 await reloadCertificateState();
                                 setCertFormCert(""); setCertFormKey("");
-                                setMessage("证书已上传，HTTPS 将自动启用 SSL 终止。");
+                                setMessage("证书已上传至证书管家，HTTPS 将自动启用 SSL 终止。");
                               } catch (e) { setError(e instanceof Error ? e.message : "上传失败"); }
                               setCertBusy(false);
                             }}>手动上传</button>

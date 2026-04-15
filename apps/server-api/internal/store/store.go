@@ -161,11 +161,8 @@ type Store interface {
 	WriteAuditLog(ctx context.Context, params AuditLogParams) (types.AuditLogEntry, error)
 	ListAuditLogs(ctx context.Context, filter AuditLogFilter) ([]types.AuditLogEntry, int, error)
 
-	CreateCertificate(ctx context.Context, spec types.CertificateSpec) (types.CertificateSpec, error)
-	GetCertificate(ctx context.Context, id string) (types.CertificateSpec, error)
-	ListCertificates(ctx context.Context, userID string) ([]types.CertificateSpec, error)
-	DeleteCertificate(ctx context.Context, id string) error
-	FindCertificateForDomain(ctx context.Context, userID, domain string) (*types.CertificateSpec, error)
+	CreateCertificate(ctx context.Context, platformUserID string, spec types.CertificateSpec) (types.CertificateSpec, error)
+	ListCertificates(ctx context.Context, platformUserID string) ([]types.CertificateSpec, error)
 	FindCertificateByDomain(ctx context.Context, domain string) (*types.CertificateSpec, error)
 	ListManagedHTTPSDomains(ctx context.Context, userID string) ([]types.ManagedHTTPSDomain, error)
 

@@ -921,40 +921,38 @@ func (s *PostgresStore) DB() *pgxpool.Pool {
 
 // ─── Certificate CRUD ───
 
-func (s *PostgresStore) CreateCertificate(ctx context.Context, spec types.CertificateSpec) (types.CertificateSpec, error) {
+func (s *PostgresStore) CreateCertificate(ctx context.Context, platformUserID string, spec types.CertificateSpec) (types.CertificateSpec, error) {
 	if spec.ID == "" {
 		spec.ID = fmt.Sprintf("cert-%d", time.Now().UnixNano())
 	}
 	now := time.Now().UTC()
 	spec.CreatedAt = now
 	spec.UpdatedAt = now
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO user_certificates (id, user_id, domain, cert_pem, key_pem, expires_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 ON CONFLICT (user_id, domain) DO UPDATE SET cert_pem=$4, key_pem=$5, expires_at=$6, updated_at=$8`,
-		spec.ID, spec.UserID, spec.Domain, spec.CertPEM, spec.KeyPEM, spec.ExpiresAt, spec.CreatedAt, spec.UpdatedAt,
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO ck_certificates (id, user_id, domain, cert_pem, key_pem, issuer, auto_renew, expires_at, created_at, updated_at)
+		 SELECT $1, cu.id, $2, $3, $4, 'manual', false, $5, $6, $7
+		 FROM ck_users cu
+		 WHERE lower(cu.email) = (SELECT lower(email) FROM users WHERE id = $8)
+		 ON CONFLICT (user_id, domain) DO UPDATE SET cert_pem=$3, key_pem=$4, expires_at=$5, updated_at=$7`,
+		spec.ID, spec.Domain, spec.CertPEM, spec.KeyPEM, spec.ExpiresAt, spec.CreatedAt, spec.UpdatedAt, platformUserID,
 	)
 	if err != nil {
 		return types.CertificateSpec{}, fmt.Errorf("create certificate: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return types.CertificateSpec{}, fmt.Errorf("create certificate: no matching cert-keeper account found — please register in CertKeeper first")
 	}
 	spec.KeyPEM = ""
 	return spec, nil
 }
 
-func (s *PostgresStore) GetCertificate(ctx context.Context, id string) (types.CertificateSpec, error) {
-	var spec types.CertificateSpec
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, user_id, domain, cert_pem, expires_at, created_at, updated_at FROM user_certificates WHERE id=$1`, id,
-	).Scan(&spec.ID, &spec.UserID, &spec.Domain, &spec.CertPEM, &spec.ExpiresAt, &spec.CreatedAt, &spec.UpdatedAt)
-	if err != nil {
-		return types.CertificateSpec{}, fmt.Errorf("get certificate: %w", err)
-	}
-	return spec, nil
-}
-
-func (s *PostgresStore) ListCertificates(ctx context.Context, userID string) ([]types.CertificateSpec, error) {
+func (s *PostgresStore) ListCertificates(ctx context.Context, platformUserID string) ([]types.CertificateSpec, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, user_id, domain, cert_pem, expires_at, created_at, updated_at FROM user_certificates WHERE user_id=$1 ORDER BY domain`, userID,
+		`SELECT c.id, c.user_id, c.domain, c.cert_pem, c.expires_at, c.created_at, c.updated_at
+		 FROM ck_certificates c
+		 JOIN ck_users cu ON c.user_id = cu.id
+		 WHERE lower(cu.email) = (SELECT lower(email) FROM users WHERE id = $1)
+		 ORDER BY c.domain`, platformUserID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list certificates: %w", err)
@@ -972,35 +970,11 @@ func (s *PostgresStore) ListCertificates(ctx context.Context, userID string) ([]
 	return items, nil
 }
 
-func (s *PostgresStore) DeleteCertificate(ctx context.Context, id string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM user_certificates WHERE id=$1`, id)
-	if err != nil {
-		return fmt.Errorf("delete certificate: %w", err)
-	}
-	return nil
-}
-
-func (s *PostgresStore) FindCertificateForDomain(ctx context.Context, userID, domain string) (*types.CertificateSpec, error) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
-	var spec types.CertificateSpec
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, user_id, domain, cert_pem, key_pem, expires_at, created_at, updated_at FROM user_certificates WHERE user_id=$1 AND domain=$2`,
-		userID, domain,
-	).Scan(&spec.ID, &spec.UserID, &spec.Domain, &spec.CertPEM, &spec.KeyPEM, &spec.ExpiresAt, &spec.CreatedAt, &spec.UpdatedAt)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("find certificate: %w", err)
-	}
-	return &spec, nil
-}
-
 func (s *PostgresStore) FindCertificateByDomain(ctx context.Context, domain string) (*types.CertificateSpec, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	var spec types.CertificateSpec
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, user_id, domain, cert_pem, key_pem, expires_at, created_at, updated_at FROM user_certificates WHERE domain=$1 LIMIT 1`,
+		`SELECT id, user_id, domain, cert_pem, key_pem, expires_at, created_at, updated_at FROM ck_certificates WHERE lower(domain)=$1 LIMIT 1`,
 		domain,
 	).Scan(&spec.ID, &spec.UserID, &spec.Domain, &spec.CertPEM, &spec.KeyPEM, &spec.ExpiresAt, &spec.CreatedAt, &spec.UpdatedAt)
 	if err != nil {
@@ -1014,30 +988,13 @@ func (s *PostgresStore) FindCertificateByDomain(ctx context.Context, domain stri
 
 func (s *PostgresStore) ListManagedHTTPSDomains(ctx context.Context, userID string) ([]types.ManagedHTTPSDomain, error) {
 	rows, err := s.pool.Query(ctx, `
-		with current_account as (
-			select id, lower(email) as email
-			from users
-			where id = $1
-		), platform_domains as (
-			select lower(domain) as domain, 'platform'::text as source
-			from user_certificates
-			where user_id = $1
-		), cert_keeper_domains as (
-			select lower(c.domain) as domain, 'cert_keeper'::text as source
-			from current_account u
-			join ck_users cu on lower(cu.email) = u.email
-			join ck_certificates c on c.user_id = cu.id
-		), merged as (
-			select domain, source from platform_domains
-			union all
-			select domain, source from cert_keeper_domains
-		)
-		select domain,
-			case when bool_or(source = 'platform') then 'platform' else 'cert_keeper' end as source
-		from merged
-		where domain <> ''
-		group by domain
-		order by domain
+		SELECT lower(c.domain) AS domain, 'cert_keeper'::text AS source
+		FROM ck_users cu
+		JOIN ck_certificates c ON c.user_id = cu.id
+		WHERE lower(cu.email) = (SELECT lower(email) FROM users WHERE id = $1)
+		  AND c.domain <> ''
+		GROUP BY lower(c.domain)
+		ORDER BY lower(c.domain)
 	`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list managed https domains: %w", err)

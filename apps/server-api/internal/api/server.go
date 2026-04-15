@@ -11,11 +11,12 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	mathrand "math/rand"
+	"mime/multipart"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -60,6 +61,8 @@ type Server struct {
 	accessTokenTTL       time.Duration
 	refreshTokenTTL      time.Duration
 	adminBootstrapSecret string
+	releaseUploadDir      string
+	releasePublicBaseURL  string
 	allowedOrigins       map[string]struct{}
 	authCookiesSecure    bool
 	controlExecuteMu     sync.Mutex
@@ -81,6 +84,8 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 		accessTokenTTL:       15 * time.Minute,
 		refreshTokenTTL:      7 * 24 * time.Hour,
 		adminBootstrapSecret: strings.TrimSpace(os.Getenv("SERVER_API_ADMIN_BOOTSTRAP_SECRET")),
+		releaseUploadDir:      strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_UPLOAD_DIR")),
+		releasePublicBaseURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_PUBLIC_BASE_URL")), "/"),
 		allowedOrigins:       parseAllowedOrigins(os.Getenv("SERVER_API_ALLOWED_ORIGINS")),
 		authCookiesSecure:    parseBoolEnv(os.Getenv("SERVER_API_AUTH_COOKIES_SECURE")),
 		controlExecuteActive: map[string]struct{}{},
@@ -122,8 +127,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/internal/routes/https", s.handleHTTPSRoutes)
 
 	s.mux.HandleFunc("/api/certificates", s.handleCertificates)
-	s.mux.HandleFunc("/api/certificates/auto-issue", s.handleCertificateAutoIssue)
-	s.mux.HandleFunc("/api/certificates/", s.handleCertificateByID)
 
 	s.mux.HandleFunc("/api/auth/bootstrap-status", s.handleBootstrapStatus)
 	s.mux.HandleFunc("/api/auth/bootstrap", s.handleBootstrap)
@@ -146,6 +149,8 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/control-actions/tunnel/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleTunnelControlActionOptions)))
 	s.mux.Handle("/api/control-actions", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleControlActions)))
 	s.mux.Handle("/api/server/metrics", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleServerMetrics)))
+	s.mux.Handle("/api/admin/release-artifacts/upload", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleReleaseArtifactUpload)))
+	s.mux.Handle("/downloads/releases/", s.releaseArtifactDownloadHandler())
 	s.mux.Handle("/api/managed-domains/https", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleManagedHTTPSDomains)))
 	s.mux.Handle("/api/relay/tcp/runtime", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleRelayTCPRuntime)))
 	s.mux.Handle("/api/audit-logs", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleAuditLogs)))
@@ -250,6 +255,163 @@ func (s *Server) handleAgentTunnels(w http.ResponseWriter, r *http.Request) {
 		visible = append(visible, agentVisibleTunnelSpec(item))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": visible})
+}
+
+func (s *Server) handleReleaseArtifactUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if strings.TrimSpace(s.releaseUploadDir) == "" {
+		writeError(w, http.StatusServiceUnavailable, "release upload is disabled until SERVER_API_RELEASE_UPLOAD_DIR is configured")
+		return
+	}
+	if err := r.ParseMultipartForm(256 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart upload")
+		return
+	}
+
+	product := strings.TrimSpace(r.FormValue("product"))
+	channel := strings.TrimSpace(r.FormValue("channel"))
+	version := strings.TrimSpace(r.FormValue("version"))
+	if product == "" || channel == "" || version == "" {
+		writeError(w, http.StatusBadRequest, "product, channel, and version are required")
+		return
+	}
+	if !allowedReleaseProduct(product) {
+		writeError(w, http.StatusBadRequest, "unsupported product")
+		return
+	}
+	if !allowedReleaseChannel(channel) {
+		writeError(w, http.StatusBadRequest, "unsupported channel")
+		return
+	}
+	if strings.Contains(version, "..") || strings.ContainsAny(version, `/\\`) {
+		writeError(w, http.StatusBadRequest, "invalid version")
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "file is required")
+		return
+	}
+	defer file.Close()
+	if header.Size <= 0 {
+		writeError(w, http.StatusBadRequest, "file is empty")
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if !releaseChannelMatchesExt(channel, ext) {
+		writeError(w, http.StatusBadRequest, "file extension does not match channel")
+		return
+	}
+
+	fileName := releaseArtifactFileName(product, channel, version, ext)
+	targetDir := filepath.Join(s.releaseUploadDir, product, version)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create release directory")
+		return
+	}
+	targetPath := filepath.Join(targetDir, fileName)
+	if err := writeUploadedFile(targetPath, file, 0o644); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store uploaded file")
+		return
+	}
+
+	downloadPath := "/downloads/releases/" + product + "/" + version + "/" + fileName
+	resp := map[string]any{
+		"product":      product,
+		"channel":      channel,
+		"version":      version,
+		"fileName":     fileName,
+		"storedPath":   targetPath,
+		"downloadPath": downloadPath,
+	}
+	if s.releasePublicBaseURL != "" {
+		resp["downloadUrl"] = s.releasePublicBaseURL + downloadPath
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) releaseArtifactDownloadHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(s.releaseUploadDir) == "" {
+			http.NotFound(w, r)
+			return
+		}
+		rel := strings.TrimPrefix(r.URL.Path, "/downloads/releases/")
+		rel = strings.TrimPrefix(rel, "/")
+		if rel == "" || strings.Contains(rel, "..") {
+			http.NotFound(w, r)
+			return
+		}
+		target := filepath.Join(s.releaseUploadDir, filepath.FromSlash(rel))
+		info, err := os.Stat(target)
+		if err != nil || info.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, target)
+	})
+}
+
+func allowedReleaseProduct(product string) bool {
+	switch product {
+	case "publisher", "cert-keeper":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedReleaseChannel(channel string) bool {
+	switch channel {
+	case "setup", "portable":
+		return true
+	default:
+		return false
+	}
+}
+
+func releaseChannelMatchesExt(channel, ext string) bool {
+	switch channel {
+	case "setup":
+		return ext == ".exe"
+	case "portable":
+		return ext == ".zip"
+	default:
+		return false
+	}
+}
+
+func releaseArtifactFileName(product, channel, version, ext string) string {
+	base := version
+	if product == "publisher" {
+		if channel == "setup" {
+			base = "CloudRelayPublisherSetup-" + version
+		} else {
+			base = "CloudRelayPublisherPortable-" + version
+		}
+	} else {
+		if channel == "setup" {
+			base = "CertKeeperSetup-" + version
+		} else {
+			base = "CertKeeperPortable-" + version
+		}
+	}
+	return base + ext
+}
+
+func writeUploadedFile(targetPath string, src multipart.File, mode os.FileMode) error {
+	out, err := os.OpenFile(targetPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, src)
+	return err
 }
 
 func (s *Server) handleBootstrapStatus(w http.ResponseWriter, r *http.Request) {
@@ -1697,7 +1859,6 @@ func (s *Server) handleCertificates(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid certificate payload")
 			return
 		}
-		spec.UserID = user.ID
 		spec.Domain = strings.ToLower(strings.TrimSpace(spec.Domain))
 		if spec.Domain == "" || spec.CertPEM == "" || spec.KeyPEM == "" {
 			writeError(w, http.StatusBadRequest, "domain, certPem, and keyPem are required")
@@ -1711,7 +1872,7 @@ func (s *Server) handleCertificates(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		result, err := s.store.CreateCertificate(r.Context(), spec)
+		result, err := s.store.CreateCertificate(r.Context(), user.ID, spec)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1721,136 +1882,6 @@ func (s *Server) handleCertificates(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
 	}
-}
-
-func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request) {
-	user, err := s.authenticateRequest(r)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/certificates/"))
-	if id == "" {
-		writeError(w, http.StatusBadRequest, "certificate id is required")
-		return
-	}
-	switch r.Method {
-	case http.MethodDelete:
-		cert, err := s.store.GetCertificate(r.Context(), id)
-		if err != nil {
-			status := http.StatusInternalServerError
-			if errors.Is(err, store.ErrNotFound) {
-				status = http.StatusNotFound
-			}
-			writeError(w, status, err.Error())
-			return
-		}
-		if cert.UserID != user.ID {
-			writeError(w, http.StatusForbidden, "not your certificate")
-			return
-		}
-		if err := s.store.DeleteCertificate(r.Context(), id); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		s.triggerNginxRegen()
-		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
-	default:
-		writeMethodNotAllowed(w, http.MethodDelete)
-	}
-}
-
-func (s *Server) handleCertificateAutoIssue(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeMethodNotAllowed(w, http.MethodPost)
-		return
-	}
-	user, err := s.authenticateRequest(r)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	var req struct {
-		Domain string `json:"domain"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid payload")
-		return
-	}
-	domain := strings.ToLower(strings.TrimSpace(req.Domain))
-	if domain == "" {
-		writeError(w, http.StatusBadRequest, "domain is required")
-		return
-	}
-
-	// Run certbot with HTTP-01 challenge via nginx webroot
-	certDir := filepath.Join(os.TempDir(), "certbot-"+domain)
-	os.RemoveAll(certDir)
-
-	// Ensure webroot directory exists for ACME challenge
-	webrootDir := "/www/server/nginx/html"
-	acmeDir := filepath.Join(webrootDir, ".well-known", "acme-challenge")
-	os.MkdirAll(acmeDir, 0755)
-
-	cmd := exec.CommandContext(r.Context(),
-		"certbot", "certonly",
-		"--non-interactive",
-		"--agree-tos",
-		"--email", s.acmeEmail,
-		"-d", domain,
-		"--webroot",
-		"--webroot-path", webrootDir,
-		"--cert-name", domain,
-		"--config-dir", certDir,
-		"--work-dir", filepath.Join(certDir, "work"),
-		"--logs-dir", filepath.Join(certDir, "logs"),
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		os.RemoveAll(certDir)
-		log.Printf("certbot auto-issue failed for %s: %s", domain, string(output))
-		writeError(w, http.StatusBadGateway, "证书自动签发失败: "+string(output))
-		return
-	}
-
-	// Read the issued certificate files
-	certPath := filepath.Join(certDir, "live", domain, "fullchain.pem")
-	keyPath := filepath.Join(certDir, "live", domain, "privkey.pem")
-	certPEM, err := os.ReadFile(certPath)
-	if err != nil {
-		os.RemoveAll(certDir)
-		writeError(w, http.StatusInternalServerError, "读取签发证书失败")
-		return
-	}
-	keyPEM, err := os.ReadFile(keyPath)
-	if err != nil {
-		os.RemoveAll(certDir)
-		writeError(w, http.StatusInternalServerError, "读取签发私钥失败")
-		return
-	}
-	os.RemoveAll(certDir)
-
-	spec := types.CertificateSpec{
-		UserID:  user.ID,
-		Domain:  domain,
-		CertPEM: string(certPEM),
-		KeyPEM:  string(keyPEM),
-	}
-	// Parse expiration
-	if block, _ := pem.Decode(certPEM); block != nil {
-		if cert, err := x509.ParseCertificate(block.Bytes); err == nil && !cert.NotAfter.IsZero() {
-			spec.ExpiresAt = cert.NotAfter.UTC()
-		}
-	}
-
-	result, err := s.store.CreateCertificate(r.Context(), spec)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.triggerNginxRegen()
-	log.Printf("auto-issued certificate for %s (expires %s)", domain, spec.ExpiresAt.Format("2006-01-02"))
-	writeJSON(w, http.StatusCreated, result)
 }
 
 func (s *Server) triggerNginxRegen() {

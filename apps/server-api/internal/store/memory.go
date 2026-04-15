@@ -486,7 +486,7 @@ func (s *InMemoryStore) DeleteUserSessions(_ context.Context, userID string) err
 	return nil
 }
 
-func (s *InMemoryStore) CreateCertificate(_ context.Context, spec types.CertificateSpec) (types.CertificateSpec, error) {
+func (s *InMemoryStore) CreateCertificate(_ context.Context, _ string, spec types.CertificateSpec) (types.CertificateSpec, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if spec.ID == "" {
@@ -497,17 +497,6 @@ func (s *InMemoryStore) CreateCertificate(_ context.Context, spec types.Certific
 	spec.UpdatedAt = now
 	s.certificates[spec.ID] = spec
 	s.certsByUser[spec.UserID] = append(s.certsByUser[spec.UserID], spec.ID)
-	spec.KeyPEM = ""
-	return spec, nil
-}
-
-func (s *InMemoryStore) GetCertificate(_ context.Context, id string) (types.CertificateSpec, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	spec, ok := s.certificates[id]
-	if !ok {
-		return types.CertificateSpec{}, ErrNotFound
-	}
 	spec.KeyPEM = ""
 	return spec, nil
 }
@@ -523,37 +512,6 @@ func (s *InMemoryStore) ListCertificates(_ context.Context, userID string) ([]ty
 		}
 	}
 	return items, nil
-}
-
-func (s *InMemoryStore) DeleteCertificate(_ context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	spec, ok := s.certificates[id]
-	if !ok {
-		return ErrNotFound
-	}
-	delete(s.certificates, id)
-	filtered := make([]string, 0, len(s.certsByUser[spec.UserID]))
-	for _, cid := range s.certsByUser[spec.UserID] {
-		if cid != id {
-			filtered = append(filtered, cid)
-		}
-	}
-	s.certsByUser[spec.UserID] = filtered
-	return nil
-}
-
-func (s *InMemoryStore) FindCertificateForDomain(_ context.Context, userID, domain string) (*types.CertificateSpec, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	domain = strings.ToLower(strings.TrimSpace(domain))
-	for _, id := range s.certsByUser[userID] {
-		if spec, ok := s.certificates[id]; ok && strings.ToLower(spec.Domain) == domain {
-			cp := spec
-			return &cp, nil
-		}
-	}
-	return nil, nil
 }
 
 func (s *InMemoryStore) FindCertificateByDomain(_ context.Context, domain string) (*types.CertificateSpec, error) {
@@ -587,7 +545,7 @@ func (s *InMemoryStore) ListManagedHTTPSDomains(_ context.Context, userID string
 			continue
 		}
 		seen[domain] = struct{}{}
-		items = append(items, types.ManagedHTTPSDomain{Domain: domain, Source: "platform"})
+		items = append(items, types.ManagedHTTPSDomain{Domain: domain, Source: "cert_keeper"})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].Domain < items[j].Domain

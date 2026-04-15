@@ -169,11 +169,5 @@ export function createDesktopApi(apiBaseUrl = "", transport?: DesktopApiTranspor
     createCertificate(spec: { domain: string; certPem: string; keyPem: string }) {
       return requestJSON<CertificateSpec>("/api/certificates", { method: "POST", body: JSON.stringify(spec) });
     },
-    deleteCertificate(id: string) {
-      return requestJSON<{ status: string; id: string }>("/api/certificates/" + encodeURIComponent(id), { method: "DELETE" });
-    },
-    autoIssueCertificate(domain: string) {
-      return requestJSON<CertificateSpec>("/api/certificates/auto-issue", { method: "POST", body: JSON.stringify({ domain }) });
-    },
   };
 }
