@@ -119,6 +119,11 @@ Function RequestRunningAppQuit
   Sleep 500
 FunctionEnd
 
+Function ForceStopRunningApp
+  nsExec::Exec 'taskkill /F /IM ${APP_EXE}'
+  Sleep 1000
+FunctionEnd
+
 Function WaitForAppStop
   StrCpy $0 0
   wait_loop:
@@ -144,6 +149,13 @@ Function EnsureAppStopped
 
 try_quit:
   Call RequestRunningAppQuit
+  Call WaitForAppStop
+  Call GetRunningProcessPath
+  ${If} $RunningProcessPath == ""
+    Return
+  ${EndIf}
+
+  Call ForceStopRunningApp
   Call WaitForAppStop
   Call GetRunningProcessPath
   ${If} $RunningProcessPath == ""
