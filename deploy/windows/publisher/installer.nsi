@@ -135,24 +135,32 @@ Function WaitForAppStop
 FunctionEnd
 
 Function EnsureAppStopped
-  running_check:
-    Call GetRunningProcessPath
-    ${If} $RunningProcessPath == ""
-      Return
-    ${EndIf}
-    MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "${APP_NAME} 当前正在运行。$\r$\n$\r$\n点击“确定”将自动退出并继续安装，点击“取消”退出安装。" IDOK try_quit IDCANCEL cancel_install
+  Call GetRunningProcessPath
+  ${If} $RunningProcessPath == ""
+    Return
+  ${EndIf}
 
-  try_quit:
-    Call RequestRunningAppQuit
-    Call WaitForAppStop
-    Call GetRunningProcessPath
-    ${If} $RunningProcessPath == ""
-      Return
-    ${EndIf}
-    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "尚未确认 ${APP_NAME} 已退出。请手动关闭后点击“重试”，或点击“取消”退出安装。" IDRETRY running_check IDCANCEL cancel_install
+  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "${APP_NAME} 当前正在运行。$\r$\n$\r$\n点击“确定”将自动退出并继续安装，点击“取消”退出安装。" IDOK try_quit IDCANCEL cancel_install
 
-  cancel_install:
-    Abort
+try_quit:
+  Call RequestRunningAppQuit
+  Call WaitForAppStop
+  Call GetRunningProcessPath
+  ${If} $RunningProcessPath == ""
+    Return
+  ${EndIf}
+
+  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "尚未确认 ${APP_NAME} 已退出。请手动关闭后点击“重试”，或点击“取消”退出安装。" IDRETRY retry_quit IDCANCEL cancel_install
+
+retry_quit:
+  Call GetRunningProcessPath
+  ${If} $RunningProcessPath == ""
+    Return
+  ${EndIf}
+  Goto try_quit
+
+cancel_install:
+  Abort
 FunctionEnd
 
 Function ConfirmOverwriteTarget
