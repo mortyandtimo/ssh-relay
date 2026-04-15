@@ -115,7 +115,7 @@ Function RequestRunningAppQuit
       Return
     ${EndIf}
   ${EndIf}
-  ExecWait '"$0" "${INSTALLER_QUIT_ARG}"'
+  Exec '"$0" "${INSTALLER_QUIT_ARG}"'
   Sleep 500
 FunctionEnd
 
