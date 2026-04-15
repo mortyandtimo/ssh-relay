@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
@@ -362,9 +364,9 @@ fn save_login_profile(
     let mut data = read_login_profiles_file(&app)?;
 
     #[cfg(target_os = "windows")]
-    let encrypted = base64::encode(dpapi_encrypt(password.as_bytes())?);
+    let encrypted = STANDARD.encode(dpapi_encrypt(password.as_bytes())?);
     #[cfg(not(target_os = "windows"))]
-    let encrypted = base64::encode(password.as_bytes());
+    let encrypted = STANDARD.encode(password.as_bytes());
 
     if let Some(existing) = data.profiles.iter_mut().find(|p| p.email == email) {
         existing.encrypted_password = encrypted;
@@ -398,8 +400,9 @@ fn decrypt_login_password(app: AppHandle, email: String) -> Result<String, Strin
         .iter()
         .find(|p| p.email == email)
         .ok_or("profile not found")?;
-    let bytes = base64::decode(&profile.encrypted_password)
-        .map_err(|err: base64::DecodeError| err.to_string())?;
+    let bytes = STANDARD
+        .decode(&profile.encrypted_password)
+        .map_err(|err| err.to_string())?;
 
     #[cfg(target_os = "windows")]
     let decrypted = dpapi_decrypt(&bytes)?;
@@ -618,7 +621,7 @@ fn main() {
     let installer_quit_on_launch = installer_requested_quit(&std::env::args().skip(1).collect::<Vec<_>>());
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
-            if installer_requested_quit(args) {
+            if installer_requested_quit(&args) {
                 handle_installer_quit_request(app);
                 return;
             }

@@ -93,7 +93,7 @@ FunctionEnd
 
 Function GetRunningProcessPath
   StrCpy $RunningProcessPath ""
-  nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Get-Process -Name ''${PROCESS_BASENAME}'' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($p) { if ($p.Path) { [Console]::Write($p.Path) } else { [Console]::Write(''__RUNNING__'') } }"'
+  nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$$p = Get-Process -Name ''${PROCESS_BASENAME}'' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($$p) { if ($$p.Path) { [Console]::Write($$p.Path) } else { [Console]::Write(''__RUNNING__'') } }"'
   Pop $0
   Pop $1
   ${If} $0 == "error"
@@ -204,6 +204,12 @@ Function CreateDesktopShortcut
 FunctionEnd
 
 Function DeleteDesktopShortcut
+  ; install-section helper
+  SetShellVarContext current
+  Delete "$DESKTOP\${APP_NAME}.lnk"
+FunctionEnd
+
+Function un.DeleteDesktopShortcut
   SetShellVarContext current
   Delete "$DESKTOP\${APP_NAME}.lnk"
 FunctionEnd
@@ -216,6 +222,14 @@ Function CreateStartMenuShortcuts
 FunctionEnd
 
 Function DeleteStartMenuShortcuts
+  ; install-section helper
+  SetShellVarContext current
+  Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
+  Delete "$SMPROGRAMS\${APP_NAME}\卸载${APP_NAME}.lnk"
+  RMDir "$SMPROGRAMS\${APP_NAME}"
+FunctionEnd
+
+Function un.DeleteStartMenuShortcuts
   SetShellVarContext current
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\卸载${APP_NAME}.lnk"
@@ -227,6 +241,11 @@ Function EnableAutoStart
 FunctionEnd
 
 Function DisableAutoStart
+  ; install-section helper
+  DeleteRegValue HKCU "${RUN_REG_PATH}" "${RUN_VALUE_NAME}"
+FunctionEnd
+
+Function un.DisableAutoStart
   DeleteRegValue HKCU "${RUN_REG_PATH}" "${RUN_VALUE_NAME}"
 FunctionEnd
 
@@ -288,9 +307,9 @@ FunctionEnd
 
 Section "Uninstall"
   SetShellVarContext current
-  Call DeleteDesktopShortcut
-  Call DeleteStartMenuShortcuts
-  Call DisableAutoStart
+  Call un.DeleteDesktopShortcut
+  Call un.DeleteStartMenuShortcuts
+  Call un.DisableAutoStart
   DeleteRegKey HKCU "${UNINSTALL_REG_PATH}"
 
   Delete "$INSTDIR\Uninstall.exe"

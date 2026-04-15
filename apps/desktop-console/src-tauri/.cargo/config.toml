@@ -1,10 +1,2 @@
 [target.x86_64-pc-windows-gnu]
-linker = "clang"
-rustflags = ["-Clink-arg=--target=x86_64-w64-windows-gnu", "-Clink-arg=-fuse-ld=lld"]
-
-[env]
-CC_x86_64_pc_windows_gnu = { value = "clang", force = true }
-CXX_x86_64_pc_windows_gnu = { value = "clang++", force = true }
-AR_x86_64_pc_windows_gnu = { value = "llvm-ar", force = true }
-CFLAGS_x86_64_pc_windows_gnu = { value = "--target=x86_64-w64-windows-gnu", force = true }
-CXXFLAGS_x86_64_pc_windows_gnu = { value = "--target=x86_64-w64-windows-gnu", force = true }
+linker = "x86_64-w64-mingw32-gcc"

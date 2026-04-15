@@ -1,6 +1,6 @@
 module github.com/25743/cloud-relay-platform
 
-go 1.22.0
+go 1.22
 
 require github.com/jackc/pgx/v5 v5.7.2
 
