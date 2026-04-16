@@ -46,6 +46,8 @@ type Config struct {
 	AllowedOrigins  string
 	CookiesSecure   bool
 	BootstrapSecret string
+	DomainBackends  string
+	SkipDomains     string
 }
 
 // Server is the cert-keeper API server.
@@ -97,6 +99,12 @@ func NewServer(cfg Config) (*Server, error) {
 	os.MkdirAll(cfg.CertDir, 0755)
 	os.MkdirAll(cfg.NginxConfDir, 0755)
 	s.nginxManager = nginx.NewManager(cfg.NginxConfDir, cfg.CertDir, cfg.NginxBin, backend, s.publicIP)
+	if cfg.DomainBackends != "" {
+		s.nginxManager.SetDomainBackends(cfg.DomainBackends)
+	}
+	if cfg.SkipDomains != "" {
+		s.nginxManager.SetSkipDomains(cfg.SkipDomains)
+	}
 
 	s.routes()
 	if err := s.reconcileNginx(context.Background()); err != nil {

@@ -19,20 +19,65 @@ import (
 )
 
 type Manager struct {
-	configDir string
-	certDir   string
-	nginxBin  string
-	store     store.Store
-	publicIP  string
+	configDir      string
+	certDir        string
+	nginxBin       string
+	store          store.Store
+	publicIP       string
+	defaultBackend string
+	domainBackends map[string]string
+	skipDomains    map[string]bool
 }
 
 func NewManager(configDir, certDir, nginxBin string, s store.Store, publicIP string) *Manager {
 	return &Manager{
-		configDir: configDir,
-		certDir:   certDir,
-		nginxBin:  nginxBin,
-		store:     s,
-		publicIP:  publicIP,
+		configDir:      configDir,
+		certDir:        certDir,
+		nginxBin:       nginxBin,
+		store:          s,
+		publicIP:       publicIP,
+		defaultBackend: "http://127.0.0.1:9095",
+		domainBackends: make(map[string]string),
+		skipDomains:    make(map[string]bool),
+	}
+}
+
+// SetDomainBackends configures per-domain proxy_pass targets.
+// Format: "domain1=http://host:port,domain2=http://host:port"
+func (m *Manager) SetDomainBackends(mapping string) {
+	for _, entry := range strings.Split(mapping, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		domain := strings.ToLower(strings.TrimSpace(parts[0]))
+		backend := strings.TrimSpace(parts[1])
+		if domain != "" && backend != "" {
+			m.domainBackends[domain] = backend
+		}
+	}
+}
+
+func (m *Manager) backendFor(domain string) string {
+	if backend, ok := m.domainBackends[strings.ToLower(domain)]; ok {
+		return backend
+	}
+	return m.defaultBackend
+}
+
+// SetSkipDomains configures domains whose server blocks should NOT be
+// generated (cert files are still written so external configs can reference them).
+// Format: "domain1,domain2"
+func (m *Manager) SetSkipDomains(list string) {
+	for _, d := range strings.Split(list, ",") {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d != "" {
+			m.skipDomains[d] = true
+		}
 	}
 }
 
@@ -80,7 +125,7 @@ func (m *Manager) RegenerateConfig(ctx context.Context) error {
 
 	for _, cert := range certs {
 		domain := strings.ToLower(strings.TrimSpace(cert.Domain))
-		if domain == "" {
+		if domain == "" || m.skipDomains[domain] {
 			continue
 		}
 
@@ -112,10 +157,10 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_pass http://127.0.0.1:9095;
+        proxy_pass %s;
     }
 }
-`, domain, m.certDir, cert.ID, m.certDir, cert.ID))
+`, domain, m.certDir, cert.ID, m.certDir, cert.ID, m.backendFor(domain)))
 	}
 
 	confPath := filepath.Join(m.configDir, "cert-domains.conf")
@@ -159,7 +204,7 @@ func (m *Manager) VerifyCertificates(ctx context.Context, certs []store.Certific
 
 	for _, cert := range certs {
 		domain := strings.ToLower(strings.TrimSpace(cert.Domain))
-		if domain == "" {
+		if domain == "" || m.skipDomains[domain] {
 			continue
 		}
 		serverNameLine := fmt.Sprintf("server_name %s;", domain)

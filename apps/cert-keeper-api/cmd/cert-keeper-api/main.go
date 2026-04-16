@@ -28,6 +28,8 @@ func main() {
 	allowedOrigins := envOr("CERT_KEEPER_ALLOWED_ORIGINS", "")
 	bootstrapSecret := envOr("CERT_KEEPER_BOOTSTRAP_SECRET", "")
 	cookiesSecure := envOrBool("CERT_KEEPER_COOKIES_SECURE", false)
+	domainBackends := envOr("CERT_KEEPER_DOMAIN_BACKENDS", "")
+	skipDomains := envOr("CERT_KEEPER_SKIP_DOMAINS", "")
 
 	srv, err := api.NewServer(api.Config{
 		DBURL:           dbURL,
@@ -42,6 +44,8 @@ func main() {
 		AllowedOrigins:  allowedOrigins,
 		CookiesSecure:   cookiesSecure,
 		BootstrapSecret: bootstrapSecret,
+		DomainBackends:  domainBackends,
+		SkipDomains:     skipDomains,
 	})
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
