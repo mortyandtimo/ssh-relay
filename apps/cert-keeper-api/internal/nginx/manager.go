@@ -132,6 +132,10 @@ server {
 			log.Printf("nginx: reload failed: %s", output)
 			return fmt.Errorf("nginx: reload failed: %s", output)
 		}
+		// Wait for nginx workers to pick up the new configuration.
+		// nginx -s reload is async: the master signals old workers to
+		// gracefully shut down and spawns new ones with the new config.
+		time.Sleep(2 * time.Second)
 		log.Printf("nginx: cert-keeper config regenerated (%d domains)", len(certs))
 	}
 
