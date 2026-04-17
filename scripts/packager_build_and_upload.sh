@@ -34,13 +34,27 @@ Required env for upload phase:
 EOF
 }
 
+has_tracked_changes() {
+  if ! git -C "$ROOT_DIR" diff --quiet --ignore-submodules --; then
+    return 0
+  fi
+  if ! git -C "$ROOT_DIR" diff --cached --quiet --ignore-submodules --; then
+    return 0
+  fi
+  return 1
+}
+
 ensure_clean_checkout() {
   if [ "$ALLOW_DIRTY" = "1" ]; then
     return
   fi
-  if [ -n "$(git -C "$ROOT_DIR" status --short)" ]; then
-    echo "build machine worktree is dirty; commit/stash first or set ALLOW_DIRTY=1" >&2
+  if has_tracked_changes; then
+    echo "build machine has tracked changes; commit/stash first or set ALLOW_DIRTY=1" >&2
+    git -C "$ROOT_DIR" status --short --untracked-files=no >&2 || true
     exit 1
+  fi
+  if [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard)" ]; then
+    echo "warning: untracked files detected; continuing because packager caches/artifacts are expected" >&2
   fi
 }
 
