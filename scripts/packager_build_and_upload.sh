@@ -11,6 +11,9 @@ if [ "$CURRENT_BRANCH" = "HEAD" ]; then
   CURRENT_BRANCH=""
 fi
 BRANCH="${BRANCH:-$CURRENT_BRANCH}"
+IGNORED_TRACKED_DIRTY_PATHS=(
+  "apps/desktop-console/src-tauri/runtime/client-agent.exe"
+)
 
 usage() {
   cat <<'EOF'
@@ -34,24 +37,43 @@ Required env for upload phase:
 EOF
 }
 
-has_tracked_changes() {
-  if ! git -C "$ROOT_DIR" diff --quiet --ignore-submodules --; then
-    return 0
-  fi
-  if ! git -C "$ROOT_DIR" diff --cached --quiet --ignore-submodules --; then
-    return 0
-  fi
+is_ignored_tracked_dirty_path() {
+  local path="$1"
+  local ignored
+  for ignored in "${IGNORED_TRACKED_DIRTY_PATHS[@]}"; do
+    if [ "$path" = "$ignored" ]; then
+      return 0
+    fi
+  done
   return 1
+}
+
+list_blocking_tracked_changes() {
+  local path
+  {
+    git -C "$ROOT_DIR" diff --name-only --ignore-submodules -- || true
+    git -C "$ROOT_DIR" diff --cached --name-only --ignore-submodules -- || true
+  } | awk 'NF {print}' | sort -u | while IFS= read -r path; do
+    if is_ignored_tracked_dirty_path "$path"; then
+      continue
+    fi
+    printf '%s\n' "$path"
+  done
 }
 
 ensure_clean_checkout() {
   if [ "$ALLOW_DIRTY" = "1" ]; then
     return
   fi
-  if has_tracked_changes; then
+  local blocking_changes
+  blocking_changes="$(list_blocking_tracked_changes)"
+  if [ -n "$blocking_changes" ]; then
     echo "build machine has tracked changes; commit/stash first or set ALLOW_DIRTY=1" >&2
-    git -C "$ROOT_DIR" status --short --untracked-files=no >&2 || true
+    printf '%s\n' "$blocking_changes" | sed 's/^/  /' >&2
     exit 1
+  fi
+  if ! git -C "$ROOT_DIR" diff --quiet --ignore-submodules -- "${IGNORED_TRACKED_DIRTY_PATHS[@]}" || ! git -C "$ROOT_DIR" diff --cached --quiet --ignore-submodules -- "${IGNORED_TRACKED_DIRTY_PATHS[@]}"; then
+    echo "warning: continuing with known generated tracked artifacts in a dirty state" >&2
   fi
   if [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard)" ]; then
     echo "warning: untracked files detected; continuing because packager caches/artifacts are expected" >&2
