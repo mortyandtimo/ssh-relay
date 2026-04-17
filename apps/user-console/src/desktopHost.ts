@@ -52,6 +52,31 @@ export type P2PRuntimeStatus = {
   connectedPeers: string[];
 };
 
+export type UserNodeStatus = {
+  enabled: boolean;
+  registered: boolean;
+  online: boolean;
+  nodeId: string;
+  nodeName: string;
+  apiBaseUrl: string;
+  ownerEmail: string;
+  ownerRole: string;
+  lastRegisterAt: number | null;
+  lastHeartbeatAt: number | null;
+  recommendedHeartbeatSec: number;
+  p2pRunning: boolean;
+  p2pVirtualIpv4: string;
+  p2pPeerCount: number;
+  p2pHostname: string;
+  lastError: string;
+};
+
+export type UserNodeIdentity = {
+  email?: string;
+  role?: string;
+  displayName?: string;
+};
+
 type HostHttpRequestInput = {
   url: string;
   method?: string;
@@ -228,6 +253,35 @@ export async function openP2PRuntimeLog(kind: "stdout" | "stderr"): Promise<void
   await invoke("open_p2p_runtime_log", { kind });
 }
 
+export async function loadUserNodeStatus(): Promise<UserNodeStatus> {
+  try {
+    return await invoke<UserNodeStatus>("user_node_status");
+  } catch {
+    return {
+      enabled: false,
+      registered: false,
+      online: false,
+      nodeId: "",
+      nodeName: "",
+      apiBaseUrl: "",
+      ownerEmail: "",
+      ownerRole: "",
+      lastRegisterAt: null,
+      lastHeartbeatAt: null,
+      recommendedHeartbeatSec: 30,
+      p2pRunning: false,
+      p2pVirtualIpv4: "",
+      p2pPeerCount: 0,
+      p2pHostname: "",
+      lastError: "未接入 Tauri 宿主",
+    };
+  }
+}
+
+export async function syncUserNode(identity?: UserNodeIdentity): Promise<UserNodeStatus> {
+  return await invoke<UserNodeStatus>("user_node_sync", { identity });
+}
+
 export async function openExternal(url: string): Promise<void> {
   if (!("__TAURI_INTERNALS__" in window)) {
     const opened = window.open(url, "_blank", "noopener,noreferrer");
@@ -237,6 +291,19 @@ export async function openExternal(url: string): Promise<void> {
     return;
   }
   await invoke("open_external", { url });
+}
+
+export async function openServiceWorkspace(key: string, title: string, url: string): Promise<void> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    if (!opened) {
+      throw new Error("打开服务工作台失败");
+    }
+    return;
+  }
+  await invoke("open_service_workspace", {
+    input: { key, title, url },
+  });
 }
 
 export async function windowStartDrag(): Promise<void> {

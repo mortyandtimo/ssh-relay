@@ -27,11 +27,13 @@ use std::os::windows::process::CommandExt;
 
 const INSTALLER_QUIT_ARG: &str = "--quit-for-install";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const DEFAULT_API_BASE_URL: &str = "https://manage.020309.top";
 const P2P_RUNTIME_RELATIVE_PATH: &str = "runtime/easytier-core.exe";
 const P2P_CLI_RELATIVE_PATH: &str = "runtime/easytier-cli.exe";
 const USER_P2P_TCP_LISTENER: &str = "tcp://0.0.0.0:21010";
 const USER_P2P_UDP_LISTENER: &str = "udp://0.0.0.0:21010";
 const USER_P2P_RPC_PORTAL: &str = "127.0.0.1:29888";
+const USER_NODE_HEARTBEAT_SEC: u64 = 30;
 
 fn background_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
@@ -60,6 +62,40 @@ struct P2PRuntimeManagerState {
     child: Mutex<Option<Child>>,
     launch: Mutex<P2PRuntimeLaunchState>,
     op: Mutex<()>,
+}
+
+#[derive(Default)]
+struct UserNodeAgentState {
+    identity: Mutex<UserNodeIdentityState>,
+    launch: Mutex<UserNodeLaunchState>,
+    op: Mutex<()>,
+}
+
+#[derive(Clone, Default)]
+struct UserNodeIdentityState {
+    email: String,
+    role: String,
+    display_name: String,
+}
+
+#[derive(Clone, Default)]
+struct UserNodeLaunchState {
+    enabled: bool,
+    registered: bool,
+    online: bool,
+    node_id: String,
+    node_name: String,
+    api_base_url: String,
+    owner_email: String,
+    owner_role: String,
+    last_register_at: Option<u64>,
+    last_heartbeat_at: Option<u64>,
+    recommended_heartbeat_sec: u64,
+    p2p_running: bool,
+    p2p_virtual_ipv4: String,
+    p2p_peer_count: usize,
+    p2p_hostname: String,
+    last_error: String,
 }
 
 #[derive(Clone, Default)]
@@ -104,6 +140,80 @@ struct P2PRuntimeStatus {
     instance_id: String,
     peer_count: usize,
     connected_peers: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UserNodeStatus {
+    enabled: bool,
+    registered: bool,
+    online: bool,
+    node_id: String,
+    node_name: String,
+    api_base_url: String,
+    owner_email: String,
+    owner_role: String,
+    last_register_at: Option<u64>,
+    last_heartbeat_at: Option<u64>,
+    recommended_heartbeat_sec: u64,
+    p2p_running: bool,
+    p2p_virtual_ipv4: String,
+    p2p_peer_count: usize,
+    p2p_hostname: String,
+    last_error: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserNodeIdentityInput {
+    email: Option<String>,
+    role: Option<String>,
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceWorkspaceInput {
+    key: String,
+    title: String,
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentNodeCapabilities {
+    tcp_relay: bool,
+    http_relay: bool,
+    https_relay: bool,
+    udp_relay: bool,
+    p2p_assist: bool,
+    socks5_connect: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentNodeRegisterRequest {
+    node_id: String,
+    node_name: String,
+    agent_version: String,
+    capabilities: AgentNodeCapabilities,
+    metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentNodeRegisterResponse {
+    node_id: String,
+    recommended_heartbeat_sec: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentNodeHeartbeatRequest {
+    node_id: String,
+    metrics: HashMap<String, String>,
+    observed_at: String,
+    active_tunnels: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +429,24 @@ fn p2p_runtime_stop(
 }
 
 #[tauri::command]
+fn user_node_status(state: State<'_, UserNodeAgentState>) -> Result<UserNodeStatus, String> {
+    current_user_node_status(&state)
+}
+
+#[tauri::command]
+fn user_node_sync(
+    app: AppHandle,
+    runtime: State<'_, P2PRuntimeManagerState>,
+    node_state: State<'_, UserNodeAgentState>,
+    identity: Option<UserNodeIdentityInput>,
+) -> Result<UserNodeStatus, String> {
+    if let Some(identity) = identity {
+        update_user_node_identity(&node_state, identity)?;
+    }
+    sync_user_node_registration(&app, &runtime, &node_state)
+}
+
+#[tauri::command]
 fn open_p2p_runtime_log(
     app: AppHandle,
     runtime: State<'_, P2PRuntimeManagerState>,
@@ -417,6 +545,38 @@ fn open_external(url: String) -> Result<(), String> {
 
     #[allow(unreachable_code)]
     Err("unsupported platform".to_string())
+}
+
+#[tauri::command]
+fn open_service_workspace(app: AppHandle, input: ServiceWorkspaceInput) -> Result<(), String> {
+    let url = reqwest::Url::parse(input.url.trim()).map_err(|err| err.to_string())?;
+    let key = if input.key.trim().is_empty() {
+        "service".to_string()
+    } else {
+        sanitize_node_token(input.key.trim())
+    };
+    let label = format!("service-{}", key);
+    if let Some(window) = app.get_webview_window(&label) {
+        ensure_window_visible(&window);
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    let title = if input.title.trim().is_empty() {
+        "驻阡陌服务工作台".to_string()
+    } else {
+        input.title.trim().to_string()
+    };
+    let window = WebviewWindowBuilder::new(&app, label, WebviewUrl::External(url))
+        .title(&title)
+        .inner_size(1280.0, 860.0)
+        .min_inner_size(960.0, 680.0)
+        .resizable(true)
+        .visible(true)
+        .build()
+        .map_err(|err| err.to_string())?;
+    set_window_icon(&window);
+    let _ = window.set_focus();
+    Ok(())
 }
 
 #[tauri::command]
@@ -668,6 +828,146 @@ fn write_login_profiles_file(app: &AppHandle, data: &LoginProfilesFile) -> Resul
     let path = login_profiles_path(app)?;
     let content = serde_json::to_string_pretty(data).map_err(|err| err.to_string())?;
     fs::write(&path, content).map_err(|err| err.to_string())
+}
+
+fn user_node_id_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|err| err.to_string())?
+        .join("user-node-id.txt"))
+}
+
+fn sanitize_node_token(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn load_or_create_user_node_id(app: &AppHandle) -> Result<String, String> {
+    let path = user_node_id_path(app)?;
+    if path.exists() {
+        let value = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+    let machine_id = load_or_create_p2p_machine_id(app)?;
+    let suffix = sanitize_node_token(&machine_id);
+    let node_id = if suffix.is_empty() {
+        format!(
+            "user-node-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|err| err.to_string())?
+                .as_secs()
+        )
+    } else {
+        format!("user-node-{}", suffix)
+    };
+    fs::write(path, &node_id).map_err(|err| err.to_string())?;
+    Ok(node_id)
+}
+
+fn normalize_api_base_url(value: Option<&str>) -> String {
+    let trimmed = value.unwrap_or_default().trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        DEFAULT_API_BASE_URL.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn current_user_node_status(state: &UserNodeAgentState) -> Result<UserNodeStatus, String> {
+    let launch = state
+        .launch
+        .lock()
+        .map_err(|_| "用户端节点状态锁不可用".to_string())?
+        .clone();
+    Ok(UserNodeStatus {
+        enabled: launch.enabled,
+        registered: launch.registered,
+        online: launch.online,
+        node_id: launch.node_id,
+        node_name: launch.node_name,
+        api_base_url: launch.api_base_url,
+        owner_email: launch.owner_email,
+        owner_role: launch.owner_role,
+        last_register_at: launch.last_register_at,
+        last_heartbeat_at: launch.last_heartbeat_at,
+        recommended_heartbeat_sec: launch.recommended_heartbeat_sec,
+        p2p_running: launch.p2p_running,
+        p2p_virtual_ipv4: launch.p2p_virtual_ipv4,
+        p2p_peer_count: launch.p2p_peer_count,
+        p2p_hostname: launch.p2p_hostname,
+        last_error: launch.last_error,
+    })
+}
+
+fn update_user_node_identity(
+    state: &UserNodeAgentState,
+    identity: UserNodeIdentityInput,
+) -> Result<(), String> {
+    let mut current = state
+        .identity
+        .lock()
+        .map_err(|_| "用户端节点身份锁不可用".to_string())?;
+    current.email = identity.email.unwrap_or_default().trim().to_string();
+    current.role = identity.role.unwrap_or_default().trim().to_string();
+    current.display_name = identity.display_name.unwrap_or_default().trim().to_string();
+    Ok(())
+}
+
+fn infer_user_node_identity(
+    app: &AppHandle,
+    state: &UserNodeAgentState,
+) -> Result<UserNodeIdentityState, String> {
+    let mut identity = state
+        .identity
+        .lock()
+        .map_err(|_| "用户端节点身份锁不可用".to_string())?
+        .clone();
+    if identity.email.is_empty() {
+        if let Ok(profiles) = read_login_profiles_file(app) {
+            if let Some(last_used_email) = profiles.last_used_email {
+                identity.email = last_used_email.trim().to_string();
+            }
+        }
+    }
+    if !identity.email.is_empty() {
+        let mut stored = state
+            .identity
+            .lock()
+            .map_err(|_| "用户端节点身份锁不可用".to_string())?;
+        if stored.email.is_empty() {
+            stored.email = identity.email.clone();
+        }
+    }
+    Ok(identity)
+}
+
+fn local_hostname_fallback() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "cloud-relay-user".to_string())
+        .trim()
+        .to_string()
+}
+
+fn user_node_name_from_status(status: &P2PRuntimeStatus) -> String {
+    let hostname = if !status.node_hostname.trim().is_empty() {
+        status.node_hostname.trim().to_string()
+    } else {
+        local_hostname_fallback()
+    };
+    format!("驻阡陌用户端-{}", hostname)
 }
 
 fn p2p_runtime_work_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1161,6 +1461,286 @@ fn current_p2p_runtime_status(
     })
 }
 
+fn build_user_node_register_request(
+    node_id: String,
+    node_name: String,
+    owner: &UserNodeIdentityState,
+    api_base_url: &str,
+    p2p_status: &P2PRuntimeStatus,
+) -> AgentNodeRegisterRequest {
+    let mut metadata = HashMap::new();
+    metadata.insert("hostname".to_string(), local_hostname_fallback());
+    metadata.insert("os".to_string(), std::env::consts::OS.to_string());
+    metadata.insert("arch".to_string(), std::env::consts::ARCH.to_string());
+    metadata.insert("deploymentMode".to_string(), "user_console".to_string());
+    metadata.insert("nodeRole".to_string(), "local".to_string());
+    metadata.insert("environment".to_string(), "prod".to_string());
+    metadata.insert("trustLevel".to_string(), "trusted".to_string());
+    metadata.insert("appSurface".to_string(), "user-console".to_string());
+    metadata.insert("apiBaseUrl".to_string(), api_base_url.to_string());
+    metadata.insert("p2pRuntime".to_string(), "easytier".to_string());
+    metadata.insert("p2pRpcPortal".to_string(), USER_P2P_RPC_PORTAL.to_string());
+    metadata.insert(
+        "p2pRunning".to_string(),
+        if p2p_status.running { "true" } else { "false" }.to_string(),
+    );
+    if !p2p_status.virtual_ipv4.trim().is_empty() {
+        metadata.insert(
+            "p2pVirtualIpv4".to_string(),
+            p2p_status.virtual_ipv4.trim().to_string(),
+        );
+    }
+    if !p2p_status.node_hostname.trim().is_empty() {
+        metadata.insert(
+            "p2pHostname".to_string(),
+            p2p_status.node_hostname.trim().to_string(),
+        );
+    }
+    if !owner.email.is_empty() {
+        metadata.insert("owner".to_string(), owner.email.clone());
+    }
+    if !owner.role.is_empty() {
+        metadata.insert("ownerRole".to_string(), owner.role.clone());
+    }
+    if !owner.display_name.is_empty() {
+        metadata.insert("ownerDisplayName".to_string(), owner.display_name.clone());
+    }
+
+    AgentNodeRegisterRequest {
+        node_id,
+        node_name,
+        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        capabilities: AgentNodeCapabilities {
+            tcp_relay: false,
+            http_relay: false,
+            https_relay: false,
+            udp_relay: false,
+            p2p_assist: true,
+            socks5_connect: false,
+        },
+        metadata,
+    }
+}
+
+fn build_user_node_metrics(
+    owner: &UserNodeIdentityState,
+    p2p_status: &P2PRuntimeStatus,
+) -> HashMap<String, String> {
+    let mut metrics = HashMap::new();
+    metrics.insert("pid".to_string(), std::process::id().to_string());
+    metrics.insert("p2p:enabled".to_string(), "true".to_string());
+    metrics.insert(
+        "p2p:running".to_string(),
+        if p2p_status.running { "true" } else { "false" }.to_string(),
+    );
+    metrics.insert("p2p:runtime".to_string(), "easytier".to_string());
+    metrics.insert(
+        "p2p:rpc_portal".to_string(),
+        USER_P2P_RPC_PORTAL.to_string(),
+    );
+    metrics.insert(
+        "p2p:peer_count".to_string(),
+        p2p_status.peer_count.to_string(),
+    );
+    if !p2p_status.node_hostname.trim().is_empty() {
+        metrics.insert(
+            "p2p:hostname".to_string(),
+            p2p_status.node_hostname.trim().to_string(),
+        );
+    }
+    if !p2p_status.virtual_ipv4.trim().is_empty() {
+        metrics.insert(
+            "p2p:ipv4".to_string(),
+            p2p_status.virtual_ipv4.trim().to_string(),
+        );
+    }
+    if !p2p_status.instance_id.trim().is_empty() {
+        metrics.insert(
+            "p2p:instance_id".to_string(),
+            p2p_status.instance_id.trim().to_string(),
+        );
+    }
+    if !owner.email.is_empty() {
+        metrics.insert("user:email".to_string(), owner.email.clone());
+    }
+    if !owner.role.is_empty() {
+        metrics.insert("user:role".to_string(), owner.role.clone());
+    }
+    metrics
+}
+
+fn user_node_http_client() -> Result<Client, String> {
+    Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|err| err.to_string())
+}
+
+fn register_user_node(
+    client: &Client,
+    api_base_url: &str,
+    payload: &AgentNodeRegisterRequest,
+) -> Result<AgentNodeRegisterResponse, String> {
+    let response = client
+        .post(format!("{}/agent/register", api_base_url))
+        .json(payload)
+        .send()
+        .map_err(|err| format!("注册后台节点失败: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| format!("读取后台节点注册响应失败: {err}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "注册后台节点失败: http {} {}",
+            status.as_u16(),
+            body
+        ));
+    }
+    serde_json::from_str(&body).map_err(|err| format!("解析后台节点注册响应失败: {err}"))
+}
+
+fn heartbeat_user_node(
+    client: &Client,
+    api_base_url: &str,
+    payload: &AgentNodeHeartbeatRequest,
+) -> Result<(), String> {
+    let response = client
+        .post(format!("{}/agent/heartbeat", api_base_url))
+        .json(payload)
+        .send()
+        .map_err(|err| format!("发送后台节点心跳失败: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| format!("读取后台节点心跳响应失败: {err}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "发送后台节点心跳失败: http {} {}",
+            status.as_u16(),
+            body
+        ));
+    }
+    Ok(())
+}
+
+fn sync_user_node_registration(
+    app: &AppHandle,
+    runtime: &P2PRuntimeManagerState,
+    state: &UserNodeAgentState,
+) -> Result<UserNodeStatus, String> {
+    let _guard = state
+        .op
+        .lock()
+        .map_err(|_| "用户端节点同步锁不可用".to_string())?;
+
+    ensure_config_dir(app)?;
+    let config = load_app_config(app.clone()).unwrap_or_default();
+    let api_base_url = normalize_api_base_url(config.api_base_url.as_deref());
+    let p2p_status = current_p2p_runtime_status(app, runtime).unwrap_or(P2PRuntimeStatus {
+        available: false,
+        configured: false,
+        running: false,
+        pid: None,
+        started_at: None,
+        executable_path: String::new(),
+        work_dir: String::new(),
+        stdout_log_path: String::new(),
+        stderr_log_path: String::new(),
+        args_summary: String::new(),
+        last_error: String::new(),
+        machine_id: String::new(),
+        rpc_portal: USER_P2P_RPC_PORTAL.to_string(),
+        node_hostname: String::new(),
+        virtual_ipv4: String::new(),
+        instance_id: String::new(),
+        peer_count: 0,
+        connected_peers: Vec::new(),
+    });
+    let node_id = load_or_create_user_node_id(app)?;
+    let node_name = user_node_name_from_status(&p2p_status);
+
+    let sync_result = (|| -> Result<UserNodeStatus, String> {
+        let identity = infer_user_node_identity(app, state)?;
+        let client = user_node_http_client()?;
+        let register_payload = build_user_node_register_request(
+            node_id.clone(),
+            node_name.clone(),
+            &identity,
+            &api_base_url,
+            &p2p_status,
+        );
+        let register_out = register_user_node(&client, &api_base_url, &register_payload)?;
+        let recommended = register_out
+            .recommended_heartbeat_sec
+            .unwrap_or(USER_NODE_HEARTBEAT_SEC);
+        let heartbeat_payload = AgentNodeHeartbeatRequest {
+            node_id: register_out.node_id.clone(),
+            metrics: build_user_node_metrics(&identity, &p2p_status),
+            observed_at: chrono_like_now_rfc3339(),
+            active_tunnels: 0,
+        };
+        heartbeat_user_node(&client, &api_base_url, &heartbeat_payload)?;
+
+        let now = now_millis();
+        let mut launch = state
+            .launch
+            .lock()
+            .map_err(|_| "用户端节点状态锁不可用".to_string())?;
+        launch.enabled = true;
+        launch.registered = true;
+        launch.online = true;
+        launch.node_id = register_out.node_id;
+        launch.node_name = node_name.clone();
+        launch.api_base_url = api_base_url.clone();
+        launch.owner_email = identity.email;
+        launch.owner_role = identity.role;
+        launch.last_register_at = Some(now);
+        launch.last_heartbeat_at = Some(now);
+        launch.recommended_heartbeat_sec = recommended;
+        launch.p2p_running = p2p_status.running;
+        launch.p2p_virtual_ipv4 = p2p_status.virtual_ipv4.clone();
+        launch.p2p_peer_count = p2p_status.peer_count;
+        launch.p2p_hostname = p2p_status.node_hostname.clone();
+        launch.last_error.clear();
+        drop(launch);
+
+        current_user_node_status(state)
+    })();
+
+    if let Err(err) = &sync_result {
+        if let Ok(mut launch) = state.launch.lock() {
+            launch.enabled = true;
+            launch.online = false;
+            launch.node_id = node_id;
+            launch.node_name = node_name;
+            launch.api_base_url = api_base_url;
+            launch.p2p_running = p2p_status.running;
+            launch.p2p_virtual_ipv4 = p2p_status.virtual_ipv4;
+            launch.p2p_peer_count = p2p_status.peer_count;
+            launch.p2p_hostname = p2p_status.node_hostname;
+            launch.last_error = err.clone();
+        }
+    }
+
+    sync_result
+}
+
+fn chrono_like_now_rfc3339() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{}", time_like_rfc3339(now))
+}
+
+fn time_like_rfc3339(now_secs: u64) -> String {
+    use std::time::Duration as StdDuration;
+    let timestamp = UNIX_EPOCH + StdDuration::from_secs(now_secs);
+    let datetime: chrono::DateTime<chrono::Utc> = timestamp.into();
+    datetime.to_rfc3339()
+}
+
 fn stop_p2p_runtime_process(
     app: &AppHandle,
     runtime: &P2PRuntimeManagerState,
@@ -1306,6 +1886,20 @@ fn maybe_auto_start_p2p(app: &AppHandle) {
     if let Some(runtime) = app.try_state::<P2PRuntimeManagerState>() {
         let _ = start_p2p_runtime_internal(app, &runtime);
     }
+}
+
+fn start_user_node_agent_loop(app: &AppHandle) {
+    let app_handle = app.clone();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(USER_NODE_HEARTBEAT_SEC));
+        let Some(runtime) = app_handle.try_state::<P2PRuntimeManagerState>() else {
+            continue;
+        };
+        let Some(node_state) = app_handle.try_state::<UserNodeAgentState>() else {
+            continue;
+        };
+        let _ = sync_user_node_registration(&app_handle, &runtime, &node_state);
+    });
 }
 
 fn now_millis() -> u64 {
@@ -1514,6 +2108,7 @@ fn main() {
         }))
         .manage(http_state)
         .manage(P2PRuntimeManagerState::default())
+        .manage(UserNodeAgentState::default())
         .setup(move |app| {
             ensure_config_dir(app.handle())
                 .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
@@ -1533,6 +2128,13 @@ fn main() {
                 let _ = window.show();
             }
             maybe_auto_start_p2p(app.handle());
+            if let (Some(runtime), Some(node_state)) = (
+                app.handle().try_state::<P2PRuntimeManagerState>(),
+                app.handle().try_state::<UserNodeAgentState>(),
+            ) {
+                let _ = sync_user_node_registration(app.handle(), &runtime, &node_state);
+            }
+            start_user_node_agent_loop(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1558,6 +2160,8 @@ fn main() {
             p2p_runtime_status,
             p2p_runtime_start,
             p2p_runtime_stop,
+            user_node_status,
+            user_node_sync,
             open_p2p_runtime_log,
             window_start_drag,
             window_minimize,
@@ -1565,6 +2169,7 @@ fn main() {
             window_request_close,
             app_exit,
             open_external,
+            open_service_workspace,
             open_additional_window,
             set_auto_start,
             config_dir,

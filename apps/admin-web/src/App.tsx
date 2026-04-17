@@ -1408,8 +1408,8 @@ function buildAuditQuery(filter: AuditFilterState) {
                 <section className="subpanel">
                   <div className="section-head compact-head">
                     <div>
-                      <h3>P2P readiness 摘要</h3>
-                      <span className="muted-line">这轮只建立 P2P 的控制面语义与运维表达，不提供 NAT 穿透、打洞或真实 P2P 数据面。</span>
+                      <h3>P2P 节点与服务摘要</h3>
+                      <span className="muted-line">当前已经纳入真实 EasyTier 节点在线态与服务入口登记；但 tunnel 级数据面切换仍未统一实现。</span>
                     </div>
                   </div>
                   <div className="signal-strip">
@@ -1419,9 +1419,9 @@ function buildAuditQuery(filter: AuditFilterState) {
                     <SignalCard label="当前主运行语义" value={p2pPreferredTunnelCount > 0 ? "仍为 relay_only 数据面" : "全部 relay_only"} />
                   </div>
                   <div className="empty-state placement-panel">
-                    <strong>P2P 当前仅为下一阶段能力预留</strong>
-                    <p>当前已支持的只是 control-plane / 管理台表达：当前已加载节点中的 P2P 协助能力、具备基础 readiness 条件的潜在候选可见性、transport policy 预留位。</p>
-                    <p>当前为什么仍走 relay_only：本轮没有实现 NAT 穿透、ICE/STUN/TURN、复杂握手或真实 P2P 数据面。</p>
+                    <strong>P2P 当前处于“节点已接入、服务入口已登记、tunnel 数据面待统一”阶段</strong>
+                    <p>当前已具备的是真实 EasyTier 节点在线态、虚拟 IPv4 遥测、P2P 服务入口登记，以及用户端连接器可消费的服务目录。</p>
+                    <p>当前为什么 tunnel 仍以 relay 为主：还没有把 NAT 穿透、统一调度、统计口径和完整服务数据面全部收敛到一套 P2P runtime。</p>
                   </div>
                 </section>
                 {relayRuntime?.pools?.length ? (
@@ -2064,14 +2064,14 @@ function buildAuditQuery(filter: AuditFilterState) {
                         <div className="section-head compact-head">
                           <div>
                             <h3>P2P / transport policy</h3>
-                            <span className="muted-line">当前只承认 P2P 的控制面预留语义，不改现有 relay runtime。</span>
+                            <span className="muted-line">当前已存在真实 EasyTier 节点与服务入口，但 tunnel runtime 仍需要单独观察，不能把配置意图当成运行事实。</span>
                           </div>
                         </div>
                         <div className="empty-state placement-panel">
-                          <strong>{selectedTunnel.transportPolicy === "p2p_preferred" ? "p2p_preferred（预留语义）" : "relay_only（当前默认）"}</strong>
-                          <p>当前为什么仍走 relay_only：本轮没有实现 NAT 穿透、打洞、ICE/STUN/TURN 或真实 P2P 数据面。</p>
+                          <strong>{selectedTunnel.transportPolicy === "p2p_preferred" ? "p2p_preferred（目标语义）" : "relay_only（当前默认）"}</strong>
+                          <p>当前为什么大多数 tunnel 仍走 relay：统一的 P2P runtime、NAT 穿透、服务级调度和流量口径还没有完全并入现网。</p>
                           <p>当前 runtimePath/runtimeState 代表运行事实；即使 transportPolicy 为 <code>p2p_preferred</code>，只要 runtime 仍上报 <code>relay</code> / <code>pending</code>，就不能表达成“当前已走 p2p”。</p>
-                          <p>当前可见性价值：让运维能知道这个 tunnel 将来是否优先尝试 P2P，而不是只能脑补 transport policy。</p>
+                          <p>当前可见性价值：让运维把“节点已入网”“服务入口已具备”“tunnel 当前是否真的走 p2p”这三件事分开看。</p>
                         </div>
                       </section>
                     </>
@@ -2108,7 +2108,7 @@ function buildAuditQuery(filter: AuditFilterState) {
                         {tunnelEditForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelEditForm.publicPort || "<公网端口>"}</code></div> : null}
                         {tunnelEditForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelEditForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
                         {tunnelEditForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
-                        <div className="form-note">P2P control-plane V1：{tunnelEditNodeOption?.supportsP2P ? <><code>p2p_preferred</code> 当前可选，但仅为预留语义，不代表已支持真实 P2P 数据面。</> : <>当前节点不具备 <code>p2pAssist</code>，不建议设为 <code>p2p_preferred</code>；当前运行仍按 <code>relay_only</code> 理解。</>}</div>
+                        <div className="form-note">P2P 服务语义：{tunnelEditNodeOption?.supportsP2P ? <><code>p2p_preferred</code> 当前可选，表示这个 tunnel 未来优先接入 P2P 运行面；但运行事实仍要看 <code>runtimePath/runtimeState</code>。</> : <>当前节点不具备 <code>p2pAssist</code>，不建议设为 <code>p2p_preferred</code>；当前运行仍按 <code>relay_only</code> 理解。</>}</div>
                         <div className="form-note">服务双入口登记：同一个 tunnel 继续承担云端反代，同时可以登记一个 P2P 入口给用户端使用；不需要额外新建一条“P2P tunnel”。</div>
                         <label><span>服务键</span><input value={tunnelEditForm.serviceKey} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceKey: event.target.value } : current)} placeholder="例如 drive / gallery / notes" /></label>
                         <label><span>服务标题</span><input value={tunnelEditForm.serviceTitle} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceTitle: event.target.value } : current)} placeholder="例如 网盘服务" /></label>
@@ -2177,7 +2177,7 @@ function buildAuditQuery(filter: AuditFilterState) {
                         {tunnelFormNode?.status !== "online" ? <div className="form-note">当前选中节点 offline。按现有语义仍可查看或保留配置，但当前不可通信。</div> : null}
                         {tunnelFormNode?.isolated ? <div className="form-note">当前选中节点已隔离，后端会拒绝新建 tunnel。</div> : null}
                         {tunnelForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
-                        <div className="form-note">P2P control-plane V1：{tunnelFormNodeOption?.supportsP2P ? <><code>p2p_preferred</code> 仅作为下一阶段 transport policy 预留语义，不代表已支持 P2P 数据面。</> : <>当前节点不具备 <code>p2pAssist</code>，因此不建议也不开放 <code>p2p_preferred</code>；当前创建按 <code>relay_only</code> 理解。</>}</div>
+                        <div className="form-note">P2P 服务语义：{tunnelFormNodeOption?.supportsP2P ? <><code>p2p_preferred</code> 当前作为下一阶段 P2P 运行面的目标语义保留；运行事实仍以 <code>runtimePath/runtimeState</code> 为准。</> : <>当前节点不具备 <code>p2pAssist</code>，因此不建议也不开放 <code>p2p_preferred</code>；当前创建按 <code>relay_only</code> 理解。</>}</div>
                         <div className="form-note">服务双入口登记：如果这个 tunnel 对应的是网盘、图床或其他用户可访问服务，就在这里同时登记云端入口和 P2P 入口。</div>
                         <label><span>服务键</span><input value={tunnelForm.serviceKey} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceKey: event.target.value }))} placeholder="例如 drive / gallery / notes" /></label>
                         <label><span>服务标题</span><input value={tunnelForm.serviceTitle} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceTitle: event.target.value }))} placeholder="例如 网盘服务" /></label>
