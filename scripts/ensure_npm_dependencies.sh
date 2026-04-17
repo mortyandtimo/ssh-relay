@@ -70,6 +70,30 @@ run_install() {
   popd >/dev/null
 }
 
+required_local_bins() {
+  if grep -q '"typescript"' "$PACKAGE_JSON"; then
+    echo "tsc"
+  fi
+  if grep -q '"vite"' "$PACKAGE_JSON"; then
+    echo "vite"
+  fi
+  if grep -q '"@tauri-apps/cli"' "$PACKAGE_JSON"; then
+    echo "tauri"
+  fi
+}
+
+list_missing_local_bins() {
+  local bin_name
+  while IFS= read -r bin_name; do
+    if [ -z "$bin_name" ]; then
+      continue
+    fi
+    if [ ! -x "$NODE_MODULES_DIR/.bin/$bin_name" ]; then
+      printf '%s\n' "$bin_name"
+    fi
+  done < <(required_local_bins)
+}
+
 fingerprint_inputs=("$PACKAGE_JSON")
 if [ -f "$LOCK_FILE" ]; then
   fingerprint_inputs+=("$LOCK_FILE")
@@ -80,12 +104,19 @@ if [ "$FORCE_NPM_INSTALL" = "1" ]; then
   run_install
 elif [ ! -d "$NODE_MODULES_DIR" ]; then
   run_install
-elif [ ! -f "$STAMP_FILE" ]; then
-  echo "Reusing existing npm dependencies in $APP_DIR (adopting pre-existing node_modules without fingerprint stamp)"
-elif [ "$(cat "$STAMP_FILE")" != "$CURRENT_FINGERPRINT" ]; then
-  run_install
 else
-  echo "Reusing existing npm dependencies in $APP_DIR"
+  MISSING_LOCAL_BINS="$(list_missing_local_bins)"
+  if [ -n "$MISSING_LOCAL_BINS" ]; then
+    echo "Existing node_modules in $APP_DIR is incomplete; missing local bins:" >&2
+    printf '%s\n' "$MISSING_LOCAL_BINS" | sed 's/^/  /' >&2
+    run_install
+  elif [ ! -f "$STAMP_FILE" ]; then
+    echo "Reusing existing npm dependencies in $APP_DIR (adopting pre-existing node_modules without fingerprint stamp)"
+  elif [ "$(cat "$STAMP_FILE")" != "$CURRENT_FINGERPRINT" ]; then
+    run_install
+  else
+    echo "Reusing existing npm dependencies in $APP_DIR"
+  fi
 fi
 
 mkdir -p "$NODE_MODULES_DIR"
