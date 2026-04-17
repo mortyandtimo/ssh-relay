@@ -6,6 +6,8 @@ TARGET="${1:-all}"
 SERVER_URL="${SERVER_URL:-}"
 COOKIE_FILE="${COOKIE_FILE:-}"
 VERSION="${VERSION:-}"
+UPLOAD_RETRY_COUNT="${UPLOAD_RETRY_COUNT:-4}"
+UPLOAD_RETRY_DELAY="${UPLOAD_RETRY_DELAY:-2}"
 
 usage() {
   cat <<'EOF'
@@ -62,27 +64,58 @@ upload_one() {
   local file_hash
   file_hash="$(sha256_file "$file_path")"
   echo "Uploading $product/$channel -> $file_path"
-  local response_file status_code
+  local response_file status_code curl_exit attempt max_attempts retry_delay
   response_file="$(mktemp)"
-  status_code="$(curl --silent --show-error --location \
-    -b "$COOKIE_FILE" \
-    -F "product=$product" \
-    -F "channel=$channel" \
-    -F "version=$VERSION" \
-    -F "sha256=$file_hash" \
-    -F "file=@$file_path" \
-    -o "$response_file" \
-    -w '%{http_code}' \
-    "$SERVER_URL/api/admin/release-artifacts/upload")"
-  if [ "$status_code" -lt 200 ] || [ "$status_code" -ge 300 ]; then
-    echo "upload failed: http $status_code" >&2
+  max_attempts="$UPLOAD_RETRY_COUNT"
+  retry_delay="$UPLOAD_RETRY_DELAY"
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    status_code=""
+    curl_exit=0
+    if ! status_code="$(curl --silent --show-error --location \
+      -b "$COOKIE_FILE" \
+      -F "product=$product" \
+      -F "channel=$channel" \
+      -F "version=$VERSION" \
+      -F "sha256=$file_hash" \
+      -F "file=@$file_path" \
+      -o "$response_file" \
+      -w '%{http_code}' \
+      "$SERVER_URL/api/admin/release-artifacts/upload")"; then
+      curl_exit=$?
+    fi
+
+    if [ "$curl_exit" -eq 0 ] && [ "$status_code" -ge 200 ] && [ "$status_code" -lt 300 ]; then
+      cat "$response_file"
+      rm -f "$response_file"
+      echo
+      return 0
+    fi
+
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      if [ "$curl_exit" -ne 0 ] || [ "$status_code" = "408" ] || [ "$status_code" = "429" ] || [ "$status_code" = "500" ] || [ "$status_code" = "502" ] || [ "$status_code" = "503" ] || [ "$status_code" = "504" ]; then
+        if [ -n "$status_code" ]; then
+          echo "warning: upload attempt $attempt/$max_attempts failed with http $status_code; retrying in ${retry_delay}s" >&2
+        else
+          echo "warning: upload attempt $attempt/$max_attempts failed with curl exit $curl_exit; retrying in ${retry_delay}s" >&2
+        fi
+        sleep "$retry_delay"
+        continue
+      fi
+    fi
+
+    if [ -n "$status_code" ]; then
+      echo "upload failed: http $status_code" >&2
+    else
+      echo "upload failed: curl exit $curl_exit" >&2
+    fi
     cat "$response_file" >&2
     rm -f "$response_file"
     return 1
-  fi
-  cat "$response_file"
+  done
+
   rm -f "$response_file"
-  echo
+  return 1
 }
 
 upload_publisher() {
@@ -119,10 +152,19 @@ if [ ! -f "$COOKIE_FILE" ]; then
 fi
 
 SERVER_URL="${SERVER_URL%/}"
-VERSION="${VERSION:-$(detect_default_version)}"
+DETECTED_VERSION="$(detect_default_version)"
+VERSION_SOURCE="auto"
+if [ -n "$VERSION" ]; then
+  VERSION_SOURCE="env"
+else
+  VERSION="$DETECTED_VERSION"
+fi
 
 echo "Release upload target: $SERVER_URL"
 echo "Release version: $VERSION"
+if [ "$VERSION_SOURCE" = "env" ] && [ "$VERSION" != "$DETECTED_VERSION" ]; then
+  echo "warning: VERSION came from environment; current checkout would default to $DETECTED_VERSION" >&2
+fi
 
 case "$TARGET" in
   publisher)
