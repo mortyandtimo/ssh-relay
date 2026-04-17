@@ -10,6 +10,7 @@ import type {
   ServerMetrics,
   TunnelListResponse,
   TunnelProbeResult,
+  UserServiceCatalogResponse,
   CertificateSpec,
   ManagedHTTPSDomainListResponse,
 } from "./types";
@@ -98,6 +99,9 @@ export function createDesktopApi(apiBaseUrl = "", transport?: DesktopApiTranspor
     },
     loadCurrentUser() {
       return requestJSON<AuthUserResponse>("/api/auth/me");
+    },
+    loadUserServices() {
+      return requestJSON<UserServiceCatalogResponse>("/api/user/services");
     },
     login(email: string, password: string) {
       return requestJSON<AuthUserResponse>(

@@ -96,6 +96,35 @@ export type TunnelProbeResult = {
   targetEntry: string;
 };
 
+export type UserServiceEntry = {
+  key: string;
+  title: string;
+  kind: string;
+  summary?: string;
+  nodeId: string;
+  nodeName?: string;
+  nodeStatus?: string;
+  tunnelId: string;
+  tunnelName: string;
+  tunnelType: string;
+  tunnelStatus: string;
+  transportPolicy: string;
+  runtimePath?: string;
+  runtimeState?: string;
+  healthStatus?: string;
+  publicUrl?: string;
+  p2pUrl?: string;
+  cloudAccess: string;
+  p2pAccess: string;
+  cloudAllowed: boolean;
+  p2pAllowed: boolean;
+  preferredPath?: string;
+};
+
+export type UserServiceCatalogResponse = {
+  items: UserServiceEntry[];
+};
+
 export type ServerMetrics = {
   service: string;
   startedAt: string;

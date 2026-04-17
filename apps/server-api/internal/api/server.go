@@ -135,6 +135,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/auth/refresh", s.handleRefresh)
 	s.mux.HandleFunc("/api/auth/logout", s.handleLogout)
 	s.mux.Handle("/api/auth/me", s.requireRole(types.UserRoleUser, http.HandlerFunc(s.handleAuthMe)))
+	s.mux.Handle("/api/user/services", s.requireRole(types.UserRoleUser, http.HandlerFunc(s.handleUserServices)))
 
 	s.mux.Handle("/api/users", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleUsers)))
 	s.mux.Handle("/api/users/", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleUserByID)))
@@ -1095,9 +1096,24 @@ func (s *Server) handleTunnelByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "nodeId is required")
 			return
 		}
+		currentTunnel, err := s.store.GetTunnel(r.Context(), id)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, store.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
 		spec := req.TunnelSpec
 		spec.ID = id
 		spec.NodeID = req.NodeID
+		if spec.Metadata == nil {
+			spec.Metadata = make(map[string]string, len(currentTunnel.Metadata))
+			for key, value := range currentTunnel.Metadata {
+				spec.Metadata[key] = value
+			}
+		}
 		normalized, err := normalizeManagedTunnelSpec(spec)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())

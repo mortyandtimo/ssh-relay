@@ -18,6 +18,10 @@ export type AppConfig = {
   p2pAutoStart?: boolean;
   driveFallbackPolicy?: "admin_only" | "never";
   imageBulkUploadMode?: "p2p_bulk_https_light" | "https_only";
+  driveCloudUrl?: string;
+  driveP2pUrl?: string;
+  galleryCloudUrl?: string;
+  galleryP2pUrl?: string;
   p2pNetworkName?: string;
   p2pNetworkSecret?: string;
   p2pPeerUrl?: string;
@@ -222,6 +226,17 @@ export async function stopP2PRuntime(): Promise<P2PRuntimeStatus> {
 
 export async function openP2PRuntimeLog(kind: "stdout" | "stderr"): Promise<void> {
   await invoke("open_p2p_runtime_log", { kind });
+}
+
+export async function openExternal(url: string): Promise<void> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    if (!opened) {
+      throw new Error("打开失败");
+    }
+    return;
+  }
+  await invoke("open_external", { url });
 }
 
 export async function windowStartDrag(): Promise<void> {

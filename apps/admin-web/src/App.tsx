@@ -122,6 +122,7 @@ type TunnelSpec = {
   lastProbeError?: string;
   lastProbedAt?: string;
   lastProbeTargetEntry?: string;
+  metadata?: Record<string, string>;
 };
 
 type ServerMetrics = {
@@ -184,6 +185,15 @@ type TunnelForm = {
   domain: string;
   tlsMode: "" | "edge_terminate";
   probePath: string;
+  serviceKey: string;
+  serviceTitle: string;
+  serviceKind: "app" | "drive" | "gallery";
+  serviceSummary: string;
+  servicePublicUrl: string;
+  serviceP2PUrl: string;
+  serviceCloudAccess: "all_users" | "admin_only" | "disabled";
+  serviceP2PAccess: "all_users" | "admin_only" | "disabled";
+  servicePreferredPath: "dual" | "cloud" | "p2p";
 };
 
 type TunnelEditForm = {
@@ -199,6 +209,16 @@ type TunnelEditForm = {
   status: string;
   type: string;
   transportPolicy: string;
+  serviceKey: string;
+  serviceTitle: string;
+  serviceKind: "app" | "drive" | "gallery";
+  serviceSummary: string;
+  servicePublicUrl: string;
+  serviceP2PUrl: string;
+  serviceCloudAccess: "all_users" | "admin_only" | "disabled";
+  serviceP2PAccess: "all_users" | "admin_only" | "disabled";
+  servicePreferredPath: "dual" | "cloud" | "p2p";
+  existingMetadata: Record<string, string>;
 };
 
 type TunnelTransportPolicy = "relay_only" | "p2p_preferred";
@@ -265,6 +285,15 @@ const initialTunnelForm: TunnelForm = {
   domain: "",
   tlsMode: "",
   probePath: "/",
+  serviceKey: "",
+  serviceTitle: "",
+  serviceKind: "app",
+  serviceSummary: "",
+  servicePublicUrl: "",
+  serviceP2PUrl: "",
+  serviceCloudAccess: "all_users",
+  serviceP2PAccess: "all_users",
+  servicePreferredPath: "dual",
 };
 
 const initialAuditFilter: AuditFilterState = {
@@ -294,6 +323,18 @@ const initialNodeFilter: NodeFilterState = {
   offset: 0,
 };
 
+const serviceMetadataKeys = [
+  "serviceKey",
+  "serviceTitle",
+  "serviceKind",
+  "serviceSummary",
+  "servicePublicUrl",
+  "serviceP2PUrl",
+  "serviceCloudAccess",
+  "serviceP2PAccess",
+  "servicePreferredPath",
+] as const;
+
 function tunnelPublicPortRequired(type: string) {
   return type !== "https";
 }
@@ -312,6 +353,54 @@ function serializeTunnelPublicPort(type: string, publicPort: string) {
     return trimmed ? Number(trimmed) : 0;
   }
   return Number(trimmed);
+}
+
+function extractTunnelServiceFields(metadata?: Record<string, string>) {
+  return {
+    serviceKey: metadata?.serviceKey || "",
+    serviceTitle: metadata?.serviceTitle || "",
+    serviceKind: (metadata?.serviceKind || "app") as "app" | "drive" | "gallery",
+    serviceSummary: metadata?.serviceSummary || "",
+    servicePublicUrl: metadata?.servicePublicUrl || "",
+    serviceP2PUrl: metadata?.serviceP2PUrl || "",
+    serviceCloudAccess: (metadata?.serviceCloudAccess || "all_users") as "all_users" | "admin_only" | "disabled",
+    serviceP2PAccess: (metadata?.serviceP2PAccess || "all_users") as "all_users" | "admin_only" | "disabled",
+    servicePreferredPath: (metadata?.servicePreferredPath || "dual") as "dual" | "cloud" | "p2p",
+  };
+}
+
+function buildTunnelServiceMetadata(
+  baseMetadata: Record<string, string> | undefined,
+  form: Pick<
+    TunnelForm | TunnelEditForm,
+    "serviceKey" |
+    "serviceTitle" |
+    "serviceKind" |
+    "serviceSummary" |
+    "servicePublicUrl" |
+    "serviceP2PUrl" |
+    "serviceCloudAccess" |
+    "serviceP2PAccess" |
+    "servicePreferredPath"
+  >,
+) {
+  const next = { ...(baseMetadata || {}) };
+  for (const key of serviceMetadataKeys) {
+    delete next[key];
+  }
+  if (!form.serviceKey.trim()) {
+    return next;
+  }
+  next.serviceKey = form.serviceKey.trim().toLowerCase();
+  if (form.serviceTitle.trim()) next.serviceTitle = form.serviceTitle.trim();
+  if (form.serviceKind.trim()) next.serviceKind = form.serviceKind.trim();
+  if (form.serviceSummary.trim()) next.serviceSummary = form.serviceSummary.trim();
+  if (form.servicePublicUrl.trim()) next.servicePublicUrl = form.servicePublicUrl.trim();
+  if (form.serviceP2PUrl.trim()) next.serviceP2PUrl = form.serviceP2PUrl.trim();
+  next.serviceCloudAccess = form.serviceCloudAccess;
+  next.serviceP2PAccess = form.serviceP2PAccess;
+  next.servicePreferredPath = form.servicePreferredPath;
+  return next;
 }
 
 export default function App() {
@@ -896,6 +985,7 @@ function buildAuditQuery(filter: AuditFilterState) {
           domain: tunnelForm.domain || undefined,
           tlsMode: tunnelForm.type === "https" ? (tunnelForm.tlsMode || "edge_terminate") : undefined,
           probePath: tunnelForm.type === "http" || tunnelForm.type === "https" ? tunnelForm.probePath : undefined,
+          metadata: buildTunnelServiceMetadata(undefined, tunnelForm),
           status: "active",
         }),
       });
@@ -932,6 +1022,7 @@ function buildAuditQuery(filter: AuditFilterState) {
           domain: tunnelEditForm.domain || undefined,
           tlsMode: tunnelEditForm.type === "https" ? (tunnelEditForm.tlsMode || "edge_terminate") : undefined,
           probePath: tunnelEditForm.type === "http" || tunnelEditForm.type === "https" ? tunnelEditForm.probePath : undefined,
+          metadata: buildTunnelServiceMetadata(tunnelEditForm.existingMetadata, tunnelEditForm),
           status: tunnelEditForm.status,
         }),
       });
@@ -963,6 +1054,7 @@ function buildAuditQuery(filter: AuditFilterState) {
           domain: tunnel.domain || undefined,
           tlsMode: tunnel.type === "https" ? (tunnel.tlsMode || "edge_terminate") : undefined,
           probePath: tunnel.type === "http" || tunnel.type === "https" ? tunnel.probePath || "/" : undefined,
+          metadata: tunnel.metadata,
           status,
         }),
       });
@@ -1881,6 +1973,9 @@ function buildAuditQuery(filter: AuditFilterState) {
                             <FactRow label="runtimePath" value={<code>{selectedTunnel.runtimePath || "尚无运行态上报"}</code>} />
                             <FactRow label="runtimeState" value={<code>{selectedTunnel.runtimeState || "尚无运行态上报"}</code>} />
                             <FactRow label="lastFailureReason" value={<code>{selectedTunnel.lastFailureReason || "尚无运行态上报"}</code>} />
+                            {selectedTunnel.metadata?.serviceKey ? <FactRow label="serviceKey" value={<code>{selectedTunnel.metadata.serviceKey}</code>} /> : null}
+                            {selectedTunnel.metadata?.servicePublicUrl ? <FactRow label="servicePublicUrl" value={<code>{selectedTunnel.metadata.servicePublicUrl}</code>} /> : null}
+                            {selectedTunnel.metadata?.serviceP2PUrl ? <FactRow label="serviceP2PUrl" value={<code>{selectedTunnel.metadata.serviceP2PUrl}</code>} /> : null}
                             {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <FactRow label="probePath" value={<code>{selectedTunnel.probePath || "/"}</code>} /> : null}
                             {selectedTunnel.type === "https" ? <FactRow label="publicPort" value={<span><code>{selectedTunnel.publicPort}</code> 仅作内部保留字段</span>} /> : null}
                           </div>
@@ -1992,6 +2087,16 @@ function buildAuditQuery(filter: AuditFilterState) {
                         {tunnelEditForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelEditForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
                         {tunnelEditForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
                         <div className="form-note">P2P control-plane V1：{tunnelEditNodeOption?.supportsP2P ? <><code>p2p_preferred</code> 当前可选，但仅为预留语义，不代表已支持真实 P2P 数据面。</> : <>当前节点不具备 <code>p2pAssist</code>，不建议设为 <code>p2p_preferred</code>；当前运行仍按 <code>relay_only</code> 理解。</>}</div>
+                        <div className="form-note">服务双入口登记：同一个 tunnel 继续承担云端反代，同时可以登记一个 P2P 入口给用户端使用；不需要额外新建一条“P2P tunnel”。</div>
+                        <label><span>服务键</span><input value={tunnelEditForm.serviceKey} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceKey: event.target.value } : current)} placeholder="例如 drive / gallery / notes" /></label>
+                        <label><span>服务标题</span><input value={tunnelEditForm.serviceTitle} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceTitle: event.target.value } : current)} placeholder="例如 网盘服务" /></label>
+                        <label><span>服务类型</span><select value={tunnelEditForm.serviceKind} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceKind: event.target.value as "app" | "drive" | "gallery" } : current)}><option value="app">app</option><option value="drive">drive</option><option value="gallery">gallery</option></select></label>
+                        <label><span>服务摘要</span><input value={tunnelEditForm.serviceSummary} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceSummary: event.target.value } : current)} placeholder="用户端里显示的说明文案" /></label>
+                        <label><span>云端入口 URL</span><input value={tunnelEditForm.servicePublicUrl} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, servicePublicUrl: event.target.value } : current)} placeholder="留空则按当前 tunnel 入口推导" /></label>
+                        <label><span>P2P 入口 URL</span><input value={tunnelEditForm.serviceP2PUrl} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PUrl: event.target.value } : current)} placeholder="例如 http://10.126.126.20:8080" /></label>
+                        <label><span>云端入口权限</span><select value={tunnelEditForm.serviceCloudAccess} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceCloudAccess: event.target.value as "all_users" | "admin_only" | "disabled" } : current)}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
+                        <label><span>P2P 入口权限</span><select value={tunnelEditForm.serviceP2PAccess} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PAccess: event.target.value as "all_users" | "admin_only" | "disabled" } : current)}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
+                        <label><span>用户端首选路径</span><select value={tunnelEditForm.servicePreferredPath} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, servicePreferredPath: event.target.value as "dual" | "cloud" | "p2p" } : current)}><option value="dual">dual</option><option value="cloud">cloud</option><option value="p2p">p2p</option></select></label>
                         <div className="detail-grid readonly-grid">
                           <DetailItem label="nodeId" value={tunnelEditForm.nodeId} />
                           <DetailItem label="status" value={tunnelEditForm.status} />
@@ -2051,6 +2156,16 @@ function buildAuditQuery(filter: AuditFilterState) {
                         {tunnelFormNode?.isolated ? <div className="form-note">当前选中节点已隔离，后端会拒绝新建 tunnel。</div> : null}
                         {tunnelForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
                         <div className="form-note">P2P control-plane V1：{tunnelFormNodeOption?.supportsP2P ? <><code>p2p_preferred</code> 仅作为下一阶段 transport policy 预留语义，不代表已支持 P2P 数据面。</> : <>当前节点不具备 <code>p2pAssist</code>，因此不建议也不开放 <code>p2p_preferred</code>；当前创建按 <code>relay_only</code> 理解。</>}</div>
+                        <div className="form-note">服务双入口登记：如果这个 tunnel 对应的是网盘、图床或其他用户可访问服务，就在这里同时登记云端入口和 P2P 入口。</div>
+                        <label><span>服务键</span><input value={tunnelForm.serviceKey} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceKey: event.target.value }))} placeholder="例如 drive / gallery / notes" /></label>
+                        <label><span>服务标题</span><input value={tunnelForm.serviceTitle} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceTitle: event.target.value }))} placeholder="例如 网盘服务" /></label>
+                        <label><span>服务类型</span><select value={tunnelForm.serviceKind} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceKind: event.target.value as "app" | "drive" | "gallery" }))}><option value="app">app</option><option value="drive">drive</option><option value="gallery">gallery</option></select></label>
+                        <label><span>服务摘要</span><input value={tunnelForm.serviceSummary} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceSummary: event.target.value }))} placeholder="用户端里显示的说明文案" /></label>
+                        <label><span>云端入口 URL</span><input value={tunnelForm.servicePublicUrl} onChange={(event) => setTunnelForm((current) => ({ ...current, servicePublicUrl: event.target.value }))} placeholder="留空则按当前 tunnel 入口推导" /></label>
+                        <label><span>P2P 入口 URL</span><input value={tunnelForm.serviceP2PUrl} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PUrl: event.target.value }))} placeholder="例如 http://10.126.126.20:8080" /></label>
+                        <label><span>云端入口权限</span><select value={tunnelForm.serviceCloudAccess} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceCloudAccess: event.target.value as "all_users" | "admin_only" | "disabled" }))}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
+                        <label><span>P2P 入口权限</span><select value={tunnelForm.serviceP2PAccess} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PAccess: event.target.value as "all_users" | "admin_only" | "disabled" }))}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
+                        <label><span>用户端首选路径</span><select value={tunnelForm.servicePreferredPath} onChange={(event) => setTunnelForm((current) => ({ ...current, servicePreferredPath: event.target.value as "dual" | "cloud" | "p2p" }))}><option value="dual">dual</option><option value="cloud">cloud</option><option value="p2p">p2p</option></select></label>
                         <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
                       </form>
                     )}
@@ -2820,6 +2935,7 @@ function roleClass(role: UserRole) {
 }
 
 function toTunnelEditForm(tunnel: TunnelSpec): TunnelEditForm {
+  const service = extractTunnelServiceFields(tunnel.metadata);
   return {
     id: tunnel.id,
     nodeId: tunnel.nodeId,
@@ -2833,6 +2949,16 @@ function toTunnelEditForm(tunnel: TunnelSpec): TunnelEditForm {
     status: tunnel.status,
     type: tunnel.type,
     transportPolicy: tunnel.transportPolicy,
+    serviceKey: service.serviceKey,
+    serviceTitle: service.serviceTitle,
+    serviceKind: service.serviceKind,
+    serviceSummary: service.serviceSummary,
+    servicePublicUrl: service.servicePublicUrl,
+    serviceP2PUrl: service.serviceP2PUrl,
+    serviceCloudAccess: service.serviceCloudAccess,
+    serviceP2PAccess: service.serviceP2PAccess,
+    servicePreferredPath: service.servicePreferredPath,
+    existingMetadata: { ...(tunnel.metadata || {}) },
   };
 }
 

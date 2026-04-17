@@ -1729,7 +1729,22 @@ func TestHTTPSTunnelUpdateReturnsNormalizedDomainAndTLSMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	createBody, _ := json.Marshal(map[string]any{"id": "tunnel-https-update", "nodeId": registerOut.NodeID, "name": "https-update", "type": "https", "targetHost": "127.0.0.1", "targetPort": 7710, "publicPort": 12443, "domain": "old.example.com", "tlsMode": "edge_terminate", "status": "active"})
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-https-update",
+		"nodeId":     registerOut.NodeID,
+		"name":       "https-update",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 7710,
+		"publicPort": 12443,
+		"domain":     "old.example.com",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKey":    "drive",
+			"serviceP2PUrl": "http://10.126.126.20:8080",
+		},
+	})
 	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
 	applyCookies(createReq, adminCookies)
 	createRes := httptest.NewRecorder()
@@ -1755,6 +1770,9 @@ func TestHTTPSTunnelUpdateReturnsNormalizedDomainAndTLSMode(t *testing.T) {
 	}
 	if updated.TargetHost != "127.0.0.2" || updated.TargetPort != 8800 {
 		t.Fatalf("expected updated target, got %+v", updated)
+	}
+	if updated.Metadata["serviceKey"] != "drive" || updated.Metadata["serviceP2PUrl"] != "http://10.126.126.20:8080" {
+		t.Fatalf("expected metadata to be preserved when omitted in update payload, got %+v", updated.Metadata)
 	}
 }
 
@@ -1918,6 +1936,122 @@ func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 	server.Handler().ServeHTTP(logoutRes, logoutReq)
 	if logoutRes.Code != http.StatusOK {
 		t.Fatalf("expected logout status 200, got %d", logoutRes.Code)
+	}
+}
+
+func TestUserServiceCatalogRespectsServiceMetadataAndRolePolicy(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "service-node-a",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true, P2PAssist: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := server.store.CreateUser(context.Background(), store.CreateUserParams{
+		Email:       "user@example.com",
+		DisplayName: "普通用户",
+		Password:    "UserPass#2026",
+		Role:        types.UserRoleUser,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	userCookies := loginAndCollectCookies(t, server, "user@example.com", "UserPass#2026")
+
+	createBody, _ := json.Marshal(map[string]any{
+		"nodeId":     registerOut.NodeID,
+		"name":       "drive-service",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 8080,
+		"publicPort": 0,
+		"domain":     "drive.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKey":           "drive",
+			"serviceTitle":         "网盘服务",
+			"serviceKind":          "drive",
+			"serviceSummary":       "云端只提供目录与入口，优先走 P2P 下载。",
+			"serviceP2PUrl":        "http://10.126.126.20:8080",
+			"serviceCloudAccess":   "admin_only",
+			"serviceP2PAccess":     "all_users",
+			"servicePreferredPath": "p2p",
+		},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create tunnel 201, got %d: %s", createRes.Code, createRes.Body.String())
+	}
+
+	userReq := httptest.NewRequest(http.MethodGet, "/api/user/services", nil)
+	userReq.Host = "manage.020309.top"
+	applyCookies(userReq, userCookies)
+	userRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(userRes, userReq)
+	if userRes.Code != http.StatusOK {
+		t.Fatalf("expected user services 200, got %d", userRes.Code)
+	}
+
+	var userOut types.UserServiceCatalogResponse
+	if err := json.NewDecoder(userRes.Body).Decode(&userOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(userOut.Items) != 1 {
+		t.Fatalf("expected 1 user-visible service, got %d", len(userOut.Items))
+	}
+	if userOut.Items[0].Key != "drive" {
+		t.Fatalf("expected service key drive, got %q", userOut.Items[0].Key)
+	}
+	if userOut.Items[0].PublicURL != "https://drive.020309.top" {
+		t.Fatalf("expected public url https://drive.020309.top, got %q", userOut.Items[0].PublicURL)
+	}
+	if userOut.Items[0].CloudAllowed {
+		t.Fatal("expected normal user cloud access to be denied")
+	}
+	if !userOut.Items[0].P2PAllowed {
+		t.Fatal("expected normal user p2p access to be allowed")
+	}
+	if userOut.Items[0].PreferredPath != "p2p" {
+		t.Fatalf("expected preferredPath p2p, got %q", userOut.Items[0].PreferredPath)
+	}
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/api/user/services", nil)
+	adminReq.Host = "manage.020309.top"
+	applyCookies(adminReq, adminCookies)
+	adminRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(adminRes, adminReq)
+	if adminRes.Code != http.StatusOK {
+		t.Fatalf("expected admin services 200, got %d", adminRes.Code)
+	}
+
+	var adminOut types.UserServiceCatalogResponse
+	if err := json.NewDecoder(adminRes.Body).Decode(&adminOut); err != nil {
+		t.Fatal(err)
+	}
+	if len(adminOut.Items) != 1 {
+		t.Fatalf("expected 1 admin-visible service, got %d", len(adminOut.Items))
+	}
+	if !adminOut.Items[0].CloudAllowed {
+		t.Fatal("expected admin cloud access to be allowed")
+	}
+	if adminOut.Items[0].P2PURL != "http://10.126.126.20:8080" {
+		t.Fatalf("expected p2p url to round-trip, got %q", adminOut.Items[0].P2PURL)
 	}
 }
 

@@ -136,6 +136,14 @@ struct AppConfig {
     drive_fallback_policy: Option<String>,
     #[serde(rename = "imageBulkUploadMode")]
     image_bulk_upload_mode: Option<String>,
+    #[serde(rename = "driveCloudUrl")]
+    drive_cloud_url: Option<String>,
+    #[serde(rename = "driveP2pUrl")]
+    drive_p2p_url: Option<String>,
+    #[serde(rename = "galleryCloudUrl")]
+    gallery_cloud_url: Option<String>,
+    #[serde(rename = "galleryP2pUrl")]
+    gallery_p2p_url: Option<String>,
     #[serde(rename = "p2pNetworkName")]
     p2p_network_name: Option<String>,
     #[serde(rename = "p2pNetworkSecret")]
@@ -368,6 +376,39 @@ fn app_exit(app: AppHandle) -> Result<(), String> {
     save_bounds_on_exit(&app);
     app.exit(0);
     Ok(())
+}
+
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("unsupported platform".to_string())
 }
 
 #[tauri::command]
@@ -1517,6 +1558,7 @@ fn main() {
             window_toggle_maximize,
             window_request_close,
             app_exit,
+            open_external,
             open_additional_window,
             set_auto_start,
             config_dir,

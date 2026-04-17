@@ -2,7 +2,7 @@ import { startTransition, useCallback, useEffect, useMemo, useState } from "reac
 import type { MouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
-import type { UserSummary } from "../../../packages/desktop-core/src/types";
+import type { UserServiceEntry, UserSummary } from "../../../packages/desktop-core/src/types";
 import {
   appExit,
   createTauriDesktopTransport,
@@ -11,6 +11,7 @@ import {
   loadAppConfig,
   loadP2PRuntimeStatus,
   loadDesktopHostPaths,
+  openExternal,
   openP2PRuntimeLog,
   readLoginProfiles,
   saveAppConfig,
@@ -31,6 +32,28 @@ type DriveFallbackPolicy = "admin_only" | "never";
 type ImageBulkUploadMode = "p2p_bulk_https_light" | "https_only";
 type Page = "loading" | "login" | "home" | "drive" | "gallery" | "p2p" | "settings";
 type ReopenDialogChoice = "cancel" | "new-window";
+type ServiceBinding = {
+  key: string;
+  title: string;
+  kind: string;
+  summary: string;
+  source: "manual" | "catalog" | "catalog+manual";
+  publicUrl: string;
+  p2pUrl: string;
+  cloudAllowed: boolean;
+  p2pAllowed: boolean;
+  cloudAccess: string;
+  p2pAccess: string;
+  preferredPath: string;
+  nodeName: string;
+  nodeStatus: string;
+  tunnelName: string;
+  tunnelType: string;
+  transportPolicy: string;
+  runtimePath: string;
+  runtimeState: string;
+  healthStatus: string;
+};
 
 const defaultApiUrl = "https://manage.020309.top";
 const defaultP2PPeerUrl = "tcp://easytier.manage.020309.top:11010";
@@ -49,6 +72,11 @@ function optionalTrimmed(value?: string) {
   return (value || "").trim();
 }
 
+function optionalUrl(value?: string) {
+  const trimmed = (value || "").trim();
+  return trimmed || "";
+}
+
 function normalizePeerUrl(value?: string) {
   if (typeof value !== "string") return defaultP2PPeerUrl;
   return value.trim();
@@ -61,6 +89,10 @@ function mergeConfig(config?: AppConfig | null): AppConfig {
     p2pAutoStart: Boolean(config?.p2pAutoStart),
     driveFallbackPolicy: (config?.driveFallbackPolicy || defaultConfig.driveFallbackPolicy) as DriveFallbackPolicy,
     imageBulkUploadMode: (config?.imageBulkUploadMode || defaultConfig.imageBulkUploadMode) as ImageBulkUploadMode,
+    driveCloudUrl: optionalUrl(config?.driveCloudUrl),
+    driveP2pUrl: optionalUrl(config?.driveP2pUrl),
+    galleryCloudUrl: optionalUrl(config?.galleryCloudUrl),
+    galleryP2pUrl: optionalUrl(config?.galleryP2pUrl),
     p2pNetworkName: optionalTrimmed(config?.p2pNetworkName),
     p2pNetworkSecret: optionalTrimmed(config?.p2pNetworkSecret),
     p2pPeerUrl: normalizePeerUrl(config?.p2pPeerUrl),
@@ -98,6 +130,108 @@ function roleLabel(role?: string) {
   }
 }
 
+function serviceAccessLabel(access?: string) {
+  switch (access) {
+    case "admin_only":
+      return "仅管理员";
+    case "disabled":
+      return "已禁用";
+    default:
+      return "全部用户";
+  }
+}
+
+function preferredPathLabel(value?: string) {
+  switch (value) {
+    case "p2p":
+      return "优先 P2P";
+    case "cloud":
+      return "优先云端";
+    case "dual":
+      return "双入口";
+    default:
+      return "未指定";
+  }
+}
+
+function serviceSourceLabel(source: ServiceBinding["source"]) {
+  switch (source) {
+    case "manual":
+      return "本地手填";
+    case "catalog+manual":
+      return "云端目录 + 本地覆盖";
+    default:
+      return "云端目录";
+  }
+}
+
+function nodeStatusLabel(status?: string) {
+  if (status === "online") return "在线";
+  if (status === "offline") return "离线";
+  return status || "未知";
+}
+
+function healthStatusLabel(status?: string) {
+  switch (status) {
+    case "healthy":
+      return "正常";
+    case "node_offline":
+      return "节点离线";
+    case "capability_missing":
+      return "能力缺失";
+    case "misconfigured":
+      return "配置异常";
+    case "target_unreachable":
+      return "目标不可达";
+    default:
+      return status || "未上报";
+  }
+}
+
+function firstCatalogEntry(items: UserServiceEntry[] | undefined) {
+  return items && items.length > 0 ? items[0] : null;
+}
+
+function resolveServiceBinding(
+  key: string,
+  fallbackTitle: string,
+  fallbackSummary: string,
+  catalogItems: UserServiceEntry[] | undefined,
+  manualCloudUrl?: string,
+  manualP2pUrl?: string,
+): ServiceBinding | null {
+  const entry = firstCatalogEntry(catalogItems);
+  const manualCloud = optionalUrl(manualCloudUrl);
+  const manualP2p = optionalUrl(manualP2pUrl);
+  const publicUrl = manualCloud || entry?.publicUrl || "";
+  const p2pUrl = manualP2p || entry?.p2pUrl || "";
+  if (!entry && !publicUrl && !p2pUrl) {
+    return null;
+  }
+  return {
+    key,
+    title: entry?.title || fallbackTitle,
+    kind: entry?.kind || key,
+    summary: entry?.summary || fallbackSummary,
+    source: entry ? ((manualCloud || manualP2p) ? "catalog+manual" : "catalog") : "manual",
+    publicUrl,
+    p2pUrl,
+    cloudAllowed: entry ? entry.cloudAllowed : Boolean(publicUrl),
+    p2pAllowed: entry ? entry.p2pAllowed : Boolean(p2pUrl),
+    cloudAccess: entry?.cloudAccess || (publicUrl ? "all_users" : "disabled"),
+    p2pAccess: entry?.p2pAccess || (p2pUrl ? "all_users" : "disabled"),
+    preferredPath: entry?.preferredPath || ((publicUrl && p2pUrl) ? "dual" : (p2pUrl ? "p2p" : "cloud")),
+    nodeName: entry?.nodeName || "",
+    nodeStatus: entry?.nodeStatus || "",
+    tunnelName: entry?.tunnelName || "",
+    tunnelType: entry?.tunnelType || "",
+    transportPolicy: entry?.transportPolicy || "",
+    runtimePath: entry?.runtimePath || "",
+    runtimeState: entry?.runtimeState || "",
+    healthStatus: entry?.healthStatus || "",
+  };
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>("loading");
   const [user, setUser] = useState<UserSummary | null>(null);
@@ -118,6 +252,8 @@ export default function App() {
     available: false,
   });
   const [p2pStatus, setP2PStatus] = useState<P2PRuntimeStatus | null>(null);
+  const [userServices, setUserServices] = useState<UserServiceEntry[]>([]);
+  const [serviceLoading, setServiceLoading] = useState(false);
 
   const [apiUrl, setApiUrl] = useState(defaultApiUrl);
   const [loginEmail, setLoginEmail] = useState("");
@@ -146,6 +282,20 @@ export default function App() {
     setP2PStatus(status);
     return status;
   }, []);
+
+  const refreshUserServices = useCallback(async (client = api) => {
+    setServiceLoading(true);
+    try {
+      const response = await client.loadUserServices();
+      setUserServices(response.items || []);
+      return response.items || [];
+    } catch {
+      setUserServices([]);
+      return [];
+    } finally {
+      setServiceLoading(false);
+    }
+  }, [api]);
 
   const fillProfileCredentials = useCallback(async (email: string, profiles?: LoginProfilesFile | null) => {
     const activeProfiles = profiles ?? loginProfiles;
@@ -176,12 +326,14 @@ export default function App() {
       setUser(response.user);
       setPage("home");
       setError("");
+      await refreshUserServices(api);
       return true;
     } catch {
       setUser(null);
+      setUserServices([]);
       return false;
     }
-  }, [api]);
+  }, [api, refreshUserServices]);
 
   useEffect(() => {
     let cancelled = false;
@@ -222,6 +374,7 @@ export default function App() {
               setPage("home");
               setError("");
             });
+            void refreshUserServices(sessionApi);
             return true;
           })
           .catch(() => false);
@@ -247,6 +400,7 @@ export default function App() {
                 setPage("home");
                 setError("");
               });
+              void refreshUserServices(sessionApi);
             }
           } catch {
             if (!cancelled) {
@@ -265,7 +419,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [refreshP2PStatus, transport]);
+  }, [refreshP2PStatus, refreshUserServices, transport]);
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -318,9 +472,11 @@ export default function App() {
     setNotice("");
     try {
       await persistConfig({ ...appConfig, apiBaseUrl: apiUrl });
-      const response = await createDesktopApi(normalizeApiBaseUrl(apiUrl), transport || undefined).login(loginEmail.trim(), loginPassword);
+      const loginApi = createDesktopApi(normalizeApiBaseUrl(apiUrl), transport || undefined);
+      const response = await loginApi.login(loginEmail.trim(), loginPassword);
       setUser(response.user);
       setPage("home");
+      await refreshUserServices(loginApi);
       if (savePassword) {
         await saveLoginProfile(loginEmail.trim(), loginPassword, autoLogin);
         await refreshLoginProfiles();
@@ -331,7 +487,7 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [apiUrl, appConfig, autoLogin, loginEmail, loginPassword, persistConfig, refreshLoginProfiles, savePassword, transport]);
+  }, [apiUrl, appConfig, autoLogin, loginEmail, loginPassword, persistConfig, refreshLoginProfiles, refreshUserServices, savePassword, transport]);
 
   const handleLogout = useCallback(async () => {
     setBusy(true);
@@ -341,6 +497,7 @@ export default function App() {
       // ignore logout transport errors
     } finally {
       setUser(null);
+      setUserServices([]);
       setPage("login");
       setBusy(false);
     }
@@ -480,6 +637,26 @@ export default function App() {
     }
   }, []);
 
+  const handleOpenServiceUrl = useCallback(async (url: string, label: string) => {
+    try {
+      await openExternal(url);
+    } catch (openError) {
+      setError(openError instanceof Error ? openError.message : `打开${label}失败`);
+    }
+  }, []);
+
+  const handleCopyValue = useCallback(async (value: string, label: string) => {
+    try {
+      if (!navigator?.clipboard?.writeText) {
+        throw new Error("当前环境不支持剪贴板");
+      }
+      await navigator.clipboard.writeText(value);
+      setNotice(`${label}已复制。`);
+    } catch (copyError) {
+      setError(copyError instanceof Error ? copyError.message : `复制${label}失败`);
+    }
+  }, []);
+
   const renderLoginPage = () => (
     <div className="card auth-card">
       <h2>登录用户端</h2>
@@ -567,6 +744,49 @@ export default function App() {
   const imageUploadLabel = (appConfig.imageBulkUploadMode || defaultConfig.imageBulkUploadMode) === "p2p_bulk_https_light"
     ? "批量走 P2P，轻量走 HTTPS"
     : "全部走 HTTPS";
+  const catalogByKey = useMemo(() => {
+    const map = new Map<string, UserServiceEntry[]>();
+    for (const item of userServices) {
+      const existing = map.get(item.key) || [];
+      existing.push(item);
+      map.set(item.key, existing);
+    }
+    return map;
+  }, [userServices]);
+  const driveService = useMemo(() => resolveServiceBinding(
+    "drive",
+    "网盘服务",
+    "面向大文件下载，云端只保留轻量入口与目录能力，数据面优先走 P2P。",
+    catalogByKey.get("drive"),
+    appConfig.driveCloudUrl,
+    appConfig.driveP2pUrl,
+  ), [appConfig.driveCloudUrl, appConfig.driveP2pUrl, catalogByKey]);
+  const galleryService = useMemo(() => resolveServiceBinding(
+    "gallery",
+    "图床服务",
+    "轻量读取和日常上传走云端，批量上传优先走 P2P。",
+    catalogByKey.get("gallery"),
+    appConfig.galleryCloudUrl,
+    appConfig.galleryP2pUrl,
+  ), [appConfig.galleryCloudUrl, appConfig.galleryP2pUrl, catalogByKey]);
+  const extraServiceBindings = useMemo(() => {
+    const items: ServiceBinding[] = [];
+    for (const [key, group] of catalogByKey.entries()) {
+      if (key === "drive" || key === "gallery") {
+        continue;
+      }
+      const binding = resolveServiceBinding(
+        key,
+        firstCatalogEntry(group)?.title || key,
+        firstCatalogEntry(group)?.summary || "已在云端目录中登记，可从用户端直接打开。",
+        group,
+      );
+      if (binding) {
+        items.push(binding);
+      }
+    }
+    return items;
+  }, [catalogByKey]);
 
   return (
     <div className="app-shell">
@@ -643,6 +863,54 @@ export default function App() {
                 <div className="policy-chip">当前对等节点: {p2pStatus?.peerCount ?? 0}</div>
               </section>
             </div>
+            <section className="card" style={{ marginTop: 18 }}>
+              <div className="service-header-row">
+                <div>
+                  <h2>服务工作台</h2>
+                  <p className="helper-text">这里汇总云端目录里登记的双入口服务，以及本机手填的兜底入口。</p>
+                </div>
+                <button className="secondary" type="button" onClick={() => void refreshUserServices()} disabled={serviceLoading}>
+                  {serviceLoading ? "刷新中..." : "刷新服务目录"}
+                </button>
+              </div>
+              <div className="service-grid">
+                <div className="service-tile">
+                  <div className="service-tile-top">
+                    <strong>网盘</strong>
+                    <span className="service-badge">{driveService ? serviceSourceLabel(driveService.source) : "未配置"}</span>
+                  </div>
+                  <p>{driveService?.summary || "尚未在云端目录或本地设置中登记网盘入口。"}</p>
+                  <div className="service-chip-row">
+                    <span className="service-chip">{driveService?.publicUrl ? "云端已接入" : "云端待配置"}</span>
+                    <span className="service-chip">{driveService?.p2pUrl ? "P2P 已接入" : "P2P 待配置"}</span>
+                  </div>
+                </div>
+                <div className="service-tile">
+                  <div className="service-tile-top">
+                    <strong>图床</strong>
+                    <span className="service-badge">{galleryService ? serviceSourceLabel(galleryService.source) : "未配置"}</span>
+                  </div>
+                  <p>{galleryService?.summary || "尚未在云端目录或本地设置中登记图床入口。"}</p>
+                  <div className="service-chip-row">
+                    <span className="service-chip">{galleryService?.publicUrl ? "HTTPS 已接入" : "云端待配置"}</span>
+                    <span className="service-chip">{galleryService?.p2pUrl ? "批量 P2P 已接入" : "P2P 待配置"}</span>
+                  </div>
+                </div>
+                {extraServiceBindings.map((service) => (
+                  <div key={service.key} className="service-tile">
+                    <div className="service-tile-top">
+                      <strong>{service.title}</strong>
+                      <span className="service-badge">{service.kind}</span>
+                    </div>
+                    <p>{service.summary || "已登记为额外服务入口。"}</p>
+                    <div className="service-chip-row">
+                      <span className="service-chip">{service.publicUrl ? "云端" : "无云端入口"}</span>
+                      <span className="service-chip">{service.p2pUrl ? "P2P" : "无 P2P 入口"}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
           </>
         ) : null}
 
@@ -654,12 +922,68 @@ export default function App() {
             </div>
             <div className="grid two">
               <section className="card">
-                <h2>访问策略</h2>
-                <ul className="plain-list">
-                  <li>普通用户没有 EasyTier 端时，不提供云端大文件下载。</li>
-                  <li>管理员可保留受控云端回退，用于紧急维护和核对。</li>
-                  <li>目录、分享页、鉴权信息继续由云端提供。</li>
-                </ul>
+                <div className="service-header-row">
+                  <div>
+                    <h2>服务接入</h2>
+                    <p className="helper-text">网盘页优先接入服务端 P2P 下载入口；云端入口只用于目录、鉴权和受控回退。</p>
+                  </div>
+                  <button className="secondary" type="button" onClick={() => void refreshUserServices()} disabled={serviceLoading}>
+                    {serviceLoading ? "刷新中..." : "刷新目录"}
+                  </button>
+                </div>
+                {driveService ? (
+                  <>
+                    <div className="policy-chip">来源: {serviceSourceLabel(driveService.source)}</div>
+                    <div className="policy-chip">首选路径: {preferredPathLabel(driveService.preferredPath)}</div>
+                    <div className="policy-chip">云端权限: {serviceAccessLabel(driveService.cloudAccess)}</div>
+                    <div className="policy-chip">P2P 权限: {serviceAccessLabel(driveService.p2pAccess)}</div>
+                    <label>云端入口</label>
+                    <div className="mono-box">{driveService.publicUrl || "未配置"}</div>
+                    <div className="action-row wrap">
+                      <button
+                        className="primary"
+                        type="button"
+                        onClick={() => void handleOpenServiceUrl(driveService.publicUrl, "网盘云端入口")}
+                        disabled={!driveService.publicUrl || !driveService.cloudAllowed}
+                      >
+                        打开云端入口
+                      </button>
+                      <button
+                        className="secondary"
+                        type="button"
+                        onClick={() => void handleCopyValue(driveService.publicUrl, "网盘云端地址")}
+                        disabled={!driveService.publicUrl}
+                      >
+                        复制云端地址
+                      </button>
+                    </div>
+                    <label>P2P 入口</label>
+                    <div className="mono-box">{driveService.p2pUrl || "未配置"}</div>
+                    <div className="action-row wrap">
+                      <button
+                        className="primary"
+                        type="button"
+                        onClick={() => void handleOpenServiceUrl(driveService.p2pUrl, "网盘 P2P 入口")}
+                        disabled={!driveService.p2pUrl || !driveService.p2pAllowed}
+                      >
+                        打开 P2P 入口
+                      </button>
+                      <button
+                        className="secondary"
+                        type="button"
+                        onClick={() => void handleCopyValue(driveService.p2pUrl, "网盘 P2P 地址")}
+                        disabled={!driveService.p2pUrl}
+                      >
+                        复制 P2P 地址
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="service-empty">
+                    <strong>当前还没有可用的网盘服务入口</strong>
+                    <p>你可以先在设置页手填 `driveCloudUrl` / `driveP2pUrl`，或者在云端 tunnel 元数据里登记 `serviceKey=drive`。</p>
+                  </div>
+                )}
               </section>
               <section className="card">
                 <h2>接入状态</h2>
@@ -667,9 +991,20 @@ export default function App() {
                 <div className="state-row"><span>云端回退</span><span>{driveFallbackLabel}</span></div>
                 <div className="state-row"><span>P2P 客户端</span><span>{p2pRuntimeLabel(p2pStatus)}</span></div>
                 <div className="state-row"><span>虚拟 IPv4</span><span>{p2pStatus?.virtualIpv4 || "未分配"}</span></div>
-                <div className="state-row"><span>后续能力</span><span>下载任务、断点续传、本地缓存</span></div>
+                <div className="state-row"><span>服务节点</span><span>{driveService?.nodeName || "未登记"}</span></div>
+                <div className="state-row"><span>节点状态</span><span>{nodeStatusLabel(driveService?.nodeStatus)}</span></div>
+                <div className="state-row"><span>隧道健康</span><span>{healthStatusLabel(driveService?.healthStatus)}</span></div>
+                <div className="state-row"><span>运行态</span><span>{driveService?.runtimePath || "未上报"} / {driveService?.runtimeState || "未上报"}</span></div>
               </section>
             </div>
+            <section className="card" style={{ marginTop: 18 }}>
+              <h2>当前策略说明</h2>
+              <ul className="plain-list">
+                <li>普通用户没有 P2P 入口时，不默认开放云端大文件下载。</li>
+                <li>管理员可以保留受控云端回退，用于维护和核对。</li>
+                <li>目录、分享页、鉴权信息继续由云端提供，真正的大流量下载优先走服务端 P2P。</li>
+              </ul>
+            </section>
           </>
         ) : null}
 
@@ -681,22 +1016,86 @@ export default function App() {
             </div>
             <div className="grid two">
               <section className="card">
-                <h2>批量上传</h2>
-                <ul className="plain-list">
-                  <li>新增单独的 P2P 上传入口，不复用公开读图入口。</li>
-                  <li>用户端在大量传图时直接对服务端发起 P2P 上传。</li>
-                  <li>这样可以把高流量上传从云端摘掉。</li>
-                </ul>
+                <div className="service-header-row">
+                  <div>
+                    <h2>入口接入</h2>
+                    <p className="helper-text">图床保留公开 HTTPS 读图入口，同时为批量上传单独登记 P2P 入口。</p>
+                  </div>
+                  <button className="secondary" type="button" onClick={() => void refreshUserServices()} disabled={serviceLoading}>
+                    {serviceLoading ? "刷新中..." : "刷新目录"}
+                  </button>
+                </div>
+                {galleryService ? (
+                  <>
+                    <div className="policy-chip">来源: {serviceSourceLabel(galleryService.source)}</div>
+                    <div className="policy-chip">首选路径: {preferredPathLabel(galleryService.preferredPath)}</div>
+                    <label>公开 / 轻量 HTTPS 入口</label>
+                    <div className="mono-box">{galleryService.publicUrl || "未配置"}</div>
+                    <div className="action-row wrap">
+                      <button
+                        className="primary"
+                        type="button"
+                        onClick={() => void handleOpenServiceUrl(galleryService.publicUrl, "图床云端入口")}
+                        disabled={!galleryService.publicUrl || !galleryService.cloudAllowed}
+                      >
+                        打开 HTTPS 入口
+                      </button>
+                      <button
+                        className="secondary"
+                        type="button"
+                        onClick={() => void handleCopyValue(galleryService.publicUrl, "图床云端地址")}
+                        disabled={!galleryService.publicUrl}
+                      >
+                        复制 HTTPS 地址
+                      </button>
+                    </div>
+                    <label>批量上传 P2P 入口</label>
+                    <div className="mono-box">{galleryService.p2pUrl || "未配置"}</div>
+                    <div className="action-row wrap">
+                      <button
+                        className="primary"
+                        type="button"
+                        onClick={() => void handleOpenServiceUrl(galleryService.p2pUrl, "图床 P2P 入口")}
+                        disabled={!galleryService.p2pUrl || !galleryService.p2pAllowed}
+                      >
+                        打开 P2P 入口
+                      </button>
+                      <button
+                        className="secondary"
+                        type="button"
+                        onClick={() => void handleCopyValue(galleryService.p2pUrl, "图床 P2P 地址")}
+                        disabled={!galleryService.p2pUrl}
+                      >
+                        复制 P2P 地址
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="service-empty">
+                    <strong>当前还没有可用的图床服务入口</strong>
+                    <p>你可以先在设置页手填 `galleryCloudUrl` / `galleryP2pUrl`，或者在云端 tunnel 元数据里登记 `serviceKey=gallery`。</p>
+                  </div>
+                )}
               </section>
               <section className="card">
-                <h2>日常读取</h2>
-                <ul className="plain-list">
-                  <li>博客图片、日常浏览、外链展示继续使用云端 HTTPS。</li>
-                  <li>公开访问保持现有域名与缓存策略，不要求访客安装用户端。</li>
-                  <li>读取链路和上传链路明确分开，避免同一入口混杂策略。</li>
-                </ul>
+                <h2>状态与链路</h2>
+                <div className="state-row"><span>P2P 客户端</span><span>{p2pRuntimeLabel(p2pStatus)}</span></div>
+                <div className="state-row"><span>图床上传策略</span><span>{imageUploadLabel}</span></div>
+                <div className="state-row"><span>服务节点</span><span>{galleryService?.nodeName || "未登记"}</span></div>
+                <div className="state-row"><span>节点状态</span><span>{nodeStatusLabel(galleryService?.nodeStatus)}</span></div>
+                <div className="state-row"><span>隧道健康</span><span>{healthStatusLabel(galleryService?.healthStatus)}</span></div>
+                <div className="state-row"><span>运行态</span><span>{galleryService?.runtimePath || "未上报"} / {galleryService?.runtimeState || "未上报"}</span></div>
+                <div className="state-row"><span>对等节点数</span><span>{p2pStatus?.peerCount ?? 0}</span></div>
               </section>
             </div>
+            <section className="card" style={{ marginTop: 18 }}>
+              <h2>当前策略说明</h2>
+              <ul className="plain-list">
+                <li>博客图片、日常浏览、外链展示继续使用云端 HTTPS。</li>
+                <li>批量上传单独走 P2P 入口，避免把高流量图片上传压在云端。</li>
+                <li>读取链路和上传链路明确分开，后续新增其他服务时也沿用同一套双入口模型。</li>
+              </ul>
+            </section>
           </>
         ) : null}
 
@@ -887,6 +1286,41 @@ export default function App() {
                 <div className="state-row"><span>当前角色</span><span>{roleLabel(user.role)}</span></div>
               </section>
             </div>
+            <section className="card" style={{ marginTop: 18 }}>
+              <h2>服务接入覆盖</h2>
+              <p className="helper-text">优先使用云端目录里的服务入口；这里用于本机手填兜底或临时覆盖，不替代服务端正式登记。</p>
+              <div className="grid two compact-grid">
+                <div>
+                  <label>网盘云端入口</label>
+                  <input
+                    value={appConfig.driveCloudUrl || ""}
+                    onChange={(event) => setAppConfig((current) => ({ ...current, driveCloudUrl: event.target.value }))}
+                    placeholder="例如 https://drive.020309.top"
+                  />
+                  <label>网盘 P2P 入口</label>
+                  <input
+                    value={appConfig.driveP2pUrl || ""}
+                    onChange={(event) => setAppConfig((current) => ({ ...current, driveP2pUrl: event.target.value }))}
+                    placeholder="例如 http://10.126.126.20:8080"
+                  />
+                </div>
+                <div>
+                  <label>图床云端入口</label>
+                  <input
+                    value={appConfig.galleryCloudUrl || ""}
+                    onChange={(event) => setAppConfig((current) => ({ ...current, galleryCloudUrl: event.target.value }))}
+                    placeholder="例如 https://img.020309.top"
+                  />
+                  <label>图床 P2P 入口</label>
+                  <input
+                    value={appConfig.galleryP2pUrl || ""}
+                    onChange={(event) => setAppConfig((current) => ({ ...current, galleryP2pUrl: event.target.value }))}
+                    placeholder="例如 http://10.126.126.30:9090"
+                  />
+                </div>
+              </div>
+              <p className="inline-note">当云端目录里存在同 key 服务时，这里的地址只覆盖 URL，不覆盖云端分配的权限策略。</p>
+            </section>
             {loginProfiles?.profiles.length ? (
               <section className="card" style={{ marginTop: 18 }}>
                 <h2>登录历史</h2>
