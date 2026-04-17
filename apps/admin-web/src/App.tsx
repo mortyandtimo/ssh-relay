@@ -41,6 +41,7 @@ type NodeSummary = {
   location?: string;
   tags?: string[];
   isolated?: boolean;
+  latestMetrics?: Record<string, string>;
 };
 
 type NodeListResponse = {
@@ -1765,14 +1766,35 @@ function buildAuditQuery(filter: AuditFilterState) {
                       <section className="workbench-section">
                         <div className="section-head compact-head">
                           <div>
+                            <h3>EasyTier 运行态</h3>
+                            <span className="muted-line">直接显示 client-agent 最近一次 heartbeat 带回来的 EasyTier 遥测，用来判断服务端是否真的具备可派生的 P2P 入口。</span>
+                          </div>
+                        </div>
+                        <div className="signal-strip profile-strip">
+                          <SignalCard label="P2P runtime" value={nodeHasLiveP2P(selectedNode) ? "running" : "stopped"} />
+                          <SignalCard label="虚拟 IPv4" value={nodeLatestMetric(selectedNode, "p2p:ipv4", "未上报")} />
+                          <SignalCard label="peer 数" value={nodeLatestMetric(selectedNode, "p2p:peer_count", "0")} />
+                          <SignalCard label="instance id" value={nodeLatestMetric(selectedNode, "p2p:instance_id", "未上报")} />
+                        </div>
+                        <div className="fact-list">
+                          <FactRow label="runtime" value={<code>{nodeLatestMetric(selectedNode, "p2p:runtime", "未上报")}</code>} />
+                          <FactRow label="rpc portal" value={<code>{nodeLatestMetric(selectedNode, "p2p:rpc_portal", "未上报")}</code>} />
+                          <FactRow label="hostname" value={<code>{nodeLatestMetric(selectedNode, "p2p:hostname", "未上报")}</code>} />
+                          <FactRow label="最近错误" value={<code>{nodeLatestMetric(selectedNode, "p2p:error", "无")}</code>} />
+                        </div>
+                      </section>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
                             <h3>P2P readiness</h3>
-                            <span className="muted-line">这块只表达控制面与运维可见性，不代表当前已经能走真实 P2P 数据面。</span>
+                            <span className="muted-line">这里收敛角色、能力和实时遥测三件事，避免把“支持 P2P”误读成“当前已可用”。</span>
                           </div>
                         </div>
                         <div className="ops-note-list">
                           <div className={selectedNode.capabilities.p2pAssist ? "ops-note tone-info" : "ops-note tone-neutral"}>{selectedNode.capabilities.p2pAssist ? "该节点具备 p2pAssist 能力，只说明它具备基础控制面 readiness 条件。" : "该节点当前不具备 p2pAssist 能力，不建议与 p2p_preferred 这类预留语义关联。"}</div>
                           <div className={(selectedNode.nodeRole === "local" || selectedNode.nodeRole === "third_party") ? "ops-note tone-info" : "ops-note tone-neutral"}>{(selectedNode.nodeRole === "local" || selectedNode.nodeRole === "third_party") ? "该节点角色具备基础组合条件，但这不代表当前可建立真实 P2P 链路。" : "该节点当前更适合作为云端中继节点，这里不把它表达成真实 P2P 终端候选。"}</div>
-                          <div className="ops-note tone-neutral">当前仍为 relay_only 控制面阶段：本轮未实现 NAT 穿透、打洞或真实 P2P 数据面。</div>
+                          <div className={nodeHasLiveP2P(selectedNode) ? "ops-note tone-good" : "ops-note tone-neutral"}>{nodeHasLiveP2P(selectedNode) ? "该节点已经上报 EasyTier 虚拟 IPv4，可为 HTTP / HTTPS 类服务自动派生 P2P 入口。" : "该节点还没有上报可用的 EasyTier 虚拟 IPv4；即使 capability 标成 p2pAssist，用户端也拿不到自动派生的 P2P 服务入口。"}</div>
                         </div>
                       </section>
 
@@ -2093,7 +2115,7 @@ function buildAuditQuery(filter: AuditFilterState) {
                         <label><span>服务类型</span><select value={tunnelEditForm.serviceKind} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceKind: event.target.value as "app" | "drive" | "gallery" } : current)}><option value="app">app</option><option value="drive">drive</option><option value="gallery">gallery</option></select></label>
                         <label><span>服务摘要</span><input value={tunnelEditForm.serviceSummary} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceSummary: event.target.value } : current)} placeholder="用户端里显示的说明文案" /></label>
                         <label><span>云端入口 URL</span><input value={tunnelEditForm.servicePublicUrl} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, servicePublicUrl: event.target.value } : current)} placeholder="留空则按当前 tunnel 入口推导" /></label>
-                        <label><span>P2P 入口 URL</span><input value={tunnelEditForm.serviceP2PUrl} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PUrl: event.target.value } : current)} placeholder="例如 http://10.126.126.20:8080" /></label>
+                        <label><span>P2P 入口 URL</span><input value={tunnelEditForm.serviceP2PUrl} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PUrl: event.target.value } : current)} placeholder="留空则按节点 EasyTier IPv4 + targetPort 自动推导" /></label>
                         <label><span>云端入口权限</span><select value={tunnelEditForm.serviceCloudAccess} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceCloudAccess: event.target.value as "all_users" | "admin_only" | "disabled" } : current)}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
                         <label><span>P2P 入口权限</span><select value={tunnelEditForm.serviceP2PAccess} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PAccess: event.target.value as "all_users" | "admin_only" | "disabled" } : current)}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
                         <label><span>用户端首选路径</span><select value={tunnelEditForm.servicePreferredPath} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, servicePreferredPath: event.target.value as "dual" | "cloud" | "p2p" } : current)}><option value="dual">dual</option><option value="cloud">cloud</option><option value="p2p">p2p</option></select></label>
@@ -2162,7 +2184,7 @@ function buildAuditQuery(filter: AuditFilterState) {
                         <label><span>服务类型</span><select value={tunnelForm.serviceKind} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceKind: event.target.value as "app" | "drive" | "gallery" }))}><option value="app">app</option><option value="drive">drive</option><option value="gallery">gallery</option></select></label>
                         <label><span>服务摘要</span><input value={tunnelForm.serviceSummary} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceSummary: event.target.value }))} placeholder="用户端里显示的说明文案" /></label>
                         <label><span>云端入口 URL</span><input value={tunnelForm.servicePublicUrl} onChange={(event) => setTunnelForm((current) => ({ ...current, servicePublicUrl: event.target.value }))} placeholder="留空则按当前 tunnel 入口推导" /></label>
-                        <label><span>P2P 入口 URL</span><input value={tunnelForm.serviceP2PUrl} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PUrl: event.target.value }))} placeholder="例如 http://10.126.126.20:8080" /></label>
+                        <label><span>P2P 入口 URL</span><input value={tunnelForm.serviceP2PUrl} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PUrl: event.target.value }))} placeholder="留空则按节点 EasyTier IPv4 + targetPort 自动推导" /></label>
                         <label><span>云端入口权限</span><select value={tunnelForm.serviceCloudAccess} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceCloudAccess: event.target.value as "all_users" | "admin_only" | "disabled" }))}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
                         <label><span>P2P 入口权限</span><select value={tunnelForm.serviceP2PAccess} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PAccess: event.target.value as "all_users" | "admin_only" | "disabled" }))}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
                         <label><span>用户端首选路径</span><select value={tunnelForm.servicePreferredPath} onChange={(event) => setTunnelForm((current) => ({ ...current, servicePreferredPath: event.target.value as "dual" | "cloud" | "p2p" }))}><option value="dual">dual</option><option value="cloud">cloud</option><option value="p2p">p2p</option></select></label>
@@ -3233,6 +3255,15 @@ function roleLabel(role: string) {
 function nodeMeta(node: NodeSummary, key: string, fallback = "-") {
   const value = node.metadata?.[key];
   return value && value.trim() ? value : fallback;
+}
+
+function nodeLatestMetric(node: NodeSummary, key: string, fallback = "-") {
+  const value = node.latestMetrics?.[key];
+  return value && value.trim() ? value : fallback;
+}
+
+function nodeHasLiveP2P(node: NodeSummary) {
+  return nodeLatestMetric(node, "p2p:running", "false") === "true" && nodeLatestMetric(node, "p2p:ipv4", "") !== "";
 }
 
 function nodeAgentDeploymentLabel(node: NodeSummary) {

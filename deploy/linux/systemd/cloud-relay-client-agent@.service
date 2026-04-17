@@ -2,6 +2,7 @@
 Description=Cloud Relay Platform Client Agent (%i)
 After=network-online.target
 Wants=network-online.target
+PartOf=cloud-relay-service-node@%i.target
 
 [Service]
 Type=simple

@@ -1,0 +1,22 @@
+[Unit]
+Description=Cloud Relay Platform EasyTier Peer (%i)
+After=network-online.target
+Wants=network-online.target
+PartOf=cloud-relay-service-node@%i.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/cloud-relay-platform/easytier
+EnvironmentFile=/etc/cloud-relay-platform/easytier/%i.env
+ExecStart=/opt/cloud-relay-platform/easytier/current/easytier-core
+Restart=always
+RestartSec=3
+User=relay
+Group=relay
+LimitNOFILE=65535
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

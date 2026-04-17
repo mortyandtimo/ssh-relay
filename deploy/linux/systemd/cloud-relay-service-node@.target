@@ -1,0 +1,9 @@
+[Unit]
+Description=Cloud Relay Platform Service Node (%i)
+After=network-online.target
+Wants=network-online.target
+Wants=cloud-relay-easytier@%i.service
+Wants=cloud-relay-client-agent@%i.service
+
+[Install]
+WantedBy=multi-user.target

@@ -2055,6 +2055,102 @@ func TestUserServiceCatalogRespectsServiceMetadataAndRolePolicy(t *testing.T) {
 	}
 }
 
+func TestUserServiceCatalogDerivesP2PURLFromNodeMetrics(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "service-node-b",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true, P2PAssist: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	heartbeatBody, _ := json.Marshal(types.NodeHeartbeatRequest{
+		NodeID:        registerOut.NodeID,
+		ObservedAt:    time.Now().UTC(),
+		ActiveTunnels: 1,
+		Metrics: map[string]string{
+			"p2p:running":    "true",
+			"p2p:runtime":    "easytier",
+			"p2p:ipv4":       "10.77.0.12",
+			"p2p:peer_count": "2",
+		},
+	})
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/agent/heartbeat", bytes.NewReader(heartbeatBody))
+	heartbeatRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(heartbeatRes, heartbeatReq)
+	if heartbeatRes.Code != http.StatusOK {
+		t.Fatalf("expected heartbeat 200, got %d", heartbeatRes.Code)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"nodeId":     registerOut.NodeID,
+		"name":       "gallery-service",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 8090,
+		"publicPort": 0,
+		"domain":     "gallery.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKey":         "gallery",
+			"serviceTitle":       "图床服务",
+			"serviceKind":        "gallery",
+			"serviceSummary":     "云端轻量访问，批量传输优先走服务端 EasyTier。",
+			"serviceCloudAccess": "all_users",
+			"serviceP2PAccess":   "admin_only",
+		},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create tunnel 201, got %d: %s", createRes.Code, createRes.Body.String())
+	}
+
+	userReq := httptest.NewRequest(http.MethodGet, "/api/user/services", nil)
+	userReq.Host = "manage.020309.top"
+	applyCookies(userReq, adminCookies)
+	userRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(userRes, userReq)
+	if userRes.Code != http.StatusOK {
+		t.Fatalf("expected user services 200, got %d", userRes.Code)
+	}
+
+	var out types.UserServiceCatalogResponse
+	if err := json.NewDecoder(userRes.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Items) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(out.Items))
+	}
+	if out.Items[0].P2PURL != "http://10.77.0.12:8090" {
+		t.Fatalf("expected derived p2p url http://10.77.0.12:8090, got %q", out.Items[0].P2PURL)
+	}
+	if out.Items[0].PreferredPath != "dual" {
+		t.Fatalf("expected preferredPath dual after deriving both urls, got %q", out.Items[0].PreferredPath)
+	}
+	if !out.Items[0].CloudAllowed {
+		t.Fatal("expected admin cloud access to be allowed")
+	}
+	if !out.Items[0].P2PAllowed {
+		t.Fatal("expected admin p2p access to be allowed")
+	}
+}
+
 func TestAgentEndpointsRemainAccessibleWithSessionAuthEnabled(t *testing.T) {
 	backend := store.NewInMemoryStore()
 	server := NewServer("test", backend, "")

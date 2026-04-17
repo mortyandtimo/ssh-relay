@@ -73,6 +73,7 @@ func main() {
 	deploymentMode := config.GetEnv("CLIENT_DEPLOYMENT_MODE", "managed")
 	serviceUnit := config.GetEnv("CLIENT_SERVICE_UNIT", "")
 	instanceProfile := config.GetEnv("CLIENT_INSTANCE_PROFILE", "")
+	p2pConfig := loadP2PTelemetryConfig()
 	heartbeatEvery := config.GetDurationEnvSeconds("AGENT_HEARTBEAT_INTERVAL", 30)
 	reversePoolSize := config.GetIntEnv("AGENT_REVERSE_POOL_SIZE", defaultReversePoolSize)
 	if reversePoolSize < 1 {
@@ -80,7 +81,7 @@ func main() {
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	registeredID, err := register(client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile)
+	registeredID, err := register(client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile, p2pConfig)
 	if err != nil {
 		if *once {
 			log.Fatal(err)
@@ -88,7 +89,7 @@ func main() {
 		for {
 			log.Printf("register failed: %v", err)
 			time.Sleep(5 * time.Second)
-			registeredID, err = register(client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile)
+			registeredID, err = register(client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile, p2pConfig)
 			if err == nil {
 				break
 			}
@@ -96,7 +97,7 @@ func main() {
 	}
 	log.Printf("agent registered as %s", registeredID)
 	if *once {
-		if err := heartbeat(client, baseURL, registeredID, 0, map[string]string{}); err != nil {
+		if err := heartbeat(client, baseURL, registeredID, 0, map[string]string{}, p2pConfig); err != nil {
 			log.Fatal(err)
 		}
 		log.Printf("heartbeat accepted for %s", registeredID)
@@ -127,7 +128,7 @@ func main() {
 	if err := manager.syncTunnels(context.Background(), registeredID); err != nil {
 		log.Printf("initial tunnel sync failed: %v", err)
 	}
-	if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount(), manager.HeartbeatMetrics()); err != nil {
+	if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount(), manager.HeartbeatMetrics(), p2pConfig); err != nil {
 		log.Printf("initial heartbeat failed: %v", err)
 	} else {
 		log.Printf("heartbeat accepted for %s", registeredID)
@@ -149,7 +150,7 @@ func main() {
 	for {
 		select {
 		case <-heartbeatTicker.C:
-			if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount(), manager.HeartbeatMetrics()); err != nil {
+			if err := heartbeat(client, baseURL, registeredID, manager.ActiveTunnelCount(), manager.HeartbeatMetrics(), p2pConfig); err != nil {
 				log.Printf("heartbeat failed: %v", err)
 				continue
 			}
@@ -162,7 +163,7 @@ func main() {
 	}
 }
 
-func register(client *http.Client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile string) (string, error) {
+func register(client *http.Client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile string, p2pConfig p2pTelemetryConfig) (string, error) {
 	payload := types.NodeRegisterRequest{
 		NodeID:       nodeID,
 		NodeName:     nodeName,
@@ -172,6 +173,7 @@ func register(client *http.Client, baseURL, nodeID, nodeName, deploymentMode, se
 			HTTPRelay:     true,
 			HTTPSRelay:    true,
 			UDPRelay:      true,
+			P2PAssist:     p2pConfig.enabled,
 			SOCKS5Connect: true,
 		},
 		Metadata: map[string]string{
@@ -183,6 +185,10 @@ func register(client *http.Client, baseURL, nodeID, nodeName, deploymentMode, se
 			"instanceProfile": strings.TrimSpace(instanceProfile),
 			"instanceManaged": fmt.Sprintf("%t", strings.TrimSpace(serviceUnit) != ""),
 		},
+	}
+	if p2pConfig.enabled {
+		payload.Metadata["p2pRpcPortal"] = p2pConfig.rpcPortal
+		payload.Metadata["p2pRuntime"] = "easytier"
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -205,7 +211,7 @@ func register(client *http.Client, baseURL, nodeID, nodeName, deploymentMode, se
 	return out.NodeID, nil
 }
 
-func heartbeat(client *http.Client, baseURL, nodeID string, activeTunnels int, probeMetrics map[string]string) error {
+func heartbeat(client *http.Client, baseURL, nodeID string, activeTunnels int, probeMetrics map[string]string, p2pConfig p2pTelemetryConfig) error {
 	payload := types.NodeHeartbeatRequest{
 		NodeID:        nodeID,
 		ObservedAt:    time.Now().UTC(),
@@ -216,6 +222,9 @@ func heartbeat(client *http.Client, baseURL, nodeID string, activeTunnels int, p
 		},
 	}
 	for key, value := range probeMetrics {
+		payload.Metrics[key] = value
+	}
+	for key, value := range collectP2PMetrics(p2pConfig) {
 		payload.Metrics[key] = value
 	}
 	body, err := json.Marshal(payload)

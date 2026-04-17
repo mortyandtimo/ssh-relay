@@ -94,6 +94,9 @@ func userServiceEntryFromTunnel(
 		publicURL = deriveServicePublicURL(r, tunnel)
 	}
 	p2pURL := strings.TrimSpace(tunnel.Metadata[serviceMetaP2PURLKey])
+	if p2pURL == "" {
+		p2pURL = deriveServiceP2PURL(tunnel, node)
+	}
 
 	cloudAccess := normalizeServiceAccessPolicy(tunnel.Metadata[serviceMetaCloudAccessKey], publicURL != "")
 	p2pAccess := normalizeServiceAccessPolicy(tunnel.Metadata[serviceMetaP2PAccessKey], p2pURL != "")
@@ -216,6 +219,33 @@ func deriveServicePublicURL(r *http.Request, tunnel types.TunnelSpec) string {
 		return ""
 	}
 	return fmt.Sprintf("http://%s:%d", host, tunnel.PublicPort)
+}
+
+func deriveServiceP2PURL(tunnel types.TunnelSpec, node types.NodeSummary) string {
+	if tunnel.TargetPort <= 0 {
+		return ""
+	}
+	ipv4 := strings.TrimSpace(node.LatestMetrics["p2p:ipv4"])
+	if ipv4 == "" {
+		return ""
+	}
+	switch tunnel.Type {
+	case "http", "https":
+		return fmt.Sprintf("http://%s:%d", urlHost(ipv4), tunnel.TargetPort)
+	default:
+		return ""
+	}
+}
+
+func urlHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") && !strings.HasSuffix(host, "]") {
+		return "[" + host + "]"
+	}
+	return host
 }
 
 func stripPortFromHost(host string) string {
