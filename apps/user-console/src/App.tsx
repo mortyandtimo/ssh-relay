@@ -795,6 +795,7 @@ export default function App() {
                 placeholder={`${defaultP2PPeerUrl}\n可填多个，支持换行或逗号分隔`}
               />
               <p className="field-note">默认使用云端引导节点 `tcp://easytier.manage.020309.top:11010` 入网；如果后续新增长期在线的服务端节点，也可以一起填入。</p>
+              <p className="field-note">用户端本地会固定监听 `21010` 的 `tcp/udp`，主动避开 EasyTier 默认的 `11010/11011/11012`，减少 Windows 端口权限冲突。</p>
               <label className="check-row">
                 <input
                   type="checkbox"

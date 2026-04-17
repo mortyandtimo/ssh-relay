@@ -26,6 +26,8 @@ use std::os::windows::process::CommandExt;
 const INSTALLER_QUIT_ARG: &str = "--quit-for-install";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const P2P_RUNTIME_RELATIVE_PATH: &str = "runtime/easytier-core.exe";
+const USER_P2P_TCP_LISTENER: &str = "tcp://0.0.0.0:21010";
+const USER_P2P_UDP_LISTENER: &str = "udp://0.0.0.0:21010";
 
 struct AppHttpState {
     client: Client,
@@ -719,6 +721,10 @@ fn build_p2p_runtime_args(config: &AppConfig, file_log_dir: &Path) -> Result<Vec
         instance_name,
         "--file-log-dir".to_string(),
         file_log_dir.display().to_string(),
+        "--listeners".to_string(),
+        USER_P2P_TCP_LISTENER.to_string(),
+        "--listeners".to_string(),
+        USER_P2P_UDP_LISTENER.to_string(),
     ];
     if let Some(hostname) = hostname {
         args.push("--hostname".to_string());
