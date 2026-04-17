@@ -62,14 +62,26 @@ upload_one() {
   local file_hash
   file_hash="$(sha256_file "$file_path")"
   echo "Uploading $product/$channel -> $file_path"
-  curl --fail --silent --show-error --location \
+  local response_file status_code
+  response_file="$(mktemp)"
+  status_code="$(curl --silent --show-error --location \
     -b "$COOKIE_FILE" \
     -F "product=$product" \
     -F "channel=$channel" \
     -F "version=$VERSION" \
     -F "sha256=$file_hash" \
     -F "file=@$file_path" \
-    "$SERVER_URL/api/admin/release-artifacts/upload"
+    -o "$response_file" \
+    -w '%{http_code}' \
+    "$SERVER_URL/api/admin/release-artifacts/upload")"
+  if [ "$status_code" -lt 200 ] || [ "$status_code" -ge 300 ]; then
+    echo "upload failed: http $status_code" >&2
+    cat "$response_file" >&2
+    rm -f "$response_file"
+    return 1
+  fi
+  cat "$response_file"
+  rm -f "$response_file"
   echo
 }
 
