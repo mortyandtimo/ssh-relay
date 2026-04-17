@@ -26,6 +26,12 @@ clean_cert_keeper() {
   remove_path "$ROOT_DIR/outputs/windows-cert-keeper"
 }
 
+clean_user() {
+  remove_path "$ROOT_DIR/apps/user-console/node_modules"
+  remove_path "$ROOT_DIR/apps/user-console/src-tauri/target"
+  remove_path "$ROOT_DIR/outputs/windows-user"
+}
+
 case "$TARGET" in
   publisher)
     clean_publisher
@@ -33,12 +39,16 @@ case "$TARGET" in
   cert-keeper)
     clean_cert_keeper
     ;;
+  user)
+    clean_user
+    ;;
   all)
     clean_publisher
     clean_cert_keeper
+    clean_user
     ;;
   *)
-    echo "usage: $0 [publisher|cert-keeper|all]" >&2
+    echo "usage: $0 [publisher|cert-keeper|user|all]" >&2
     exit 1
     ;;
 esac

@@ -47,6 +47,20 @@ check_cert_keeper() {
   fi
 }
 
+check_user() {
+  need_cmd npm "install Node.js/npm first"
+  need_cmd cargo "install Rust toolchain first"
+  need_cmd rustup "install rustup first"
+  need_cmd zip "install zip first"
+  if ! has_rust_target x86_64-pc-windows-gnu; then
+    echo "missing Rust Windows target: install x86_64-pc-windows-gnu" >&2
+    exit 1
+  fi
+  if ! command -v makensis >/dev/null 2>&1 && [ -z "${MAKENSIS_BIN:-}" ]; then
+    echo "warning: makensis not found; user portable zip will build but setup exe will be skipped" >&2
+  fi
+}
+
 build_publisher() {
   check_publisher
   "$ROOT_DIR/deploy/windows/publisher/build-windows-artifacts.sh"
@@ -57,6 +71,11 @@ build_cert_keeper() {
   "$ROOT_DIR/deploy/windows/cert-keeper/build-windows-artifacts.sh"
 }
 
+build_user() {
+  check_user
+  "$ROOT_DIR/deploy/windows/user-console/build-windows-artifacts.sh"
+}
+
 case "$TARGET" in
   publisher)
     build_publisher
@@ -64,12 +83,16 @@ case "$TARGET" in
   cert-keeper)
     build_cert_keeper
     ;;
+  user)
+    build_user
+    ;;
   all)
     build_publisher
     build_cert_keeper
+    build_user
     ;;
   *)
-    echo "usage: $0 [publisher|cert-keeper|all]" >&2
+    echo "usage: $0 [publisher|cert-keeper|user|all]" >&2
     exit 1
     ;;
 esac

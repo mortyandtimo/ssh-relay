@@ -392,7 +392,7 @@ func (s *Server) listReleaseArtifacts() []releaseArtifactEntry {
 		return []releaseArtifactEntry{}
 	}
 	items := make([]releaseArtifactEntry, 0)
-	products := []string{"publisher", "cert-keeper"}
+	products := []string{"publisher", "cert-keeper", "user"}
 	for _, product := range products {
 		productDir := filepath.Join(s.releaseUploadDir, product)
 		versions, err := os.ReadDir(productDir)
@@ -511,7 +511,7 @@ func (s *Server) releaseArtifactDownloadHandler() http.Handler {
 
 func allowedReleaseProduct(product string) bool {
 	switch product {
-	case "publisher", "cert-keeper":
+	case "publisher", "cert-keeper", "user":
 		return true
 	default:
 		return false
@@ -546,11 +546,17 @@ func releaseArtifactFileName(product, channel, version, ext string) string {
 		} else {
 			base = "CloudRelayPublisherPortable-" + version
 		}
-	} else {
+	} else if product == "cert-keeper" {
 		if channel == "setup" {
 			base = "CertKeeperSetup-" + version
 		} else {
 			base = "CertKeeperPortable-" + version
+		}
+	} else {
+		if channel == "setup" {
+			base = "CloudRelayUserSetup-" + version
+		} else {
+			base = "CloudRelayUserPortable-" + version
 		}
 	}
 	return base + ext

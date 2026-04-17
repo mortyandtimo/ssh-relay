@@ -3,6 +3,7 @@ Windows Packaging Handoff
 Scope:
 - 驻阡陌 / Publisher: `apps/desktop-console`
 - 证书管家 / CertKeeper: `apps/cert-keeper-desktop`
+- 驻阡陌用户端 / User Console: `apps/user-console`
 
 Current packaging decision:
 - Both products use NSIS setup exe as the main Windows installer deliverable.
@@ -20,6 +21,7 @@ Key build entrypoints:
 - Build all: `scripts/build_windows_artifacts.sh all`
 - Build publisher only: `scripts/build_windows_artifacts.sh publisher`
 - Build cert-keeper only: `scripts/build_windows_artifacts.sh cert-keeper`
+- Build user console only: `scripts/build_windows_artifacts.sh user`
 - Clean rebuild caches: `scripts/clean_windows_packaging_cache.sh all`
 - Print Gitee sync workflow: `scripts/prepare_gitee_sync.sh`
 - Force fresh npm deps on packager when lockfiles change unexpectedly: `FORCE_NPM_INSTALL=1 ./scripts/packager_build_and_upload.sh all`
@@ -29,8 +31,11 @@ Large caches safe to delete:
 - `apps/desktop-console/src-tauri/target`
 - `apps/cert-keeper-desktop/node_modules`
 - `apps/cert-keeper-desktop/src-tauri/target`
+- `apps/user-console/node_modules`
+- `apps/user-console/src-tauri/target`
 - `outputs/windows-publisher`
 - `outputs/windows-cert-keeper`
+- `outputs/windows-user`
 
 External tools required for rebuilds:
 - npm / Node.js
@@ -56,10 +61,14 @@ Recommended split:
 Files to inspect first when resuming work:
 - `deploy/windows/publisher/installer.nsi`
 - `deploy/windows/cert-keeper/installer.nsi`
+- `deploy/windows/user-console/installer.nsi`
+- `deploy/windows/user-console/runtime/README.txt`
 - `deploy/windows/publisher/build-windows-artifacts.sh`
 - `deploy/windows/cert-keeper/build-windows-artifacts.sh`
+- `deploy/windows/user-console/build-windows-artifacts.sh`
 - `scripts/build_windows_artifacts.sh`
 - `scripts/clean_windows_packaging_cache.sh`
 - `scripts/prepare_gitee_sync.sh`
 - `deploy/windows/publisher/README.txt`
 - `deploy/windows/cert-keeper/README.txt`
+- `deploy/windows/user-console/README.txt`

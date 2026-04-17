@@ -1,0 +1,25 @@
+[package]
+name = "cloud-relay-user"
+version = "0.1.0"
+edition = "2021"
+description = "驻阡陌用户端 — Cloud Relay User Console"
+license = "UNLICENSED"
+authors = ["Codex"]
+
+[package.metadata.tauri]
+product-name = "驻阡陌用户端"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "cookies", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+base64 = "0.21"
+windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_System_Registry"] }
+
+[features]
+default = []

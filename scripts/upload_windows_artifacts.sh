@@ -9,7 +9,7 @@ VERSION="${VERSION:-}"
 
 usage() {
   cat <<'EOF'
-usage: scripts/upload_windows_artifacts.sh [publisher|cert-keeper|all]
+usage: scripts/upload_windows_artifacts.sh [publisher|cert-keeper|user|all]
 
 Required env:
   SERVER_URL   e.g. https://manage.020309.top
@@ -83,6 +83,11 @@ upload_cert_keeper() {
   upload_one cert-keeper portable "$ROOT_DIR/outputs/windows-cert-keeper/final/CertKeeper-x64-portable.zip"
 }
 
+upload_user() {
+  upload_one user setup "$ROOT_DIR/outputs/windows-user/final/CloudRelayUserSetup-x64.exe"
+  upload_one user portable "$ROOT_DIR/outputs/windows-user/final/CloudRelayUser-x64-portable.zip"
+}
+
 if [ "$TARGET" = "-h" ] || [ "$TARGET" = "--help" ]; then
   usage
   exit 0
@@ -114,9 +119,13 @@ case "$TARGET" in
   cert-keeper)
     upload_cert_keeper
     ;;
+  user)
+    upload_user
+    ;;
   all)
     upload_publisher
     upload_cert_keeper
+    upload_user
     ;;
   *)
     usage >&2

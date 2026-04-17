@@ -660,6 +660,16 @@
         title: '证书管家便携版',
         note: '最新版证书管家桌面包，下载后解压即可使用。',
       },
+      {
+        key: 'user:setup',
+        title: '用户端安装包',
+        note: '最新版驻阡陌用户端安装包，适合用户机器常规安装。',
+      },
+      {
+        key: 'user:portable',
+        title: '用户端便携版',
+        note: '最新版驻阡陌用户端便携包，便于快速试用和调试。',
+      },
     ];
 
     const checks = [
@@ -892,7 +902,7 @@
         link.rel = 'noreferrer';
         link.innerHTML = `
           <div class="download-meta">
-            <span class="download-badge">${slot.key.split(':')[0] === 'publisher' ? '驻阡陌' : '证书管家'}</span>
+            <span class="download-badge">${slot.key.split(':')[0] === 'publisher' ? '驻阡陌' : slot.key.split(':')[0] === 'cert-keeper' ? '证书管家' : '用户端'}</span>
             <code>v${item.version}</code>
           </div>
           <strong>${slot.title} v${item.version}</strong>

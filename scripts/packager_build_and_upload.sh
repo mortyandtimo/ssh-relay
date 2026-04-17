@@ -17,7 +17,7 @@ IGNORED_TRACKED_DIRTY_PATHS=(
 
 usage() {
   cat <<'EOF'
-usage: scripts/packager_build_and_upload.sh [publisher|cert-keeper|all]
+usage: scripts/packager_build_and_upload.sh [publisher|cert-keeper|user|all]
 
 Packager responsibilities:
   1. Pull source changes from Gitee on the build machine.

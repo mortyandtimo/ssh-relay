@@ -36,8 +36,8 @@ echo "  3. export VERSION=<release-version>   # optional but recommended for for
 echo "  4. ./scripts/packager_build_and_upload.sh all"
 echo
 echo "Direct manual equivalents remain available:"
-echo "  - ./scripts/build_windows_artifacts.sh [publisher|cert-keeper|all]"
-echo "  - ./scripts/upload_windows_artifacts.sh [publisher|cert-keeper|all]"
+echo "  - ./scripts/build_windows_artifacts.sh [publisher|cert-keeper|user|all]"
+echo "  - ./scripts/upload_windows_artifacts.sh [publisher|cert-keeper|user|all]"
 echo
 echo "Note: this script is informational only; it does not push code and does not upload installers."
 
