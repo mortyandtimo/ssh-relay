@@ -39,6 +39,13 @@ export type P2PRuntimeStatus = {
   stderrLogPath: string;
   argsSummary: string;
   lastError: string;
+  machineId: string;
+  rpcPortal: string;
+  nodeHostname: string;
+  virtualIpv4: string;
+  instanceId: string;
+  peerCount: number;
+  connectedPeers: string[];
 };
 
 type HostHttpRequestInput = {
@@ -194,6 +201,13 @@ export async function loadP2PRuntimeStatus(): Promise<P2PRuntimeStatus> {
       stderrLogPath: "",
       argsSummary: "",
       lastError: "未接入 Tauri 宿主",
+      machineId: "",
+      rpcPortal: "",
+      nodeHostname: "",
+      virtualIpv4: "",
+      instanceId: "",
+      peerCount: 0,
+      connectedPeers: [],
     };
   }
 }

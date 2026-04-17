@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD;
@@ -26,8 +27,10 @@ use std::os::windows::process::CommandExt;
 const INSTALLER_QUIT_ARG: &str = "--quit-for-install";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const P2P_RUNTIME_RELATIVE_PATH: &str = "runtime/easytier-core.exe";
+const P2P_CLI_RELATIVE_PATH: &str = "runtime/easytier-cli.exe";
 const USER_P2P_TCP_LISTENER: &str = "tcp://0.0.0.0:21010";
 const USER_P2P_UDP_LISTENER: &str = "udp://0.0.0.0:21010";
+const USER_P2P_RPC_PORTAL: &str = "127.0.0.1:29888";
 
 struct AppHttpState {
     client: Client,
@@ -48,6 +51,7 @@ impl AppHttpState {
 struct P2PRuntimeManagerState {
     child: Mutex<Option<Child>>,
     launch: Mutex<P2PRuntimeLaunchState>,
+    op: Mutex<()>,
 }
 
 #[derive(Clone, Default)]
@@ -62,6 +66,13 @@ struct P2PRuntimeLaunchState {
     stderr_log_path: String,
     args_summary: String,
     last_error: String,
+    machine_id: String,
+    rpc_portal: String,
+    node_hostname: String,
+    virtual_ipv4: String,
+    instance_id: String,
+    peer_count: usize,
+    connected_peers: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +89,13 @@ struct P2PRuntimeStatus {
     stderr_log_path: String,
     args_summary: String,
     last_error: String,
+    machine_id: String,
+    rpc_portal: String,
+    node_hostname: String,
+    virtual_ipv4: String,
+    instance_id: String,
+    peer_count: usize,
+    connected_peers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,7 +298,7 @@ fn p2p_runtime_stop(
     app: AppHandle,
     runtime: State<'_, P2PRuntimeManagerState>,
 ) -> Result<P2PRuntimeStatus, String> {
-    stop_p2p_runtime_process(&runtime)?;
+    stop_p2p_runtime_process(&app, &runtime)?;
     current_p2p_runtime_status(&app, &runtime)
 }
 
@@ -345,7 +363,7 @@ fn window_request_close(window: Window) -> Result<(), String> {
 #[tauri::command]
 fn app_exit(app: AppHandle) -> Result<(), String> {
     if let Some(runtime) = app.try_state::<P2PRuntimeManagerState>() {
-        let _ = stop_p2p_runtime_process(&runtime);
+        let _ = stop_p2p_runtime_process(&app, &runtime);
     }
     save_bounds_on_exit(&app);
     app.exit(0);
@@ -627,6 +645,14 @@ fn p2p_runtime_stderr_log_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("p2p-runtime-stderr.log"))
 }
 
+fn p2p_runtime_pid_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(p2p_runtime_work_dir(app)?.join("easytier.pid"))
+}
+
+fn p2p_runtime_machine_id_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(p2p_runtime_work_dir(app)?.join("machine-id.txt"))
+}
+
 fn ensure_p2p_runtime_dirs(app: &AppHandle) -> Result<(), String> {
     let config_dir = app.path().app_config_dir().map_err(|err| err.to_string())?;
     let log_dir = app.path().app_log_dir().map_err(|err| err.to_string())?;
@@ -666,6 +692,35 @@ fn resolve_p2p_runtime_executable(app: &AppHandle) -> Result<PathBuf, String> {
     ))
 }
 
+fn resolve_p2p_cli_executable(app: &AppHandle) -> Result<PathBuf, String> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|dir| dir.to_path_buf()));
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(ref dir) = exe_dir {
+        candidates.push(dir.join("easytier-cli.exe"));
+        candidates.push(dir.join("runtime").join("easytier-cli.exe"));
+    }
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join(P2P_CLI_RELATIVE_PATH));
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../deploy/windows/user-console/runtime/easytier-cli.exe"),
+    );
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+    Err(format!(
+        "未找到 bundled easytier-cli.exe (搜索了 {} 个路径)",
+        candidates.len()
+    ))
+}
+
 fn trim_option(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -692,7 +747,202 @@ fn split_p2p_peers(value: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn build_p2p_runtime_args(config: &AppConfig, file_log_dir: &Path) -> Result<Vec<String>, String> {
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn load_or_create_p2p_machine_id(app: &AppHandle) -> Result<String, String> {
+    let path = p2p_runtime_machine_id_path(app)?;
+    if path.exists() {
+        let value = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+        let value = value.trim();
+        if !value.is_empty() {
+            return Ok(value.to_string());
+        }
+    }
+    let config_dir = app.path().app_config_dir().map_err(|err| err.to_string())?;
+    let seed = format!(
+        "{}:{}:{}",
+        config_dir.display(),
+        now_millis(),
+        std::process::id()
+    );
+    let machine_id = format!("cloud-relay-user-{:016x}", fnv1a64(seed.as_bytes()));
+    fs::write(&path, &machine_id).map_err(|err| err.to_string())?;
+    Ok(machine_id)
+}
+
+fn read_p2p_runtime_pid(app: &AppHandle) -> Result<Option<u32>, String> {
+    let path = p2p_runtime_pid_path(app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let pid = content.trim().parse::<u32>().ok();
+    Ok(pid)
+}
+
+fn write_p2p_runtime_pid(app: &AppHandle, pid: u32) -> Result<(), String> {
+    let path = p2p_runtime_pid_path(app)?;
+    fs::write(path, pid.to_string()).map_err(|err| err.to_string())
+}
+
+fn clear_p2p_runtime_pid(app: &AppHandle) -> Result<(), String> {
+    let path = p2p_runtime_pid_path(app)?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn is_process_running(pid: u32) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}")])
+            .output();
+        return output
+            .ok()
+            .filter(|result| result.status.success())
+            .map(|result| String::from_utf8_lossy(&result.stdout).contains(&pid.to_string()))
+            .unwrap_or(false);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+}
+
+fn kill_process_by_pid(pid: u32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status()
+            .map_err(|err| format!("停止 EasyTier 进程失败: {err}"))?;
+        if !status.success() {
+            return Err(format!(
+                "停止 EasyTier 进程失败: taskkill exited with {status}"
+            ));
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let status = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .map_err(|err| format!("停止 EasyTier 进程失败: {err}"))?;
+        if !status.success() {
+            return Err(format!("停止 EasyTier 进程失败: kill exited with {status}"));
+        }
+        Ok(())
+    }
+}
+
+fn query_p2p_runtime_json(
+    app: &AppHandle,
+    subcommand: &[&str],
+) -> Result<serde_json::Value, String> {
+    let cli = resolve_p2p_cli_executable(app)?;
+    let output = Command::new(cli)
+        .args(["-p", USER_P2P_RPC_PORTAL, "-o", "json"])
+        .args(subcommand)
+        .output()
+        .map_err(|err| format!("调用 easytier-cli 失败: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(format!("读取 EasyTier 运行态失败: {detail}"));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())
+}
+
+fn refresh_p2p_runtime_live_snapshot(
+    app: &AppHandle,
+    launch: &mut P2PRuntimeLaunchState,
+    running: bool,
+) {
+    launch.machine_id = load_or_create_p2p_machine_id(app).unwrap_or_default();
+    launch.rpc_portal = USER_P2P_RPC_PORTAL.to_string();
+    launch.node_hostname.clear();
+    launch.virtual_ipv4.clear();
+    launch.instance_id.clear();
+    launch.peer_count = 0;
+    launch.connected_peers.clear();
+    if !running {
+        return;
+    }
+
+    if let Ok(node) = query_p2p_runtime_json(app, &["node", "info"]) {
+        launch.node_hostname = node
+            .get("hostname")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        launch.virtual_ipv4 = node
+            .get("ipv4_addr")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        launch.instance_id = node
+            .get("inst_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+    }
+
+    if let Ok(peers) = query_p2p_runtime_json(app, &["peer", "list"]) {
+        if let Some(items) = peers.as_array() {
+            let peers = items
+                .iter()
+                .filter(|item| item.get("cost").and_then(|value| value.as_str()) != Some("Local"))
+                .map(|item| {
+                    let hostname = item
+                        .get("hostname")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("未知节点");
+                    let ipv4 = item
+                        .get("ipv4")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    let tunnel = item
+                        .get("tunnel_proto")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("-");
+                    let latency = item
+                        .get("lat_ms")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("-");
+                    let ipv4_suffix = if ipv4.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {ipv4}")
+                    };
+                    format!("{hostname}{ipv4_suffix} / {tunnel} / {latency} ms")
+                })
+                .collect::<Vec<String>>();
+            launch.peer_count = peers.len();
+            launch.connected_peers = peers;
+        }
+    }
+}
+
+fn build_p2p_runtime_args_with_app(
+    app: &AppHandle,
+    config: &AppConfig,
+    file_log_dir: &Path,
+) -> Result<Vec<String>, String> {
     let network_name = require_trimmed(
         config.p2p_network_name.as_deref(),
         "请先配置 EasyTier 网络名",
@@ -711,14 +961,19 @@ fn build_p2p_runtime_args(config: &AppConfig, file_log_dir: &Path) -> Result<Vec
         .unwrap_or_else(|| "cloud-relay-user".to_string());
     let hostname = trim_option(config.p2p_hostname.as_deref());
     let peers = split_p2p_peers(config.p2p_peer_url.as_deref());
+    let machine_id = load_or_create_p2p_machine_id(app)?;
 
     let mut args = vec![
         "--network-name".to_string(),
         network_name,
         "--network-secret".to_string(),
         network_secret,
+        "--machine-id".to_string(),
+        machine_id,
         "-m".to_string(),
         instance_name,
+        "--rpc-portal".to_string(),
+        USER_P2P_RPC_PORTAL.to_string(),
         "--file-log-dir".to_string(),
         file_log_dir.display().to_string(),
         "--listeners".to_string(),
@@ -770,14 +1025,14 @@ fn current_p2p_runtime_status(
     let log_dir = app.path().app_log_dir().map_err(|err| err.to_string())?;
     let executable_path = resolve_p2p_runtime_executable(app).ok();
     let config = load_app_config(app.clone()).unwrap_or_default();
-    let args_preview = build_p2p_runtime_args(&config, &log_dir);
+    let args_preview = build_p2p_runtime_args_with_app(app, &config, &log_dir);
 
-    let mut launch = runtime
-        .launch
-        .lock()
-        .map_err(|_| "P2P runtime 锁不可用".to_string())?;
     let mut child_slot = runtime
         .child
+        .lock()
+        .map_err(|_| "P2P runtime 锁不可用".to_string())?;
+    let mut launch = runtime
+        .launch
         .lock()
         .map_err(|_| "P2P runtime 锁不可用".to_string())?;
 
@@ -805,10 +1060,12 @@ fn current_p2p_runtime_status(
                     status, launch.stderr_log_path
                 );
                 *child_slot = None;
+                let _ = clear_p2p_runtime_pid(app);
                 false
             }
             Ok(None) => {
                 launch.pid = Some(child.id());
+                let _ = write_p2p_runtime_pid(app, child.id());
                 true
             }
             Err(err) => {
@@ -817,8 +1074,21 @@ fn current_p2p_runtime_status(
             }
         }
     } else {
-        false
+        match read_p2p_runtime_pid(app)? {
+            Some(pid) if is_process_running(pid) => {
+                launch.pid = Some(pid);
+                true
+            }
+            Some(_) => {
+                let _ = clear_p2p_runtime_pid(app);
+                launch.pid = None;
+                false
+            }
+            None => false,
+        }
     };
+
+    refresh_p2p_runtime_live_snapshot(app, &mut launch, running);
 
     Ok(P2PRuntimeStatus {
         available: launch.available,
@@ -832,10 +1102,24 @@ fn current_p2p_runtime_status(
         stderr_log_path: launch.stderr_log_path.clone(),
         args_summary: launch.args_summary.clone(),
         last_error: launch.last_error.clone(),
+        machine_id: launch.machine_id.clone(),
+        rpc_portal: launch.rpc_portal.clone(),
+        node_hostname: launch.node_hostname.clone(),
+        virtual_ipv4: launch.virtual_ipv4.clone(),
+        instance_id: launch.instance_id.clone(),
+        peer_count: launch.peer_count,
+        connected_peers: launch.connected_peers.clone(),
     })
 }
 
-fn stop_p2p_runtime_process(runtime: &P2PRuntimeManagerState) -> Result<(), String> {
+fn stop_p2p_runtime_process(
+    app: &AppHandle,
+    runtime: &P2PRuntimeManagerState,
+) -> Result<(), String> {
+    let _op_guard = runtime
+        .op
+        .lock()
+        .map_err(|_| "P2P runtime 锁不可用".to_string())?;
     let mut child_slot = runtime
         .child
         .lock()
@@ -845,12 +1129,19 @@ fn stop_p2p_runtime_process(runtime: &P2PRuntimeManagerState) -> Result<(), Stri
             .kill()
             .map_err(|err| format!("停止 EasyTier 失败: {err}"))?;
         let _ = child.wait();
+    } else if let Some(pid) = read_p2p_runtime_pid(app)? {
+        if is_process_running(pid) {
+            kill_process_by_pid(pid)?;
+        }
     }
+    let _ = clear_p2p_runtime_pid(app);
     let mut launch = runtime
         .launch
         .lock()
         .map_err(|_| "P2P runtime 锁不可用".to_string())?;
     launch.pid = None;
+    launch.peer_count = 0;
+    launch.connected_peers.clear();
     Ok(())
 }
 
@@ -858,16 +1149,39 @@ fn start_p2p_runtime_internal(
     app: &AppHandle,
     runtime: &P2PRuntimeManagerState,
 ) -> Result<P2PRuntimeStatus, String> {
+    let _op_guard = runtime
+        .op
+        .lock()
+        .map_err(|_| "P2P runtime 锁不可用".to_string())?;
     ensure_p2p_runtime_dirs(app)?;
+    let current = current_p2p_runtime_status(app, runtime)?;
+    if current.running {
+        return Ok(current);
+    }
     let executable_path = resolve_p2p_runtime_executable(app)?;
     let work_dir = p2p_runtime_work_dir(app)?;
     let stdout_log_path = p2p_runtime_stdout_log_path(app)?;
     let stderr_log_path = p2p_runtime_stderr_log_path(app)?;
     let log_dir = app.path().app_log_dir().map_err(|err| err.to_string())?;
     let config = load_app_config(app.clone())?;
-    let args = build_p2p_runtime_args(&config, &log_dir)?;
+    let args = build_p2p_runtime_args_with_app(app, &config, &log_dir)?;
 
-    stop_p2p_runtime_process(runtime)?;
+    {
+        let mut child_slot = runtime
+            .child
+            .lock()
+            .map_err(|_| "P2P runtime 锁不可用".to_string())?;
+        if let Some(mut child) = child_slot.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    if let Some(pid) = read_p2p_runtime_pid(app)? {
+        if is_process_running(pid) {
+            kill_process_by_pid(pid)?;
+        }
+    }
+    let _ = clear_p2p_runtime_pid(app);
 
     let stdout = OpenOptions::new()
         .create(true)
@@ -892,6 +1206,7 @@ fn start_p2p_runtime_internal(
         .spawn()
         .map_err(|err| format!("启动 easytier-core 失败: {err}"))?;
     let pid = child.id();
+    write_p2p_runtime_pid(app, pid)?;
 
     {
         let mut slot = runtime
@@ -916,10 +1231,22 @@ fn start_p2p_runtime_internal(
             stderr_log_path: stderr_log_path.display().to_string(),
             args_summary: summarize_p2p_args(&args),
             last_error: String::new(),
+            machine_id: load_or_create_p2p_machine_id(app).unwrap_or_default(),
+            rpc_portal: USER_P2P_RPC_PORTAL.to_string(),
+            node_hostname: String::new(),
+            virtual_ipv4: String::new(),
+            instance_id: String::new(),
+            peer_count: 0,
+            connected_peers: Vec::new(),
         };
     }
 
-    current_p2p_runtime_status(app, runtime)
+    thread::sleep(Duration::from_millis(450));
+    let status = current_p2p_runtime_status(app, runtime)?;
+    if !status.running && !status.last_error.trim().is_empty() {
+        return Err(status.last_error.clone());
+    }
+    Ok(status)
 }
 
 fn maybe_auto_start_p2p(app: &AppHandle) {
@@ -1014,7 +1341,7 @@ fn installer_requested_quit(args: &[String]) -> bool {
 
 fn handle_installer_quit_request(app: &AppHandle) {
     if let Some(runtime) = app.try_state::<P2PRuntimeManagerState>() {
-        let _ = stop_p2p_runtime_process(&runtime);
+        let _ = stop_p2p_runtime_process(app, &runtime);
     }
     save_bounds_on_exit(app);
     app.exit(0);
@@ -1104,7 +1431,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             "quit" => {
                 if let Some(runtime) = app.try_state::<P2PRuntimeManagerState>() {
-                    let _ = stop_p2p_runtime_process(&runtime);
+                    let _ = stop_p2p_runtime_process(app, &runtime);
                 }
                 app.exit(0);
             }
@@ -1169,7 +1496,7 @@ fn main() {
                         if let Some(runtime) =
                             window.app_handle().try_state::<P2PRuntimeManagerState>()
                         {
-                            let _ = stop_p2p_runtime_process(&runtime);
+                            let _ = stop_p2p_runtime_process(&window.app_handle(), &runtime);
                         }
                         save_bounds_on_exit(&window.app_handle());
                         window.app_handle().exit(0);
@@ -1210,7 +1537,7 @@ fn main() {
     let _ = app.run(move |_, event| {
         if let tauri::RunEvent::Exit = event {
             if let Some(runtime) = app_handle.try_state::<P2PRuntimeManagerState>() {
-                let _ = stop_p2p_runtime_process(&runtime);
+                let _ = stop_p2p_runtime_process(&app_handle, &runtime);
             }
         }
     });

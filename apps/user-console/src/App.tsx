@@ -78,6 +78,7 @@ function formatStartedAt(timestamp?: number | null) {
 
 function p2pRuntimeLabel(status?: P2PRuntimeStatus | null) {
   if (!status) return "读取中";
+  if (status.running && status.peerCount > 0) return `已联网 (${status.peerCount})`;
   if (status.running) return "运行中";
   if (!status.available) return "未打包 easytier-core";
   if (!status.configured) return "待配置";
@@ -426,7 +427,7 @@ export default function App() {
       setAppConfig(merged);
       await saveAppConfig(merged);
       await refreshP2PStatus();
-      setNotice("P2P 设置已保存。若 EasyTier 已在运行，请停止后重新启动以应用新参数。");
+      setNotice("P2P 设置已保存。当前不会自动重启；若 EasyTier 已在运行，请手动停止后再启动以应用新参数。");
     } catch (configError) {
       setError(configError instanceof Error ? configError.message : "保存 P2P 设置失败");
     } finally {
@@ -435,6 +436,10 @@ export default function App() {
   }, [appConfig, refreshP2PStatus]);
 
   const handleP2PRuntimeStart = useCallback(async () => {
+    if (p2pStatus?.running) {
+      setNotice("EasyTier 已在运行，本次不会重复拉起。");
+      return;
+    }
     setP2PBusy(true);
     setError("");
     setNotice("");
@@ -444,13 +449,13 @@ export default function App() {
       await saveAppConfig(merged);
       const status = await startP2PRuntime();
       setP2PStatus(status);
-      setNotice("EasyTier 已启动。");
+      setNotice(status.peerCount > 0 ? `EasyTier 已启动并接入 ${status.peerCount} 个对等节点。` : "EasyTier 已启动。");
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : "启动 EasyTier 失败");
     } finally {
       setP2PBusy(false);
     }
-  }, [appConfig]);
+  }, [appConfig, p2pStatus?.running]);
 
   const handleP2PRuntimeStop = useCallback(async () => {
     setP2PBusy(true);
@@ -633,6 +638,9 @@ export default function App() {
                 <div className="policy-chip">图床读取: 保持云端 HTTPS 公网入口</div>
                 <div className="policy-chip">P2P 随应用启动: {appConfig.p2pAutoStart ? "已开启" : "未开启"}</div>
                 <div className="policy-chip">EasyTier 运行态: {p2pRuntimeLabel(p2pStatus)}</div>
+                <div className="policy-chip">本机节点: {p2pStatus?.nodeHostname || "待上报"}</div>
+                <div className="policy-chip">虚拟 IPv4: {p2pStatus?.virtualIpv4 || "未分配"}</div>
+                <div className="policy-chip">当前对等节点: {p2pStatus?.peerCount ?? 0}</div>
               </section>
             </div>
           </>
@@ -658,6 +666,7 @@ export default function App() {
                 <div className="state-row"><span>用户角色</span><span>{roleLabel(user.role)}</span></div>
                 <div className="state-row"><span>云端回退</span><span>{driveFallbackLabel}</span></div>
                 <div className="state-row"><span>P2P 客户端</span><span>{p2pRuntimeLabel(p2pStatus)}</span></div>
+                <div className="state-row"><span>虚拟 IPv4</span><span>{p2pStatus?.virtualIpv4 || "未分配"}</span></div>
                 <div className="state-row"><span>后续能力</span><span>下载任务、断点续传、本地缓存</span></div>
               </section>
             </div>
@@ -736,12 +745,19 @@ export default function App() {
                 <div className="state-row"><span>进程 PID</span><span>{p2pStatus?.pid ?? "未运行"}</span></div>
                 <div className="state-row"><span>最近启动</span><span>{formatStartedAt(p2pStatus?.startedAt)}</span></div>
                 <div className="state-row"><span>参数状态</span><span>{p2pStatus?.configured ? "已配置" : "未配置"}</span></div>
+                <div className="state-row"><span>本机主机名</span><span>{p2pStatus?.nodeHostname || "待上报"}</span></div>
+                <div className="state-row"><span>虚拟 IPv4</span><span>{p2pStatus?.virtualIpv4 || "未分配"}</span></div>
+                <div className="state-row"><span>对等节点数</span><span>{p2pStatus?.peerCount ?? 0}</span></div>
+                <div className="state-row"><span>machine-id</span><span>{p2pStatus?.machineId || "未生成"}</span></div>
+                <div className="state-row"><span>RPC 端口</span><span>{p2pStatus?.rpcPortal || "未配置"}</span></div>
                 <label>执行文件</label>
                 <div className="mono-box">{p2pStatus?.executablePath || "当前安装包尚未带入 easytier-core.exe"}</div>
                 <label>运行目录</label>
                 <div className="mono-box">{p2pStatus?.workDir || desktopHostPaths.configDir}</div>
                 <label>启动参数摘要</label>
                 <div className="mono-box">{p2pStatus?.argsSummary || "当前尚未生成启动参数。先填写下方 EasyTier 节点参数。"}</div>
+                <label>当前对等节点</label>
+                <div className="mono-box">{p2pStatus?.connectedPeers?.length ? p2pStatus.connectedPeers.join("\n") : "当前尚未接入任何对等节点。"}</div>
                 {p2pStatus?.lastError ? (
                   <>
                     <label>最近错误</label>
@@ -749,8 +765,8 @@ export default function App() {
                   </>
                 ) : null}
                 <div className="action-row wrap">
-                  <button className="primary" type="button" onClick={() => void handleP2PRuntimeStart()} disabled={p2pBusy || !p2pStatus?.available}>
-                    {p2pBusy ? "处理中..." : "启动 EasyTier"}
+                  <button className="primary" type="button" onClick={() => void handleP2PRuntimeStart()} disabled={p2pBusy || !p2pStatus?.available || Boolean(p2pStatus?.running)}>
+                    {p2pBusy ? "处理中..." : p2pStatus?.running ? "EasyTier 运行中" : "启动 EasyTier"}
                   </button>
                   <button className="secondary" type="button" onClick={() => void handleP2PRuntimeStop()} disabled={p2pBusy || !p2pStatus?.running}>
                     停止 EasyTier
@@ -772,7 +788,7 @@ export default function App() {
             <section className="card" style={{ marginTop: 18 }}>
               <h2>EasyTier 节点参数</h2>
               <p className="helper-text">
-                这里配置的是用户端 EasyTier 节点本身，不是云端隧道。当前按官方命令行参数生成启动参数，保存后重启 EasyTier 生效。
+                这里配置的是用户端 EasyTier 节点本身，不是云端隧道。当前按官方命令行参数生成启动参数；保存只会落盘，不会自动重启 EasyTier。
               </p>
               <label>网络名</label>
               <input
