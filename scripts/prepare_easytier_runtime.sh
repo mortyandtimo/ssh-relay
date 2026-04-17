@@ -153,17 +153,18 @@ prepare_from_url() {
   need_cmd curl "install curl first"
   local temp_dir temp_file
   temp_dir="$(mktemp -d)"
-  trap 'rm -rf "$temp_dir"' EXIT
   temp_file="$temp_dir/easytier-download"
   echo "Downloading EasyTier runtime from: $url"
   curl --fail --silent --show-error --location "$url" --output "$temp_file"
   if printf '%s' "$url" | grep -E '\.exe([?#].*)?$' >/dev/null 2>&1; then
     mv "$temp_file" "$temp_dir/easytier-core.exe"
     copy_from_exe "$temp_dir/easytier-core.exe"
+    rm -rf "$temp_dir"
     return
   fi
   mv "$temp_file" "$temp_dir/easytier-runtime.zip"
   extract_zip "$temp_dir/easytier-runtime.zip"
+  rm -rf "$temp_dir"
 }
 
 ensure_target_ready() {
