@@ -8,6 +8,8 @@ COOKIE_FILE="${COOKIE_FILE:-}"
 VERSION="${VERSION:-}"
 UPLOAD_RETRY_COUNT="${UPLOAD_RETRY_COUNT:-4}"
 UPLOAD_RETRY_DELAY="${UPLOAD_RETRY_DELAY:-2}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 
 usage() {
   cat <<'EOF'
@@ -20,6 +22,8 @@ Required env:
 Optional env:
   VERSION      release version path used by /downloads/releases/<product>/<version>/
                If omitted, a traceable default is derived from package version + git commit.
+  ADMIN_EMAIL / ADMIN_PASSWORD
+               if provided, the script can refresh an expired admin cookie jar automatically after a 401
 EOF
 }
 
@@ -33,6 +37,40 @@ detect_default_version() {
     return
   fi
   echo "${git_date}-${git_sha}"
+}
+
+json_escape() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+login_admin_session() {
+  if [ -z "$ADMIN_EMAIL" ] || [ -z "$ADMIN_PASSWORD" ]; then
+    return 1
+  fi
+  local payload response_file status_code
+  payload="$(printf '{"email":"%s","password":"%s"}' "$(json_escape "$ADMIN_EMAIL")" "$(json_escape "$ADMIN_PASSWORD")")"
+  response_file="$(mktemp)"
+  status_code="$(curl --silent --show-error --location \
+    -c "$COOKIE_FILE" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    -o "$response_file" \
+    -w '%{http_code}' \
+    "$SERVER_URL/api/auth/login")"
+  if [ "$status_code" -lt 200 ] || [ "$status_code" -ge 300 ]; then
+    echo "admin login failed while refreshing upload session: http $status_code" >&2
+    cat "$response_file" >&2
+    rm -f "$response_file"
+    return 1
+  fi
+  rm -f "$response_file"
+  return 0
 }
 
 sha256_file() {
@@ -64,10 +102,11 @@ upload_one() {
   local file_hash
   file_hash="$(sha256_file "$file_path")"
   echo "Uploading $product/$channel -> $file_path"
-  local response_file status_code curl_exit attempt max_attempts retry_delay
+  local response_file status_code curl_exit attempt max_attempts retry_delay relogin_attempted
   response_file="$(mktemp)"
   max_attempts="$UPLOAD_RETRY_COUNT"
   retry_delay="$UPLOAD_RETRY_DELAY"
+  relogin_attempted=0
 
   for attempt in $(seq 1 "$max_attempts"); do
     status_code=""
@@ -90,6 +129,14 @@ upload_one() {
       rm -f "$response_file"
       echo
       return 0
+    fi
+
+    if [ "$curl_exit" -eq 0 ] && [ "$status_code" = "401" ] && [ "$relogin_attempted" = "0" ]; then
+      if login_admin_session; then
+        relogin_attempted=1
+        echo "warning: upload session expired; refreshed admin login and retrying immediately" >&2
+        continue
+      fi
     fi
 
     if [ "$attempt" -lt "$max_attempts" ]; then
