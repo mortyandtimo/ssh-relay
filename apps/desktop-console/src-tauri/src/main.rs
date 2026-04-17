@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use chrono::{Local, LocalResult, TimeZone};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
@@ -31,9 +32,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::System::ProcessStatus::{
-    K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
-};
+use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetProcessIoCounters, GetProcessTimes, GetSystemTimes, IO_COUNTERS,
@@ -145,6 +144,55 @@ struct AgentTrafficSnapshot {
     down_total: u64,
     up_total: u64,
     sampled_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrafficDeltaInput {
+    node_id: String,
+    down_bytes: u64,
+    up_bytes: u64,
+    sampled_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TrafficHistoryDayEntry {
+    date: String,
+    month: String,
+    down_bytes: u64,
+    up_bytes: u64,
+    total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TrafficHistoryMonthEntry {
+    month: String,
+    down_bytes: u64,
+    up_bytes: u64,
+    total_bytes: u64,
+    day_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TrafficHistorySnapshot {
+    node_id: String,
+    current_month: String,
+    days: Vec<TrafficHistoryDayEntry>,
+    months: Vec<TrafficHistoryMonthEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TrafficLedgerDay {
+    down_bytes: u64,
+    up_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TrafficLedgerFile {
+    nodes: HashMap<String, HashMap<String, TrafficLedgerDay>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,11 +321,17 @@ fn runtime_start(
     let pid = child.id();
 
     {
-        let mut slot = runtime.child.lock().map_err(|_| "runtime 锁不可用".to_string())?;
+        let mut slot = runtime
+            .child
+            .lock()
+            .map_err(|_| "runtime 锁不可用".to_string())?;
         *slot = Some(child);
     }
     {
-        let mut launch = runtime.launch.lock().map_err(|_| "runtime 锁不可用".to_string())?;
+        let mut launch = runtime
+            .launch
+            .lock()
+            .map_err(|_| "runtime 锁不可用".to_string())?;
         *launch = RuntimeLaunchState {
             available: true,
             pid: Some(pid),
@@ -309,8 +363,16 @@ fn runtime_stop(
 }
 
 #[tauri::command]
-fn open_runtime_log(app: AppHandle, runtime: State<'_, RuntimeManagerState>, kind: String) -> Result<(), String> {
-    let launch = runtime.launch.lock().map_err(|_| "runtime 锁不可用".to_string())?.clone();
+fn open_runtime_log(
+    app: AppHandle,
+    runtime: State<'_, RuntimeManagerState>,
+    kind: String,
+) -> Result<(), String> {
+    let launch = runtime
+        .launch
+        .lock()
+        .map_err(|_| "runtime 锁不可用".to_string())?
+        .clone();
     let path = match kind.as_str() {
         "stdout" => PathBuf::from(launch.stdout_log_path),
         "stderr" => PathBuf::from(launch.stderr_log_path),
@@ -370,7 +432,13 @@ fn auto_start_enabled() -> Result<bool, String> {
         use windows_sys::Win32::System::Registry::*;
         let mut h_key: HKEY = core::ptr::null_mut();
         let result = unsafe {
-            RegOpenKeyExW(HKEY_CURRENT_USER, encode_wide(key).as_ptr(), 0, KEY_QUERY_VALUE, &mut h_key)
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                encode_wide(key).as_ptr(),
+                0,
+                KEY_QUERY_VALUE,
+                &mut h_key,
+            )
         };
         if result == 2 {
             return Ok(false);
@@ -446,7 +514,13 @@ fn set_auto_start(enable: bool) -> Result<(), String> {
         use windows_sys::Win32::System::Registry::*;
         let mut h_key: HKEY = core::ptr::null_mut();
         let result = unsafe {
-            RegOpenKeyExW(HKEY_CURRENT_USER, encode_wide(key).as_ptr(), 0, KEY_SET_VALUE, &mut h_key)
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                encode_wide(key).as_ptr(),
+                0,
+                KEY_SET_VALUE,
+                &mut h_key,
+            )
         };
         if result != 0 {
             return Err(format!("RegOpenKeyEx failed: {}", result));
@@ -456,7 +530,13 @@ fn set_auto_start(enable: bool) -> Result<(), String> {
         if enable {
             let mut h_key: HKEY = core::ptr::null_mut();
             let result = unsafe {
-                RegOpenKeyExW(HKEY_CURRENT_USER, encode_wide(key).as_ptr(), 0, KEY_SET_VALUE, &mut h_key)
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    encode_wide(key).as_ptr(),
+                    0,
+                    KEY_SET_VALUE,
+                    &mut h_key,
+                )
             };
             if result != 0 {
                 return Err(format!("RegOpenKeyEx failed: {}", result));
@@ -479,7 +559,13 @@ fn set_auto_start(enable: bool) -> Result<(), String> {
         } else {
             let mut h_key: HKEY = core::ptr::null_mut();
             let result = unsafe {
-                RegOpenKeyExW(HKEY_CURRENT_USER, encode_wide(key).as_ptr(), 0, KEY_SET_VALUE, &mut h_key)
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    encode_wide(key).as_ptr(),
+                    0,
+                    KEY_SET_VALUE,
+                    &mut h_key,
+                )
             };
             if result != 0 {
                 return Err(format!("RegOpenKeyEx failed: {}", result));
@@ -582,7 +668,11 @@ fn app_resource_usage(state: State<'_, ResourceSampleState>) -> DesktopAppUsage 
 
 #[tauri::command]
 fn agent_traffic(runtime: State<'_, RuntimeManagerState>) -> Result<AgentTrafficSnapshot, String> {
-    let launch = runtime.launch.lock().map_err(|_| "runtime 锁不可用".to_string())?.clone();
+    let launch = runtime
+        .launch
+        .lock()
+        .map_err(|_| "runtime 锁不可用".to_string())?
+        .clone();
     if launch.api_base_url.is_empty() {
         return Ok(AgentTrafficSnapshot {
             tunnels: vec![],
@@ -596,9 +686,50 @@ fn agent_traffic(runtime: State<'_, RuntimeManagerState>) -> Result<AgentTraffic
         .timeout(std::time::Duration::from_millis(500))
         .build()
         .map_err(|err| err.to_string())?;
-    let resp = client.get(&url).send().map_err(|err| format!("agent traffic 请求失败: {err}"))?;
-    let snapshot: AgentTrafficSnapshot = resp.json().map_err(|err| format!("agent traffic 解析失败: {err}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|err| format!("agent traffic 请求失败: {err}"))?;
+    let snapshot: AgentTrafficSnapshot = resp
+        .json()
+        .map_err(|err| format!("agent traffic 解析失败: {err}"))?;
     Ok(snapshot)
+}
+
+#[tauri::command]
+fn load_traffic_history(app: AppHandle, node_id: String) -> Result<TrafficHistorySnapshot, String> {
+    let trimmed = node_id.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(empty_traffic_history_snapshot(String::new()));
+    }
+    let ledger = read_traffic_ledger_file(&app)?;
+    let days = ledger.nodes.get(&trimmed).cloned().unwrap_or_default();
+    Ok(build_traffic_history_snapshot(trimmed, days))
+}
+
+#[tauri::command]
+fn record_traffic_delta(
+    app: AppHandle,
+    input: TrafficDeltaInput,
+) -> Result<TrafficHistorySnapshot, String> {
+    let node_id = input.node_id.trim().to_string();
+    if node_id.is_empty() {
+        return Ok(empty_traffic_history_snapshot(String::new()));
+    }
+    if input.down_bytes == 0 && input.up_bytes == 0 {
+        return load_traffic_history(app, node_id);
+    }
+
+    let mut ledger = read_traffic_ledger_file(&app)?;
+    let day_key = local_day_key_from_millis(input.sampled_at.unwrap_or_else(now_millis));
+    let node_days = ledger.nodes.entry(node_id.clone()).or_default();
+    let day = node_days.entry(day_key).or_default();
+    day.down_bytes = day.down_bytes.saturating_add(input.down_bytes);
+    day.up_bytes = day.up_bytes.saturating_add(input.up_bytes);
+    write_traffic_ledger_file(&app, &ledger)?;
+
+    let days = ledger.nodes.get(&node_id).cloned().unwrap_or_default();
+    Ok(build_traffic_history_snapshot(node_id, days))
 }
 
 fn recent_log_excerpt(path: &str) -> String {
@@ -635,8 +766,14 @@ fn current_runtime_status(
     client: &Client,
 ) -> Result<RuntimeStatus, String> {
     ensure_runtime_dirs(app)?;
-    let mut launch = runtime.launch.lock().map_err(|_| "runtime 锁不可用".to_string())?;
-    let mut child_slot = runtime.child.lock().map_err(|_| "runtime 锁不可用".to_string())?;
+    let mut launch = runtime
+        .launch
+        .lock()
+        .map_err(|_| "runtime 锁不可用".to_string())?;
+    let mut child_slot = runtime
+        .child
+        .lock()
+        .map_err(|_| "runtime 锁不可用".to_string())?;
 
     let available = resolve_agent_executable(app).is_ok();
     launch.available = available;
@@ -699,12 +836,20 @@ fn current_runtime_status(
 }
 
 fn stop_runtime_process(runtime: &RuntimeManagerState) -> Result<(), String> {
-    let mut child_slot = runtime.child.lock().map_err(|_| "runtime 锁不可用".to_string())?;
+    let mut child_slot = runtime
+        .child
+        .lock()
+        .map_err(|_| "runtime 锁不可用".to_string())?;
     if let Some(mut child) = child_slot.take() {
-        child.kill().map_err(|err| format!("停止 runtime 失败: {err}"))?;
+        child
+            .kill()
+            .map_err(|err| format!("停止 runtime 失败: {err}"))?;
         let _ = child.wait();
     }
-    let mut launch = runtime.launch.lock().map_err(|_| "runtime 锁不可用".to_string())?;
+    let mut launch = runtime
+        .launch
+        .lock()
+        .map_err(|_| "runtime 锁不可用".to_string())?;
     launch.pid = None;
     launch.last_error.clear();
     Ok(())
@@ -892,7 +1037,10 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_config_item =
         MenuItem::with_id(app, "open_config", "打开配置目录", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &open_logs_item, &open_config_item, &quit_item])?;
+    let menu = Menu::with_items(
+        app,
+        &[&show_item, &open_logs_item, &open_config_item, &quit_item],
+    )?;
 
     let app_handle = app.clone();
     let tray_icon = Image::from_bytes(include_bytes!("../icons/icon-256.png"))?;
@@ -1127,48 +1275,76 @@ extern "system" {
 
 #[cfg(target_os = "windows")]
 fn dpapi_encrypt(data: &[u8]) -> Result<Vec<u8>, String> {
-    use windows_sys::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPT_INTEGER_BLOB,
-    };
+    use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
     let mut input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
         pbData: data.as_ptr() as *mut u8,
     };
-    let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
     let result = unsafe {
-        CryptProtectData(&mut input, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), 0, &mut output)
+        CryptProtectData(
+            &mut input,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            &mut output,
+        )
     };
     if result == 0 {
         return Err("CryptProtectData failed".to_string());
     }
-    let encrypted = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
-    unsafe { LocalFree(output.pbData as *mut _); }
+    let encrypted =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        LocalFree(output.pbData as *mut _);
+    }
     Ok(encrypted)
 }
 
 #[cfg(target_os = "windows")]
 fn dpapi_decrypt(data: &[u8]) -> Result<Vec<u8>, String> {
-    use windows_sys::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPT_INTEGER_BLOB,
-    };
+    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
     let mut input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
         pbData: data.as_ptr() as *mut u8,
     };
-    let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
     let result = unsafe {
-        CryptUnprotectData(&mut input, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), 0, &mut output)
+        CryptUnprotectData(
+            &mut input,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            &mut output,
+        )
     };
     if result == 0 {
         return Err("CryptUnprotectData failed".to_string());
     }
-    let decrypted = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
-    unsafe { LocalFree(output.pbData as *mut _); }
+    let decrypted =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        LocalFree(output.pbData as *mut _);
+    }
     Ok(decrypted)
 }
 
 fn login_profiles_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app.path().app_config_dir().map_err(|err| err.to_string())?.join("login-profiles.json"))
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|err| err.to_string())?
+        .join("login-profiles.json"))
 }
 
 fn read_login_profiles_file(app: &AppHandle) -> Result<LoginProfilesFile, String> {
@@ -1192,7 +1368,12 @@ fn read_login_profiles(app: AppHandle) -> Result<LoginProfilesFile, String> {
 }
 
 #[tauri::command]
-fn save_login_profile(app: AppHandle, email: String, password: String, auto_login: bool) -> Result<(), String> {
+fn save_login_profile(
+    app: AppHandle,
+    email: String,
+    password: String,
+    auto_login: bool,
+) -> Result<(), String> {
     let mut data = read_login_profiles_file(&app)?;
 
     #[cfg(target_os = "windows")]
@@ -1205,7 +1386,11 @@ fn save_login_profile(app: AppHandle, email: String, password: String, auto_logi
         existing.encrypted_password = encrypted;
         existing.auto_login = auto_login;
     } else {
-        data.profiles.push(LoginProfile { email: email.clone(), encrypted_password: encrypted, auto_login });
+        data.profiles.push(LoginProfile {
+            email: email.clone(),
+            encrypted_password: encrypted,
+            auto_login,
+        });
     }
     data.last_used_email = Some(email);
     write_login_profiles_file(&app, &data)
@@ -1224,8 +1409,14 @@ fn delete_login_profile(app: AppHandle, email: String) -> Result<(), String> {
 #[tauri::command]
 fn decrypt_login_password(app: AppHandle, email: String) -> Result<String, String> {
     let data = read_login_profiles_file(&app)?;
-    let profile = data.profiles.iter().find(|p| p.email == email).ok_or("profile not found")?;
-    let bytes = STANDARD.decode(&profile.encrypted_password).map_err(|err| err.to_string())?;
+    let profile = data
+        .profiles
+        .iter()
+        .find(|p| p.email == email)
+        .ok_or("profile not found")?;
+    let bytes = STANDARD
+        .decode(&profile.encrypted_password)
+        .map_err(|err| err.to_string())?;
 
     #[cfg(target_os = "windows")]
     let decrypted = dpapi_decrypt(&bytes)?;
@@ -1257,11 +1448,27 @@ struct AppConfig {
 }
 
 fn window_state_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app.path().app_config_dir().map_err(|err| err.to_string())?.join("window-state.json"))
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|err| err.to_string())?
+        .join("window-state.json"))
 }
 
 fn app_config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app.path().app_config_dir().map_err(|err| err.to_string())?.join("app-config.json"))
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|err| err.to_string())?
+        .join("app-config.json"))
+}
+
+fn traffic_ledger_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|err| err.to_string())?
+        .join("traffic-ledger.json"))
 }
 
 #[tauri::command]
@@ -1298,9 +1505,97 @@ fn load_app_config(app: AppHandle) -> Result<AppConfig, String> {
     serde_json::from_str(&content).map_err(|err| err.to_string())
 }
 
+fn read_traffic_ledger_file(app: &AppHandle) -> Result<TrafficLedgerFile, String> {
+    let path = traffic_ledger_path(app)?;
+    if !path.exists() {
+        return Ok(TrafficLedgerFile::default());
+    }
+    let content = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    serde_json::from_str(&content).map_err(|err| err.to_string())
+}
+
+fn write_traffic_ledger_file(app: &AppHandle, data: &TrafficLedgerFile) -> Result<(), String> {
+    let path = traffic_ledger_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let content = serde_json::to_string_pretty(data).map_err(|err| err.to_string())?;
+    fs::write(&path, content).map_err(|err| err.to_string())
+}
+
+fn local_day_key_from_millis(sampled_at: u64) -> String {
+    match Local.timestamp_millis_opt(sampled_at as i64) {
+        LocalResult::Single(value) => value.format("%Y-%m-%d").to_string(),
+        _ => Local::now().format("%Y-%m-%d").to_string(),
+    }
+}
+
+fn current_month_key() -> String {
+    Local::now().format("%Y-%m").to_string()
+}
+
+fn empty_traffic_history_snapshot(node_id: String) -> TrafficHistorySnapshot {
+    TrafficHistorySnapshot {
+        node_id,
+        current_month: current_month_key(),
+        days: Vec::new(),
+        months: Vec::new(),
+    }
+}
+
+fn build_traffic_history_snapshot(
+    node_id: String,
+    days: HashMap<String, TrafficLedgerDay>,
+) -> TrafficHistorySnapshot {
+    if days.is_empty() {
+        return empty_traffic_history_snapshot(node_id);
+    }
+
+    let mut day_items = days
+        .into_iter()
+        .map(|(date, totals)| TrafficHistoryDayEntry {
+            month: date.get(..7).unwrap_or_default().to_string(),
+            total_bytes: totals.down_bytes.saturating_add(totals.up_bytes),
+            down_bytes: totals.down_bytes,
+            up_bytes: totals.up_bytes,
+            date,
+        })
+        .collect::<Vec<_>>();
+    day_items.sort_by(|left, right| left.date.cmp(&right.date));
+
+    let mut month_map: HashMap<String, TrafficHistoryMonthEntry> = HashMap::new();
+    for day in &day_items {
+        let month_entry =
+            month_map
+                .entry(day.month.clone())
+                .or_insert_with(|| TrafficHistoryMonthEntry {
+                    month: day.month.clone(),
+                    down_bytes: 0,
+                    up_bytes: 0,
+                    total_bytes: 0,
+                    day_count: 0,
+                });
+        month_entry.down_bytes = month_entry.down_bytes.saturating_add(day.down_bytes);
+        month_entry.up_bytes = month_entry.up_bytes.saturating_add(day.up_bytes);
+        month_entry.total_bytes = month_entry.total_bytes.saturating_add(day.total_bytes);
+        month_entry.day_count += 1;
+    }
+
+    let mut month_items = month_map.into_values().collect::<Vec<_>>();
+    month_items.sort_by(|left, right| right.month.cmp(&left.month));
+
+    TrafficHistorySnapshot {
+        node_id,
+        current_month: current_month_key(),
+        days: day_items,
+        months: month_items,
+    }
+}
+
 fn main() {
     let http_state = AppHttpState::new().expect("failed to create desktop HTTP client");
-    let installer_quit_on_launch = installer_requested_quit(&std::env::args().skip(1).collect::<Vec<_>>());
+    let installer_quit_on_launch =
+        installer_requested_quit(&std::env::args().skip(1).collect::<Vec<_>>());
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if installer_requested_quit(&args) {
@@ -1367,6 +1662,8 @@ fn main() {
             http_request,
             app_resource_usage,
             agent_traffic,
+            load_traffic_history,
+            record_traffic_delta,
             read_login_profiles,
             save_login_profile,
             delete_login_profile,

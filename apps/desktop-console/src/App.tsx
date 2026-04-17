@@ -33,7 +33,7 @@ import {
   type PublishRuleForm,
 } from "./app-services/publisherModel";
 import { ControlResultBlock } from "./controlResultBlock";
-import { createTauriDesktopTransport, ensureRuntimeStarted, loadAgentTraffic, loadAutoStartEnabled, loadDesktopAppUsage, loadDesktopHostPaths, loadRuntimeStatus, openDesktopExternal, openRuntimeLog, stopRuntime, windowMinimize, windowRequestClose, windowStartDrag, windowToggleMaximize, type AgentTrafficSnapshot, type DesktopAppUsage, type RuntimeStatus, type LoginProfilesFile, type AppConfig, readLoginProfiles, saveLoginProfile, deleteLoginProfile, decryptLoginPassword, saveAppConfig, loadAppConfig, appExit, setAutoStart } from "./desktopHost";
+import { createTauriDesktopTransport, ensureRuntimeStarted, loadAgentTraffic, loadAutoStartEnabled, loadDesktopAppUsage, loadDesktopHostPaths, loadRuntimeStatus, openDesktopExternal, openRuntimeLog, stopRuntime, windowMinimize, windowRequestClose, windowStartDrag, windowToggleMaximize, type AgentTrafficSnapshot, type DesktopAppUsage, type RuntimeStatus, type LoginProfilesFile, type AppConfig, type TrafficHistoryDayEntry, type TrafficHistorySnapshot, readLoginProfiles, saveLoginProfile, deleteLoginProfile, decryptLoginPassword, saveAppConfig, loadAppConfig, appExit, setAutoStart, loadTrafficHistory, recordTrafficDelta } from "./desktopHost";
 
 type DesktopWindowEnv = {
   apiBaseUrl?: string;
@@ -81,6 +81,12 @@ type DrawerState =
 const desktopPublisherApiBaseUrl = "https://publisher.manage.020309.top";
 const desktopPublisherHost = "publisher.manage.020309.top";
 const desktopManagePortalHost = "manage.020309.top";
+const emptyTrafficHistory: TrafficHistorySnapshot = {
+  nodeId: "",
+  currentMonth: "",
+  days: [],
+  months: [],
+};
 
 function normalizeDesktopApiBaseUrl(value?: string) {
   const trimmed = (value || "").trim();
@@ -309,6 +315,9 @@ export default function App() {
   const [trafficRate, setTrafficRate] = useState({ downRate: 0, upRate: 0 });
   const [agentTraffic, setAgentTraffic] = useState<AgentTrafficSnapshot | null>(null);
   const [tunnelRates, setTunnelRates] = useState<Map<string, { downRate: number; upRate: number }>>(new Map());
+  const [trafficHistory, setTrafficHistory] = useState<TrafficHistorySnapshot>(emptyTrafficHistory);
+  const [trafficCalendarOpen, setTrafficCalendarOpen] = useState(false);
+  const [trafficCalendarMonth, setTrafficCalendarMonth] = useState(currentMonthKey(new Date()));
   const agentTrafficPrevRef = useRef<{ sampledAt: number; downTotal: number; upTotal: number; tunnels: Map<string, { downBytes: number; upBytes: number }> } | null>(null);
   const refreshInFlightRef = useRef(false);
   const runtimePollInFlightRef = useRef(false);
@@ -613,6 +622,31 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    const runtimeNode = runtimeStatus.nodeId.trim();
+
+    async function syncTrafficHistory() {
+      if (!currentUser || !runtimeNode) {
+        if (!cancelled) {
+          setTrafficHistory(emptyTrafficHistory);
+          setTrafficCalendarMonth(currentMonthKey(new Date()));
+        }
+        return;
+      }
+      const payload = await loadTrafficHistory(runtimeNode);
+      if (!cancelled) {
+        setTrafficHistory(payload);
+        setTrafficCalendarMonth((current) => current || payload.currentMonth || currentMonthKey(new Date()));
+      }
+    }
+
+    void syncTrafficHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, runtimeStatus.nodeId]);
+
+  useEffect(() => {
+    let cancelled = false;
 
     async function pollUsage() {
       if (usagePollInFlightRef.current) return;
@@ -645,6 +679,7 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    const runtimeNode = runtimeStatus.nodeId.trim();
 
     async function pollTraffic() {
       if (!currentUser || !runtimeRunning || trafficPollInFlightRef.current) return;
@@ -677,6 +712,20 @@ export default function App() {
             const downRate = Math.max(0, snapshot.downTotal - prev.downTotal) / seconds;
             const upRate = Math.max(0, snapshot.upTotal - prev.upTotal) / seconds;
             setTrafficRate({ downRate, upRate });
+
+            const downDelta = Math.max(0, snapshot.downTotal - prev.downTotal);
+            const upDelta = Math.max(0, snapshot.upTotal - prev.upTotal);
+            if ((downDelta > 0 || upDelta > 0) && runtimeNode) {
+              try {
+                const history = await recordTrafficDelta(runtimeNode, downDelta, upDelta, snapshot.sampledAt || now);
+                if (!cancelled) {
+                  setTrafficHistory(history);
+                  setTrafficCalendarMonth((current) => current || history.currentMonth || currentMonthKey(new Date()));
+                }
+              } catch {
+                // ignore persistence failures; live traffic should remain visible
+              }
+            }
           }
         }
 
@@ -709,7 +758,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [currentUser, runtimeRunning]);
+  }, [currentUser, runtimeRunning, runtimeStatus.nodeId]);
 
   async function loadSnapshot() {
     const [payload, metrics] = await Promise.all([
@@ -879,16 +928,30 @@ export default function App() {
     }
     return trafficRate;
   }, [publishableTunnels.length, trafficRate]);
-  const effectiveTrafficTotal = useMemo(() => {
-    if (publishableTunnels.length === 0) {
-      return 0;
-    }
-    return localTrafficTotals.downTotal + localTrafficTotals.upTotal;
-  }, [publishableTunnels.length, localTrafficTotals.downTotal, localTrafficTotals.upTotal]);
+  const currentTrafficMonth = useMemo(
+    () => trafficHistory.currentMonth || currentMonthKey(new Date()),
+    [trafficHistory.currentMonth],
+  );
+  const currentMonthTrafficSummary = useMemo(
+    () => trafficHistory.months.find((item) => item.month === currentTrafficMonth) || null,
+    [currentTrafficMonth, trafficHistory.months],
+  );
+  const effectiveTrafficTotal = useMemo(
+    () => currentMonthTrafficSummary?.totalBytes || 0,
+    [currentMonthTrafficSummary],
+  );
   const downRateLabel = useMemo(() => formatRate(effectiveTrafficRate.downRate), [effectiveTrafficRate.downRate]);
   const upRateLabel = useMemo(() => formatRate(effectiveTrafficRate.upRate), [effectiveTrafficRate.upRate]);
   const totalTrafficLabel = useMemo(() => formatBytesTotal(effectiveTrafficTotal), [effectiveTrafficTotal]);
   const currentRouteLabel = useMemo(() => `${currentRoute.label} · ${currentDevice?.nodeName || "当前设备未绑定"}`, [currentDevice, currentRoute.label]);
+  const selectedTrafficMonthSummary = useMemo(
+    () => trafficHistory.months.find((item) => item.month === trafficCalendarMonth) || null,
+    [trafficCalendarMonth, trafficHistory.months],
+  );
+  const trafficMonthDays = useMemo(
+    () => buildTrafficCalendar(trafficCalendarMonth, trafficHistory.days),
+    [trafficCalendarMonth, trafficHistory.days],
+  );
 
   const drawerTunnel = useMemo(() => {
     if (!drawerState || drawerState.kind !== "rule") return null;
@@ -1836,7 +1899,11 @@ export default function App() {
           <div className="stat-card"><div className="stat-title"><i className="fas fa-database" /> 本地服务</div><div className="stat-number">{localServices.length}</div><div>{localServices.length > 0 ? "已录入本机服务" : "尚未录入"}</div></div>
           <div className="stat-card"><div className="stat-title"><i className="fas fa-share-alt" /> 已发布规则</div><div className="stat-number">{publishableTunnels.length}</div><div>{activeRulesCount} 活跃 · {Math.max(0, publishableTunnels.length - activeRulesCount)} 非活跃</div></div>
           <div className="stat-card"><div className="stat-title"><i className="fas fa-exclamation-triangle" /> 需关注</div><div className="stat-number">{attentionCount}</div><div>{diagnosticsItems[0]?.label || "当前没有阻塞项"}</div></div>
-          <div className="stat-card"><div className="stat-title"><i className="fas fa-chart-line" /> 总流量</div><div className="stat-number">{totalTrafficLabel}</div><div>本软件隧道总流量</div></div>
+          <button className="stat-card stat-card-button" type="button" onClick={() => setTrafficCalendarOpen(true)}>
+            <div className="stat-title"><i className="fas fa-chart-line" /> 总流量</div>
+            <div className="stat-number">{totalTrafficLabel}</div>
+            <div>{monthLabel(currentTrafficMonth)}累计 · 点击查看日历</div>
+          </button>
         </div>
 
         {publishableTunnels.length > 0 ? (
@@ -2023,6 +2090,7 @@ export default function App() {
           <div className="settings-row"><span>Runtime 状态</span><span>{runtimeReady ? "运行中" : runtimeStatus.running ? "已启动但未就绪" : "未运行"}</span></div>
           <div className="settings-row"><span>Runtime Node ID</span><span>{runtimeStatus.nodeId || "未生成"}</span></div>
           <div className="settings-row"><span>Relay TCP</span><span>{runtimeStatus.relayTcpUrl || "未配置"}</span></div>
+          <div className="settings-row"><span>EasyTier 打包</span><span>当前发行包会把 EasyTier runtime 一并放入 runtime/</span></div>
           <div className="settings-row"><span>配置目录</span><span>{desktopHostPaths.configDir}</span></div>
           <div className="settings-row"><span>日志目录</span><span>{desktopHostPaths.logDir}</span></div>
 
@@ -2333,6 +2401,57 @@ export default function App() {
             </div>
           </div>
         </div>
+        {trafficCalendarOpen ? (
+          <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setTrafficCalendarOpen(false)}>
+            <div className="modal-dialog traffic-calendar-dialog">
+              <div className="traffic-calendar-head">
+                <div>
+                  <h3>流量月历</h3>
+                  <p>统计口径为当前发布器节点的日累计与月累计流量，账本保存在配置目录，不会因为重新下载便携版而清零。</p>
+                </div>
+                <button className="btn" type="button" onClick={() => setTrafficCalendarOpen(false)}>关闭</button>
+              </div>
+              <div className="traffic-calendar-toolbar">
+                <button className="btn" type="button" onClick={() => setTrafficCalendarMonth(previousMonthKey(trafficCalendarMonth))}>上个月</button>
+                <strong>{monthLabel(trafficCalendarMonth)}</strong>
+                <button className="btn" type="button" onClick={() => setTrafficCalendarMonth(nextMonthKey(trafficCalendarMonth))}>下个月</button>
+              </div>
+              <div className="traffic-calendar-summary">
+                <div className="metric-box"><span>月累计</span><strong>{formatBytesTotal(selectedTrafficMonthSummary?.totalBytes || 0)}</strong></div>
+                <div className="metric-box"><span>下载</span><strong>{formatBytesTotal(selectedTrafficMonthSummary?.downBytes || 0)}</strong></div>
+                <div className="metric-box"><span>上传</span><strong>{formatBytesTotal(selectedTrafficMonthSummary?.upBytes || 0)}</strong></div>
+                <div className="metric-box"><span>活跃天数</span><strong>{String(selectedTrafficMonthSummary?.dayCount || 0)}</strong></div>
+              </div>
+              <div className="traffic-calendar-grid traffic-calendar-weekdays">
+                {["日", "一", "二", "三", "四", "五", "六"].map((item) => <div key={item} className="traffic-weekday">{item}</div>)}
+              </div>
+              <div className="traffic-calendar-grid">
+                {trafficMonthDays.map((item, index) => item ? (
+                  <div key={item.date} className={`traffic-day-cell ${item.entry ? "has-traffic" : ""}`}>
+                    <div className="traffic-day-top">
+                      <strong>{item.day}</strong>
+                      <span>{formatBytesCompact(item.entry?.totalBytes || 0)}</span>
+                    </div>
+                    <div className="traffic-day-lines">
+                      <span>↓ {formatBytesCompact(item.entry?.downBytes || 0)}</span>
+                      <span>↑ {formatBytesCompact(item.entry?.upBytes || 0)}</span>
+                    </div>
+                  </div>
+                ) : <div key={`empty-${index}`} className="traffic-day-cell traffic-day-empty" />)}
+              </div>
+              <div className="traffic-month-list">
+                {trafficHistory.months.length === 0 ? (
+                  <div className="weak-note">当前还没有持久化流量数据。</div>
+                ) : trafficHistory.months.map((item) => (
+                  <button key={item.month} type="button" className={`traffic-month-row ${item.month === trafficCalendarMonth ? "active" : ""}`} onClick={() => setTrafficCalendarMonth(item.month)}>
+                    <span>{monthLabel(item.month)}</span>
+                    <strong>{formatBytesTotal(item.totalBytes)}</strong>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
         {closeDialogOpen ? (
           <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setCloseDialogOpen(false)}>
             <div className="modal-dialog">
@@ -2415,6 +2534,53 @@ function formatBytesTotal(bytes?: number | null) {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(2)} MB`;
   return `${Math.max(bytes / 1024, 0).toFixed(2)} KB`;
+}
+
+function formatBytesCompact(bytes?: number | null) {
+  if (bytes == null || bytes <= 0) return "0";
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)}G`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)}M`;
+  return `${Math.max(bytes / 1024, 0).toFixed(1)}K`;
+}
+
+function currentMonthKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${year}-${month}`;
+}
+
+function monthLabel(month: string) {
+  if (!/^\d{4}-\d{2}$/.test(month)) return month || "当月";
+  return `${month.slice(0, 4)}年${month.slice(5, 7)}月`;
+}
+
+function previousMonthKey(month: string) {
+  const [year, value] = month.split("-").map(Number);
+  const date = Number.isFinite(year) && Number.isFinite(value) ? new Date(year, value - 2, 1) : new Date();
+  return currentMonthKey(date);
+}
+
+function nextMonthKey(month: string) {
+  const [year, value] = month.split("-").map(Number);
+  const date = Number.isFinite(year) && Number.isFinite(value) ? new Date(year, value, 1) : new Date();
+  return currentMonthKey(date);
+}
+
+function buildTrafficCalendar(month: string, days: TrafficHistoryDayEntry[]) {
+  const [year, value] = month.split("-").map(Number);
+  const monthDate = Number.isFinite(year) && Number.isFinite(value) ? new Date(year, value - 1, 1) : new Date();
+  const firstWeekday = monthDate.getDay();
+  const daysInMonth = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate();
+  const dayMap = new Map(days.filter((item) => item.month === currentMonthKey(monthDate)).map((item) => [item.date, item]));
+  const cells = [] as Array<{ date: string; day: number; entry: TrafficHistoryDayEntry | null } | null>;
+  for (let index = 0; index < firstWeekday; index += 1) {
+    cells.push(null);
+  }
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const date = `${currentMonthKey(monthDate)}-${String(day).padStart(2, "0")}`;
+    cells.push({ date, day, entry: dayMap.get(date) || null });
+  }
+  return cells;
 }
 
 function metricNumber(value: string | undefined) {

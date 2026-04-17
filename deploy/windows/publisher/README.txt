@@ -3,6 +3,7 @@ Cloud Relay Publisher Windows Artifacts
 Product summary:
 - 驻阡陌 / Cloud Relay Publisher 是 Windows 10/11 本机服务发布器。
 - 它负责管理本机服务、绑定云端入口、验证访问结果，并在后台托管 `client-agent.exe`。
+- 当前打包链会把 EasyTier runtime 一并揉进 `runtime/`，用于后续服务端 P2P 能力接入。
 - Windows 正式安装链路以 NSIS setup exe 为主，portable zip 为备用交付物。
 
 Expected outputs:
@@ -12,6 +13,7 @@ Expected outputs:
 Payload contents:
 - CloudRelayPublisher.exe: Tauri desktop shell
 - runtime/client-agent.exe: embedded reverse tunnel runtime
+- runtime/easytier-core.exe / easytier-cli.exe / 相关 sidecar: bundled EasyTier runtime payload
 - desktop-config.json: sample config for local relay endpoint selection
 
 Installer behavior:

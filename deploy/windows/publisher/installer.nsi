@@ -205,7 +205,7 @@ Section "Install"
   SetOverwrite on
 
   SetOutPath "$INSTDIR\runtime"
-  File "${PAYLOAD_DIR}/runtime/client-agent.exe"
+  File /r "${PAYLOAD_DIR}/runtime/*"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "${UNINSTALL_REG_PATH}" "DisplayName" "${APP_NAME}"
@@ -337,8 +337,7 @@ Section "Uninstall"
   Delete "$INSTDIR\WebView2Loader.dll"
   Delete "$INSTDIR\README.txt"
   Delete "$INSTDIR\desktop-config.json"
-  Delete "$INSTDIR\runtime\client-agent.exe"
-  RMDir "$INSTDIR\runtime"
+  RMDir /r "$INSTDIR\runtime"
   RMDir /r "$INSTDIR\logs"
   RMDir "$INSTDIR"
 SectionEnd

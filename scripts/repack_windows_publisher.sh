@@ -17,6 +17,7 @@ SOURCE_AGENT="$ROOT_DIR/deploy/bin/windows-amd64/client-agent.exe"
 SOURCE_AGENT_DIR="$(dirname "$SOURCE_AGENT")"
 SOURCE_AGENT_PKG="./apps/client-agent/cmd/client-agent"
 BUNDLED_AGENT="$APP_DIR/src-tauri/runtime/client-agent.exe"
+OPTIONAL_RUNTIME_DIR="$ROOT_DIR/deploy/windows/user-console/runtime"
 
 if [ -f "$TARGET_EXE_GNU" ]; then
   TARGET_EXE="$TARGET_EXE_GNU"
@@ -31,6 +32,7 @@ mkdir -p "$OUT_DIR" "$FINAL_DIR" "$SOURCE_AGENT_DIR"
 rm -rf "$PORTABLE_DIR" "$PAYLOAD_DIR"
 rm -f "$FINAL_DIR/CloudRelayPublisherSetup-x64.exe"
 mkdir -p "$PORTABLE_DIR/runtime" "$PORTABLE_DIR/logs" "$PAYLOAD_DIR/runtime"
+mkdir -p "$(dirname "$BUNDLED_AGENT")"
 
 pushd "$ROOT_DIR" >/dev/null
 GOOS=windows GOARCH=amd64 go build -o "$SOURCE_AGENT" "$SOURCE_AGENT_PKG"
@@ -48,6 +50,11 @@ fi
 
 cp "$SOURCE_AGENT" "$PORTABLE_DIR/runtime/client-agent.exe"
 cp "$SOURCE_AGENT" "$PAYLOAD_DIR/runtime/client-agent.exe"
+if [ -d "$OPTIONAL_RUNTIME_DIR" ]; then
+  cp -R "$OPTIONAL_RUNTIME_DIR"/. "$PORTABLE_DIR/runtime/"
+  cp -R "$OPTIONAL_RUNTIME_DIR"/. "$PAYLOAD_DIR/runtime/"
+  cp -R "$OPTIONAL_RUNTIME_DIR"/. "$(dirname "$BUNDLED_AGENT")/"
+fi
 cp "$ROOT_DIR/deploy/windows/desktop/desktop-config.json.example" "$PORTABLE_DIR/desktop-config.json"
 cp "$ROOT_DIR/deploy/windows/desktop/desktop-config.json.example" "$PAYLOAD_DIR/desktop-config.json"
 cp "$ROOT_DIR/deploy/windows/desktop/README.txt" "$PORTABLE_DIR/README.txt"

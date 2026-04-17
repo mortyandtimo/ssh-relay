@@ -63,6 +63,29 @@ export type AgentTrafficSnapshot = {
   sampledAt: number;
 };
 
+export type TrafficHistoryDayEntry = {
+  date: string;
+  month: string;
+  downBytes: number;
+  upBytes: number;
+  totalBytes: number;
+};
+
+export type TrafficHistoryMonthEntry = {
+  month: string;
+  downBytes: number;
+  upBytes: number;
+  totalBytes: number;
+  dayCount: number;
+};
+
+export type TrafficHistorySnapshot = {
+  nodeId: string;
+  currentMonth: string;
+  days: TrafficHistoryDayEntry[];
+  months: TrafficHistoryMonthEntry[];
+};
+
 export async function loadRuntimeStatus(): Promise<RuntimeStatus> {
   try {
     return await invoke<RuntimeStatus>("runtime_status");
@@ -153,6 +176,30 @@ export async function loadAgentTraffic(): Promise<AgentTrafficSnapshot | null> {
   } catch {
     return null;
   }
+}
+
+export async function loadTrafficHistory(nodeId: string): Promise<TrafficHistorySnapshot> {
+  try {
+    return await invoke<TrafficHistorySnapshot>("load_traffic_history", { nodeId });
+  } catch {
+    return {
+      nodeId,
+      currentMonth: "",
+      days: [],
+      months: [],
+    };
+  }
+}
+
+export async function recordTrafficDelta(
+  nodeId: string,
+  downBytes: number,
+  upBytes: number,
+  sampledAt?: number,
+): Promise<TrafficHistorySnapshot> {
+  return await invoke<TrafficHistorySnapshot>("record_traffic_delta", {
+    input: { nodeId, downBytes, upBytes, sampledAt },
+  });
 }
 
 function mergeResponseCookies(cookieJar: Map<string, string>, setCookies: string[] | undefined) {
