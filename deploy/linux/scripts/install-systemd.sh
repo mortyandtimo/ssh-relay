@@ -11,6 +11,7 @@ sudo install -d -m 0755 /etc/cloud-relay-platform/client-agent
 sudo install -m 0644 "${SYSTEMD_DIR}/cloud-relay-server-api.service" /etc/systemd/system/cloud-relay-server-api.service
 sudo install -m 0644 "${SYSTEMD_DIR}/cloud-relay-tcp.service" /etc/systemd/system/cloud-relay-tcp.service
 sudo install -m 0644 "${SYSTEMD_DIR}/cloud-relay-udp.service" /etc/systemd/system/cloud-relay-udp.service
+sudo install -m 0644 "${SYSTEMD_DIR}/cloud-relay-easytier.service" /etc/systemd/system/cloud-relay-easytier.service
 sudo install -m 0644 "${SYSTEMD_DIR}/cloud-relay-client-agent.service" /etc/systemd/system/cloud-relay-client-agent.service
 sudo install -m 0644 "${SYSTEMD_DIR}/cloud-relay-client-agent@.service" /etc/systemd/system/cloud-relay-client-agent@.service
 

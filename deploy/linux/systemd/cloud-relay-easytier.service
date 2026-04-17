@@ -1,0 +1,26 @@
+[Unit]
+Description=Cloud Relay Platform EasyTier Bootstrap Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/cloud-relay-platform/easytier
+EnvironmentFile=/etc/cloud-relay-platform/easytier.env
+ExecStart=/opt/cloud-relay-platform/easytier/current/easytier-core \
+  --no-tun true \
+  --listeners tcp://0.0.0.0:11010 \
+  --listeners udp://0.0.0.0:11010 \
+  --mapped-listeners tcp://easytier.manage.020309.top:11010 \
+  --mapped-listeners udp://easytier.manage.020309.top:11010
+Restart=always
+RestartSec=3
+User=relay
+Group=relay
+LimitNOFILE=65535
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
