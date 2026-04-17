@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
 import type { MouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
@@ -33,6 +33,7 @@ type Page = "loading" | "login" | "home" | "drive" | "gallery" | "p2p" | "settin
 type ReopenDialogChoice = "cancel" | "new-window";
 
 const defaultApiUrl = "https://manage.020309.top";
+const defaultP2PPeerUrl = "tcp://easytier.manage.020309.top:11010";
 const defaultConfig: Required<Pick<AppConfig, "closeAction" | "driveFallbackPolicy" | "imageBulkUploadMode" | "p2pUseDhcp">> = {
   closeAction: "ask",
   driveFallbackPolicy: "admin_only",
@@ -48,6 +49,11 @@ function optionalTrimmed(value?: string) {
   return (value || "").trim();
 }
 
+function normalizePeerUrl(value?: string) {
+  if (typeof value !== "string") return defaultP2PPeerUrl;
+  return value.trim();
+}
+
 function mergeConfig(config?: AppConfig | null): AppConfig {
   return {
     apiBaseUrl: normalizeApiBaseUrl(config?.apiBaseUrl),
@@ -57,7 +63,7 @@ function mergeConfig(config?: AppConfig | null): AppConfig {
     imageBulkUploadMode: (config?.imageBulkUploadMode || defaultConfig.imageBulkUploadMode) as ImageBulkUploadMode,
     p2pNetworkName: optionalTrimmed(config?.p2pNetworkName),
     p2pNetworkSecret: optionalTrimmed(config?.p2pNetworkSecret),
-    p2pPeerUrl: config?.p2pPeerUrl || "",
+    p2pPeerUrl: normalizePeerUrl(config?.p2pPeerUrl),
     p2pVirtualIpv4: optionalTrimmed(config?.p2pVirtualIpv4),
     p2pUseDhcp: config?.p2pUseDhcp !== false,
     p2pInstanceName: optionalTrimmed(config?.p2pInstanceName),
@@ -180,63 +186,73 @@ export default function App() {
     let cancelled = false;
     void (async () => {
       try {
-        const [config, profiles, hostPaths, runtimeStatus] = await Promise.all([
+        const [config, profiles, hostPaths] = await Promise.all([
           loadAppConfig(),
           readLoginProfiles(),
           loadDesktopHostPaths(),
-          loadP2PRuntimeStatus(),
         ]);
         if (cancelled) return;
 
         const mergedConfig = mergeConfig(config);
-        setAppConfig(mergedConfig);
-        setApiUrl(mergedConfig.apiBaseUrl || defaultApiUrl);
-        setLoginProfiles(profiles);
-        setDesktopHostPaths(hostPaths);
-        setP2PStatus(runtimeStatus);
-
+        const nextApiUrl = mergedConfig.apiBaseUrl || defaultApiUrl;
         const lastEmail = profiles?.lastUsedEmail || profiles?.profiles[0]?.email || "";
-        if (lastEmail) {
-          setLoginEmail(lastEmail);
-        }
         const lastProfile = lastEmail ? profiles?.profiles.find((item) => item.email === lastEmail) : null;
-        let rememberedPassword = "";
-        if (lastProfile) {
-          try {
-            rememberedPassword = await decryptLoginPassword(lastEmail);
-          } catch {
-            rememberedPassword = "";
-          }
-          if (cancelled) return;
-          setLoginPassword(rememberedPassword);
-          setSavePassword(Boolean(rememberedPassword));
-          setAutoLogin(Boolean(rememberedPassword) && lastProfile.autoLogin);
-        }
+        const rememberedPasswordPromise = lastProfile
+          ? decryptLoginPassword(lastEmail).catch(() => "")
+          : Promise.resolve("");
 
-        const authed = await createDesktopApi(mergedConfig.apiBaseUrl || defaultApiUrl, transport || undefined).loadCurrentUser()
+        startTransition(() => {
+          setAppConfig(mergedConfig);
+          setApiUrl(nextApiUrl);
+          setLoginProfiles(profiles);
+          setDesktopHostPaths(hostPaths);
+          setLoginEmail(lastEmail);
+          setPage("login");
+        });
+        setInitializing(false);
+        void refreshP2PStatus();
+
+        const sessionApi = createDesktopApi(nextApiUrl, transport || undefined);
+        const authed = await sessionApi.loadCurrentUser()
           .then((response) => {
             if (cancelled) return true;
-            setUser(response.user);
-            setPage("home");
+            startTransition(() => {
+              setUser(response.user);
+              setPage("home");
+              setError("");
+            });
             return true;
           })
           .catch(() => false);
+        if (cancelled) return;
 
-        if (!cancelled && !authed) {
-          if (lastProfile?.autoLogin && rememberedPassword) {
-            try {
-              const response = await createDesktopApi(mergedConfig.apiBaseUrl || defaultApiUrl, transport || undefined).login(lastEmail, rememberedPassword);
-              if (!cancelled) {
+        const rememberedPassword = await rememberedPasswordPromise;
+        if (cancelled) return;
+
+        if (lastProfile) {
+          startTransition(() => {
+            setLoginPassword(rememberedPassword);
+            setSavePassword(Boolean(rememberedPassword));
+            setAutoLogin(Boolean(rememberedPassword) && lastProfile.autoLogin);
+          });
+        }
+
+        if (!authed && lastProfile?.autoLogin && rememberedPassword) {
+          try {
+            const response = await sessionApi.login(lastEmail, rememberedPassword);
+            if (!cancelled) {
+              startTransition(() => {
                 setUser(response.user);
                 setPage("home");
-              }
-            } catch {
-              if (!cancelled) {
-                setPage("login");
-              }
+                setError("");
+              });
             }
-          } else {
-            setPage("login");
+          } catch {
+            if (!cancelled) {
+              startTransition(() => {
+                setPage("login");
+              });
+            }
           }
         }
       } finally {
@@ -248,7 +264,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [transport]);
+  }, [refreshP2PStatus, transport]);
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -776,8 +792,9 @@ export default function App() {
                 rows={3}
                 value={appConfig.p2pPeerUrl || ""}
                 onChange={(event) => setAppConfig((current) => ({ ...current, p2pPeerUrl: event.target.value }))}
-                placeholder={"例如 tcp://public.easytier.top:11010\n可填多个，支持换行或逗号分隔"}
+                placeholder={`${defaultP2PPeerUrl}\n可填多个，支持换行或逗号分隔`}
               />
+              <p className="field-note">默认使用云端引导节点 `tcp://easytier.manage.020309.top:11010` 入网；如果后续新增长期在线的服务端节点，也可以一起填入。</p>
               <label className="check-row">
                 <input
                   type="checkbox"
@@ -812,7 +829,7 @@ export default function App() {
                 </div>
               </div>
               <p className="inline-note">
-                打包机需要把 `easytier-core.exe` 放进用户端安装包的 `runtime/` 目录中；当前页面会直接检查该文件是否已被带入。
+                Windows 打包机会自动准备 `easytier-core.exe` 到安装包的 `runtime/` 目录中；当前页面会直接检查该文件是否已被带入。
               </p>
             </section>
           </>
