@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -31,6 +32,13 @@ const P2P_CLI_RELATIVE_PATH: &str = "runtime/easytier-cli.exe";
 const USER_P2P_TCP_LISTENER: &str = "tcp://0.0.0.0:21010";
 const USER_P2P_UDP_LISTENER: &str = "udp://0.0.0.0:21010";
 const USER_P2P_RPC_PORTAL: &str = "127.0.0.1:29888";
+
+fn background_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
 
 struct AppHttpState {
     client: Client,
@@ -844,7 +852,7 @@ fn clear_p2p_runtime_pid(app: &AppHandle) -> Result<(), String> {
 fn is_process_running(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
     {
-        let output = Command::new("tasklist")
+        let output = background_command("tasklist")
             .args(["/FI", &format!("PID eq {pid}")])
             .output();
         return output
@@ -866,7 +874,7 @@ fn is_process_running(pid: u32) -> bool {
 fn kill_process_by_pid(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let status = Command::new("taskkill")
+        let status = background_command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status()
             .map_err(|err| format!("停止 EasyTier 进程失败: {err}"))?;
@@ -895,7 +903,7 @@ fn query_p2p_runtime_json(
     subcommand: &[&str],
 ) -> Result<serde_json::Value, String> {
     let cli = resolve_p2p_cli_executable(app)?;
-    let output = Command::new(cli)
+    let output = background_command(cli)
         .args(["-p", USER_P2P_RPC_PORTAL, "-o", "json"])
         .args(subcommand)
         .output()
@@ -1235,13 +1243,11 @@ fn start_p2p_runtime_internal(
         .open(&stderr_log_path)
         .map_err(|err| format!("打开 EasyTier stderr 日志失败: {err}"))?;
 
-    let mut command = Command::new(&executable_path);
+    let mut command = background_command(&executable_path);
     command.current_dir(&work_dir);
     command.args(&args);
     command.stdout(Stdio::from(stdout));
     command.stderr(Stdio::from(stderr));
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
 
     let child = command
         .spawn()
