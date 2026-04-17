@@ -294,6 +294,26 @@ const initialNodeFilter: NodeFilterState = {
   offset: 0,
 };
 
+function tunnelPublicPortRequired(type: string) {
+  return type !== "https";
+}
+
+function tunnelPublicPortLabel(type: string) {
+  return type === "https" ? "内部端口（可留空）" : "公网端口";
+}
+
+function tunnelPublicPortPlaceholder(type: string) {
+  return type === "https" ? "留空即可，标准入口固定走 443" : "";
+}
+
+function serializeTunnelPublicPort(type: string, publicPort: string) {
+  const trimmed = publicPort.trim();
+  if (type === "https") {
+    return trimmed ? Number(trimmed) : 0;
+  }
+  return Number(trimmed);
+}
+
 export default function App() {
   const [bootstrapRequired, setBootstrapRequired] = useState<boolean | null>(null);
   const [currentUser, setCurrentUser] = useState<UserSummary | null>(null);
@@ -872,7 +892,7 @@ function buildAuditQuery(filter: AuditFilterState) {
           transportPolicy: tunnelForm.transportPolicy,
           targetHost: tunnelForm.type === "socks5" ? "socks5" : tunnelForm.targetHost,
           targetPort: tunnelForm.type === "socks5" ? 1080 : Number(tunnelForm.targetPort),
-          publicPort: Number(tunnelForm.publicPort),
+          publicPort: serializeTunnelPublicPort(tunnelForm.type, tunnelForm.publicPort),
           domain: tunnelForm.domain || undefined,
           tlsMode: tunnelForm.type === "https" ? (tunnelForm.tlsMode || "edge_terminate") : undefined,
           probePath: tunnelForm.type === "http" || tunnelForm.type === "https" ? tunnelForm.probePath : undefined,
@@ -908,7 +928,7 @@ function buildAuditQuery(filter: AuditFilterState) {
           transportPolicy: tunnelEditForm.transportPolicy,
           targetHost: tunnelEditForm.targetHost,
           targetPort: Number(tunnelEditForm.targetPort),
-          publicPort: Number(tunnelEditForm.publicPort),
+          publicPort: serializeTunnelPublicPort(tunnelEditForm.type, tunnelEditForm.publicPort),
           domain: tunnelEditForm.domain || undefined,
           tlsMode: tunnelEditForm.type === "https" ? (tunnelEditForm.tlsMode || "edge_terminate") : undefined,
           probePath: tunnelEditForm.type === "http" || tunnelEditForm.type === "https" ? tunnelEditForm.probePath : undefined,
@@ -1956,15 +1976,15 @@ function buildAuditQuery(filter: AuditFilterState) {
                         {tunnelEditForm.type === "udp" ? <div className="form-note">UDP 当前为最小数据面 V1，已完成真实公网 echo 验证；当前仍不支持 UDP probe、复杂会话管理、生产级超时治理或 NAT 穿透。</div> : null}
                         <label><span>目标主机</span><input value={tunnelEditForm.targetHost} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetHost: event.target.value } : current)} required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelEditForm.targetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" required={tunnelEditForm.type !== "socks5"} disabled={tunnelEditForm.type === "socks5"} /></label>
-                        <label><span>{tunnelEditForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required /></label>
-                        <PortPlanHint
+                        <label><span>{tunnelPublicPortLabel(tunnelEditForm.type)}</span><input value={tunnelEditForm.publicPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" required={tunnelPublicPortRequired(tunnelEditForm.type)} placeholder={tunnelPublicPortPlaceholder(tunnelEditForm.type)} /></label>
+                        {tunnelEditForm.type !== "https" ? <PortPlanHint
                           type={tunnelEditForm.type}
                           suggestion={tunnelEditPortSuggestion}
                           currentPort={tunnelEditForm.publicPort}
                           actionLabel="推荐可用端口"
                           actionBusy={busyAction === "suggest-port:edit:" + tunnelEditForm.id}
                           onSuggest={() => void suggestEditTunnelPort()}
-                        />
+                        /> : null}
                         {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>域名</span><input value={tunnelEditForm.domain} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, domain: event.target.value } : current)} placeholder="例如 app.example.com" /></label> : null}
                         {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>probePath</span><input value={tunnelEditForm.probePath} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} placeholder="默认 /" /></label> : null}
                         {tunnelEditForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelEditForm.tlsMode} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, tlsMode: event.target.value } : current)}><option value="edge_terminate">edge_terminate</option></select></label> : null}
@@ -1985,7 +2005,10 @@ function buildAuditQuery(filter: AuditFilterState) {
                       <form className="form-grid" onSubmit={createTunnel}>
                         <label>
                           <span>类型</span>
-                          <select value={tunnelForm.type} onChange={(event) => setTunnelForm((current) => ({ ...current, type: event.target.value as "tcp" | "udp" | "http" | "https" | "socks5" }))}>
+                          <select value={tunnelForm.type} onChange={(event) => setTunnelForm((current) => {
+                            const nextType = event.target.value as "tcp" | "udp" | "http" | "https" | "socks5";
+                            return { ...current, type: nextType, publicPort: nextType === "https" ? "" : current.publicPort };
+                          })}>
                             <option value="tcp">TCP</option>
                             <option value="udp">UDP（最小 V1）</option>
                             <option value="http">HTTP</option>
@@ -2009,15 +2032,15 @@ function buildAuditQuery(filter: AuditFilterState) {
                         <label><span>传输策略</span><select value={tunnelForm.transportPolicy} onChange={(event) => setTunnelForm((current) => ({ ...current, transportPolicy: event.target.value as TunnelTransportPolicy }))}><option value="relay_only">relay_only</option><option value="p2p_preferred" disabled={!tunnelFormNodeOption?.supportsP2P}>p2p_preferred（预留）</option></select></label>
                         <label><span>目标主机</span><input value={tunnelForm.targetHost} onChange={(event) => setTunnelForm((current) => ({ ...current, targetHost: event.target.value }))} required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
                         <label><span>目标端口</span><input value={tunnelForm.targetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, targetPort: event.target.value }))} inputMode="numeric" required={tunnelForm.type !== "socks5"} disabled={tunnelForm.type === "socks5"} /></label>
-                        <label><span>{tunnelForm.type === "https" ? "内部端口（保留字段）" : "公网端口"}</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required /></label>
-                        <PortPlanHint
+                        <label><span>{tunnelPublicPortLabel(tunnelForm.type)}</span><input value={tunnelForm.publicPort} onChange={(event) => setTunnelForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required={tunnelPublicPortRequired(tunnelForm.type)} placeholder={tunnelPublicPortPlaceholder(tunnelForm.type)} /></label>
+                        {tunnelForm.type !== "https" ? <PortPlanHint
                           type={tunnelForm.type}
                           suggestion={tunnelPortSuggestion}
                           currentPort={tunnelForm.publicPort}
                           actionLabel="推荐可用端口"
                           actionBusy={busyAction === "suggest-port:create:" + tunnelForm.type}
                           onSuggest={() => void suggestCreateTunnelPort()}
-                        />
+                        /> : null}
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>域名</span><input value={tunnelForm.domain} onChange={(event) => setTunnelForm((current) => ({ ...current, domain: event.target.value }))} placeholder="例如 app.example.com" /></label> : null}
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>probePath</span><input value={tunnelForm.probePath} onChange={(event) => setTunnelForm((current) => ({ ...current, probePath: event.target.value }))} placeholder="默认 /" /></label> : null}
                         {tunnelForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelForm.tlsMode} onChange={(event) => setTunnelForm((current) => ({ ...current, tlsMode: event.target.value as "" | "edge_terminate" }))}><option value="edge_terminate">edge_terminate</option></select></label> : null}

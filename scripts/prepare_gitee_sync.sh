@@ -23,12 +23,22 @@ echo "  3. git status"
 echo "  4. git add <files> && git commit"
 echo "  5. git push origin <branch>"
 echo
-echo "Recommended build machine workflow:"
-echo "  1. git pull origin <branch>"
-echo "  2. ./scripts/build_windows_artifacts.sh publisher"
-echo "  3. ./scripts/build_windows_artifacts.sh cert-keeper"
-echo "  4. upload built installers manually"
+echo "Build boundary after this fix:"
+echo "  - This cloud VM continues to build and deploy Linux/server-side services locally."
+echo "  - Only the Windows desktop packaging chain is handed to the Windows packager."
+echo "  - The Windows packager pulls from Gitee, rebuilds heavy caches locally, and uploads installers."
+echo "  - manage.020309.top download cards read the latest uploaded release metadata automatically."
 echo
-echo "Note: this script does not push code and does not upload installers."
+echo "Recommended build machine workflow:"
+echo "  1. export SERVER_URL=https://manage.020309.top"
+echo "  2. export COOKIE_FILE=/path/to/admin.cookies"
+echo "  3. export VERSION=<release-version>   # optional but recommended for formal releases"
+echo "  4. ./scripts/packager_build_and_upload.sh all"
+echo
+echo "Direct manual equivalents remain available:"
+echo "  - ./scripts/build_windows_artifacts.sh [publisher|cert-keeper|all]"
+echo "  - ./scripts/upload_windows_artifacts.sh [publisher|cert-keeper|all]"
+echo
+echo "Note: this script is informational only; it does not push code and does not upload installers."
 
 popd >/dev/null

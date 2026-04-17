@@ -40,11 +40,16 @@ External tools required for rebuilds:
 
 Gitee collaboration boundary:
 - Current repo remote is already Gitee.
-- This machine syncs source code, scripts, README files, and handoff docs.
-- Another machine performs the actual Windows packaging build.
-- That build machine uploads installer artifacts manually.
-- This machine later places approved installers into the download center.
+- This cloud machine keeps building and deploying Linux/server-side services locally.
+- This cloud machine syncs source code, scripts, README files, and handoff docs to Gitee for the Windows packaging handoff.
+- Another Windows build machine performs the actual packaging build and keeps the heavy caches local.
+- That build machine now uploads installer artifacts directly through `scripts/upload_windows_artifacts.sh` or `scripts/packager_build_and_upload.sh`.
+- `https://manage.020309.top/` now reads the latest uploaded release metadata automatically; no more hand-editing download links after each upload.
 - Repo should not store bulky caches or installer binaries.
+
+Recommended split:
+- Cloud machine: edit code, run server-side tests, build/deploy server-side locally, commit, push to Gitee.
+- Packager machine: `git pull --ff-only`, run `./scripts/packager_build_and_upload.sh all`, verify the returned download URLs.
 
 Files to inspect first when resuming work:
 - `deploy/windows/publisher/installer.nsi`

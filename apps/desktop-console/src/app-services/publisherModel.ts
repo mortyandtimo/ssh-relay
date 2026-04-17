@@ -284,7 +284,7 @@ export function protocolEntryHint(protocol: PublishProtocol): string {
 
 export function defaultPublicPortForProtocol(type: PublishProtocol, index: number) {
   if (type === "http") return 18080 + index;
-  if (type === "https") return 18443 + index;
+  if (type === "https") return 0;
   if (type === "udp") return 19053 + index;
   if (type === "socks5") return 11080 + index;
   return 10022 + index;

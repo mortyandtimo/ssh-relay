@@ -1,0 +1,954 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>资源在线状态</title>
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --bg-soft: #eef3ff;
+      --surface: rgba(255, 255, 255, 0.92);
+      --surface-strong: #ffffff;
+      --border: rgba(148, 163, 184, 0.22);
+      --border-strong: rgba(37, 99, 235, 0.22);
+      --text: #0f172a;
+      --muted: #475569;
+      --soft: #64748b;
+      --blue: #2563eb;
+      --blue-soft: #dbeafe;
+      --gold: #f59e0b;
+      --gold-soft: #fef3c7;
+      --ok: #16a34a;
+      --ok-soft: #dcfce7;
+      --bad: #dc2626;
+      --bad-soft: #fee2e2;
+      --shadow: 0 26px 60px rgba(15, 23, 42, 0.12);
+      --shadow-soft: 0 14px 32px rgba(37, 99, 235, 0.1);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(37, 99, 235, 0.12), transparent 24%),
+        radial-gradient(circle at top right, rgba(245, 158, 11, 0.14), transparent 18%),
+        linear-gradient(180deg, #eff6ff 0%, var(--bg) 40%, var(--bg-soft) 100%);
+    }
+
+    .page {
+      max-width: 1680px;
+      margin: 0 auto;
+      padding: 28px 20px 48px;
+    }
+
+    .page-header {
+      margin: 0 auto 22px;
+      max-width: 1500px;
+    }
+
+    .page-header h1 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 44px);
+      line-height: 1.06;
+      letter-spacing: -0.03em;
+      font-weight: 800;
+    }
+
+    .page-header p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.7;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(260px, 320px) minmax(0, 1fr) minmax(300px, 360px);
+      gap: 24px;
+      align-items: start;
+    }
+
+    .side-rail {
+      position: sticky;
+      top: 24px;
+      z-index: 4;
+    }
+
+    .status-panel,
+    .rail-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+
+    .status-panel {
+      padding: 24px;
+      min-height: calc(100vh - 120px);
+    }
+
+    .rail-card {
+      padding: 22px 20px 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .rail-card::before,
+    .rail-card::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+      pointer-events: none;
+    }
+
+    .rail-card::before {
+      width: 170px;
+      height: 170px;
+      top: -62px;
+      right: -30px;
+      filter: blur(10px);
+    }
+
+    .rail-card::after {
+      width: 136px;
+      height: 136px;
+      bottom: -56px;
+      left: -24px;
+      filter: blur(10px);
+    }
+
+    .service-float::before {
+      background: rgba(37, 99, 235, 0.12);
+    }
+
+    .service-float::after {
+      background: rgba(14, 165, 233, 0.12);
+    }
+
+    .download-float::before {
+      background: rgba(245, 158, 11, 0.14);
+    }
+
+    .download-float::after {
+      background: rgba(59, 130, 246, 0.14);
+    }
+
+    .rail-tag {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 0 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      z-index: 1;
+    }
+
+    .service-float .rail-tag {
+      background: rgba(37, 99, 235, 0.12);
+      border: 1px solid rgba(37, 99, 235, 0.18);
+      color: #1d4ed8;
+    }
+
+    .download-float .rail-tag {
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.2);
+      color: #b45309;
+    }
+
+    .rail-card h2 {
+      position: relative;
+      margin: 18px 0 8px;
+      font-size: 24px;
+      line-height: 1.14;
+      z-index: 1;
+    }
+
+    .rail-card > p {
+      position: relative;
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.72;
+      z-index: 1;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+
+    .panel-head h2 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.15;
+    }
+
+    .panel-head p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.65;
+      max-width: 700px;
+    }
+
+    .panel-tools {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 12px;
+    }
+
+    .meta-stack {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+
+    .meta-chip,
+    .action-link {
+      display: inline-flex;
+      align-items: center;
+      min-height: 38px;
+      padding: 0 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(37, 99, 235, 0.14);
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: 0 8px 24px rgba(37, 99, 235, 0.06);
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+      text-decoration: none;
+    }
+
+    .action-link {
+      color: #1d4ed8;
+      font-weight: 700;
+      border-color: rgba(37, 99, 235, 0.2);
+      background: linear-gradient(180deg, #ffffff 0%, #eff6ff 100%);
+      transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+    }
+
+    .action-link:hover {
+      transform: translateY(-1px);
+      border-color: rgba(37, 99, 235, 0.28);
+      box-shadow: 0 14px 28px rgba(37, 99, 235, 0.12);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--surface-strong);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      border-radius: 22px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      box-shadow: var(--shadow-soft);
+      transition: border-color .18s ease, transform .18s ease, box-shadow .18s ease;
+    }
+
+    .card.changed {
+      border-color: rgba(37, 99, 235, 0.28);
+      box-shadow: 0 18px 44px rgba(37, 99, 235, 0.18);
+      transform: translateY(-1px);
+    }
+
+    .card-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .card-top h3 {
+      margin: 0 0 6px;
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .card-top p {
+      margin: 0;
+      color: var(--soft);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 36px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      background: #f8fafc;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+      flex: none;
+    }
+
+    .card[data-state="ok"] .pill {
+      background: var(--ok-soft);
+      border-color: rgba(22, 163, 74, 0.18);
+      color: #166534;
+    }
+
+    .card[data-state="bad"] .pill {
+      background: var(--bad-soft);
+      border-color: rgba(220, 38, 38, 0.18);
+      color: #991b1b;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--gold);
+      box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12);
+      flex: none;
+    }
+
+    .dot.ok {
+      background: var(--ok);
+      box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.14);
+    }
+
+    .dot.bad {
+      background: var(--bad);
+      box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.14);
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .summary-box {
+      padding: 12px 13px;
+      border-radius: 15px;
+      background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+    }
+
+    .summary-box .label {
+      display: block;
+      color: var(--soft);
+      font-size: 12px;
+      margin-bottom: 5px;
+    }
+
+    .summary-box .value {
+      display: block;
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+      word-break: break-word;
+      font-weight: 600;
+    }
+
+    .card-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--soft);
+      font-size: 12px;
+      border-top: 1px solid rgba(148, 163, 184, 0.1);
+      padding-top: 12px;
+      flex-wrap: wrap;
+    }
+
+    .service-list,
+    .download-list {
+      position: relative;
+      display: grid;
+      gap: 10px;
+      z-index: 1;
+    }
+
+    .service-item,
+    .download-item {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding: 14px 15px;
+      border-radius: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      background: rgba(255, 255, 255, 0.82);
+      color: inherit;
+      text-decoration: none;
+      transition: transform .16s ease, background .16s ease, border-color .16s ease, box-shadow .16s ease;
+      backdrop-filter: blur(6px);
+      box-shadow: 0 10px 24px rgba(37, 99, 235, 0.06);
+    }
+
+    .service-item:hover,
+    .download-item:hover {
+      transform: translateY(-1px);
+      background: rgba(255, 255, 255, 0.95);
+      border-color: rgba(37, 99, 235, 0.22);
+      box-shadow: 0 14px 28px rgba(37, 99, 235, 0.1);
+    }
+
+    .service-meta,
+    .download-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .service-badge,
+    .download-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 0 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .service-badge {
+      color: #1d4ed8;
+      background: rgba(37, 99, 235, 0.1);
+    }
+
+    .download-badge {
+      color: #b45309;
+      background: rgba(245, 158, 11, 0.12);
+    }
+
+    .service-item strong,
+    .download-item strong {
+      color: var(--text);
+      font-size: 15px;
+    }
+
+    .service-item span,
+    .download-item span {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.58;
+    }
+
+    .service-item code,
+    .download-item code {
+      font-size: 12px;
+      color: #1e293b;
+      word-break: break-all;
+    }
+
+    .download-state,
+    .rail-foot,
+    .footer {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .empty-slot {
+      padding: 14px 15px;
+      border-radius: 16px;
+      border: 1px dashed rgba(148, 163, 184, 0.22);
+      background: rgba(248, 250, 252, 0.8);
+      color: var(--soft);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+
+    @media (max-width: 1460px) {
+      .layout {
+        grid-template-columns: minmax(240px, 300px) minmax(0, 1fr) minmax(280px, 340px);
+      }
+    }
+
+    @media (max-width: 1180px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .side-rail {
+        position: static;
+      }
+
+      .status-panel {
+        min-height: 0;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .page {
+        padding: 22px 14px 30px;
+      }
+
+      .status-panel,
+      .rail-card {
+        border-radius: 22px;
+      }
+
+      .summary {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .panel-head,
+      .panel-tools,
+      .meta-stack,
+      .card-top,
+      .card-foot,
+      .service-meta,
+      .download-meta {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="page-header">
+      <h1>资源在线状态</h1>
+      <p>集中查看核心转发组件在线情况，并从固定侧栏快速进入软件下载与已接入的隧道服务入口。</p>
+    </header>
+
+    <main class="layout">
+      <aside class="side-rail">
+        <div class="rail-card service-float">
+          <div class="rail-tag">服务入口</div>
+          <h2>快捷入口</h2>
+          <p>左侧入口列表由配置数组驱动，后续新增服务时只需要补充一项即可扩展。</p>
+          <div class="service-list" id="service-list"></div>
+          <div class="rail-foot">当前展示的是已经接入并适合直接打开的页面型服务入口。</div>
+        </div>
+      </aside>
+
+      <section class="status-stage">
+        <div class="status-panel">
+          <div class="panel-head">
+            <div>
+              <h2>当前资源</h2>
+              <p>集中查看当前管理软件、账号体系与核心转发组件的在线情况。</p>
+            </div>
+            <div class="panel-tools">
+              <a class="action-link" href="/admin/" target="_blank" rel="noreferrer">进入管理页</a>
+              <div class="meta-stack">
+                <span class="meta-chip" id="last-refresh">最近检测：等待首次结果</span>
+                <span class="meta-chip" id="check-cycle">检查周期：15 秒</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid" id="grid"></div>
+          <div class="footer" id="footer">状态加载中...</div>
+        </div>
+      </section>
+
+      <aside class="side-rail">
+        <div class="rail-card download-float">
+          <div class="rail-tag">软件下载</div>
+          <h2>下载中心</h2>
+          <p>下载列表会优先读取最新上传的 Windows 发行包，打包机上传完成后这里会自动切换到新版本。</p>
+          <div class="download-list" id="download-list"></div>
+          <div class="download-state" id="download-state">正在读取最新发布版本...</div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    const serviceEntrances = [
+      {
+        tag: '图床',
+        title: '图床入口',
+        url: 'https://img.020309.top/',
+        note: '图床隧道标准 HTTPS 入口，适合直接打开验证页面。',
+      },
+      {
+        tag: '网盘',
+        title: '网盘入口',
+        url: 'https://drive.020309.top/',
+        note: '当前网盘服务的公网 HTTPS 入口。',
+      },
+      {
+        tag: '证书',
+        title: '证书管家',
+        url: 'https://cert.manage.020309.top/',
+        note: '证书签发、域名证书托管与 nginx 相关管理入口。',
+      },
+      {
+        tag: '发布',
+        title: '驻阡陌后台',
+        url: 'https://publisher.manage.020309.top/admin/',
+        note: '节点、隧道、发布规则与桌面软件下载管理入口。',
+      },
+      {
+        tag: '主站',
+        title: '主站首页',
+        url: 'https://020309.top/',
+        note: '主站对外页面，可直接检查主页链路。',
+      },
+    ];
+
+    const fallbackReleaseMap = {
+      'publisher:setup': {
+        product: 'publisher',
+        channel: 'setup',
+        version: '1.0.1',
+        downloadUrl: '/downloads/releases/publisher/1.0.1/CloudRelayPublisherSetup-1.0.1.exe',
+      },
+      'publisher:portable': {
+        product: 'publisher',
+        channel: 'portable',
+        version: '1.0.1',
+        downloadUrl: '/downloads/releases/publisher/1.0.1/CloudRelayPublisherPortable-1.0.1.zip',
+      },
+      'cert-keeper:portable': {
+        product: 'cert-keeper',
+        channel: 'portable',
+        version: '1.0.0',
+        downloadUrl: '/downloads/releases/cert-keeper/1.0.0/CertKeeperPortable-1.0.0.zip',
+      },
+    };
+
+    const releaseSlots = [
+      {
+        key: 'publisher:setup',
+        title: '驻阡陌安装包',
+        note: '最新版驻阡陌安装包，适合常规安装部署。',
+      },
+      {
+        key: 'publisher:portable',
+        title: '驻阡陌便携版',
+        note: '最新版驻阡陌便携包，下载后解压即可运行。',
+      },
+      {
+        key: 'cert-keeper:setup',
+        title: '证书管家安装包',
+        note: '最新版证书管家安装包，适合常规安装部署。',
+      },
+      {
+        key: 'cert-keeper:portable',
+        title: '证书管家便携版',
+        note: '最新版证书管家桌面包，下载后解压即可使用。',
+      },
+    ];
+
+    const checks = [
+      { id: 'server-api', label: '驻阡陌 API', url: '/api/status/server-api', note: '规则、节点和管理面核心接口', type: 'service' },
+      { id: 'server-api-bootstrap', label: '驻阡陌账号体系', url: '/api/status/server-api-bootstrap', note: '检查账号初始化是否完成', type: 'bootstrap' },
+      { id: 'cert-keeper', label: '证书管家 API', url: '/api/status/cert-keeper', note: '证书签发、证书列表与登录接口', type: 'service' },
+      { id: 'cert-keeper-bootstrap', label: '证书管家账号体系', url: '/api/status/cert-keeper-bootstrap', note: '检查账号初始化是否完成', type: 'bootstrap' },
+      { id: 'relay-web', label: 'Relay Web', url: '/api/status/relay-web', note: 'Web 运行时与反代前置', type: 'relay' },
+      { id: 'relay-http', label: 'Relay HTTP', url: '/api/status/relay-http', note: 'HTTP 隧道组件', type: 'relay' },
+      { id: 'relay-https', label: 'Relay HTTPS', url: '/api/status/relay-https', note: 'HTTPS 隧道组件', type: 'relay' },
+      { id: 'relay-tcp', label: 'Relay TCP', url: '/api/status/relay-tcp', note: 'TCP 隧道组件', type: 'relay' },
+      { id: 'relay-udp', label: 'Relay UDP', url: '/api/status/relay-udp', note: 'UDP 隧道组件', type: 'relay' },
+    ];
+
+    const grid = document.getElementById('grid');
+    const footer = document.getElementById('footer');
+    const lastRefresh = document.getElementById('last-refresh');
+    const serviceList = document.getElementById('service-list');
+    const downloadList = document.getElementById('download-list');
+    const downloadState = document.getElementById('download-state');
+    const cards = new Map();
+    const stateCache = new Map();
+
+    function fmtTime(date) {
+      return date.toLocaleString();
+    }
+
+    function renderServiceEntrances() {
+      serviceList.innerHTML = '';
+      for (const item of serviceEntrances) {
+        const link = document.createElement('a');
+        link.className = 'service-item';
+        link.href = item.url;
+        link.target = '_blank';
+        link.rel = 'noreferrer';
+        link.innerHTML = `
+          <div class="service-meta">
+            <span class="service-badge">${item.tag}</span>
+            <code>${item.url.replace(/^https?:\/\//, '')}</code>
+          </div>
+          <strong>${item.title}</strong>
+          <span>${item.note}</span>
+        `;
+        serviceList.appendChild(link);
+      }
+    }
+
+    function inferStatus(payload, responseOk, fallbackText) {
+      if (!responseOk) {
+        return { ok: false, title: '不可用', subtitle: fallbackText || '接口返回错误' };
+      }
+      if (payload && typeof payload.required === 'boolean') {
+        return payload.required
+          ? { ok: false, title: '未初始化', subtitle: '当前账号体系仍需 bootstrap' }
+          : { ok: true, title: '已初始化', subtitle: '账号体系已可直接使用' };
+      }
+      if (payload && payload.status === 'ok') {
+        return { ok: true, title: '在线', subtitle: '服务运行正常' };
+      }
+      if (payload && typeof payload.status === 'string') {
+        return { ok: false, title: payload.status, subtitle: fallbackText || '状态异常' };
+      }
+      return { ok: responseOk, title: responseOk ? '在线' : '异常', subtitle: fallbackText || '状态未知' };
+    }
+
+    function summaryPairs(item, payload, httpStatus) {
+      const pairs = [];
+      if (item.type === 'bootstrap') {
+        const required = !!(payload && payload.required);
+        pairs.push(['当前状态', required ? '需要初始化' : '已初始化']);
+        pairs.push(['接口返回', `HTTP ${httpStatus}`]);
+        return pairs;
+      }
+      if (payload && typeof payload.service === 'string') {
+        pairs.push(['服务名', payload.service]);
+      }
+      if (payload && typeof payload.status === 'string') {
+        pairs.push(['运行状态', payload.status]);
+      }
+      if (payload && payload.details && typeof payload.details === 'object') {
+        const details = payload.details;
+        const preferredKeys = ['version', 'store', 'apiBaseUrl', 'controlAddr', 'proxyAddr', 'addr', 'domainSuffix', 'certConfigured'];
+        for (const key of preferredKeys) {
+          if (details[key] !== undefined && details[key] !== '') {
+            const labelMap = {
+              version: '版本',
+              store: '存储',
+              apiBaseUrl: '上游 API',
+              controlAddr: '控制端口',
+              proxyAddr: '代理端口',
+              addr: '监听地址',
+              domainSuffix: '域名后缀',
+              certConfigured: '证书配置',
+            };
+            pairs.push([labelMap[key] || key, String(details[key])]);
+          }
+          if (pairs.length >= 4) break;
+        }
+      }
+      pairs.push(['接口返回', `HTTP ${httpStatus}`]);
+      return pairs.slice(0, 4);
+    }
+
+    function normalizeResult(item, payload, httpStatus, ok, errorText) {
+      const status = inferStatus(payload, ok, errorText);
+      const observedAt = payload && payload.observedAt ? payload.observedAt : null;
+      const summary = summaryPairs(item, payload, httpStatus);
+      return {
+        ok: status.ok,
+        title: status.title,
+        subtitle: status.subtitle,
+        observedAt,
+        summary,
+        httpStatus,
+      };
+    }
+
+    function renderSummary(card, result) {
+      const wrap = card.querySelector('.summary');
+      wrap.innerHTML = '';
+      for (const [label, value] of result.summary) {
+        const box = document.createElement('div');
+        box.className = 'summary-box';
+
+        const labelNode = document.createElement('span');
+        labelNode.className = 'label';
+        labelNode.textContent = label;
+
+        const valueNode = document.createElement('span');
+        valueNode.className = 'value';
+        valueNode.textContent = value;
+
+        box.appendChild(labelNode);
+        box.appendChild(valueNode);
+        wrap.appendChild(box);
+      }
+    }
+
+    function createCard(item) {
+      const card = document.createElement('section');
+      card.className = 'card';
+      card.dataset.state = 'loading';
+      card.innerHTML = `
+        <div class="card-top">
+          <div>
+            <h3>${item.label}</h3>
+            <p>${item.note}</p>
+          </div>
+          <div class="pill"><span class="dot"></span><span class="pill-text">检测中</span></div>
+        </div>
+        <div class="summary"></div>
+        <div class="card-foot">
+          <span class="observed">等待首轮检测</span>
+          <span class="checked">尚未检查</span>
+        </div>
+      `;
+      return card;
+    }
+
+    function updateCard(card, result, changed) {
+      const dot = card.querySelector('.dot');
+      const pillText = card.querySelector('.pill-text');
+      const observed = card.querySelector('.observed');
+      const checked = card.querySelector('.checked');
+      card.dataset.state = result.ok ? 'ok' : 'bad';
+      dot.className = `dot ${result.ok ? 'ok' : 'bad'}`;
+      pillText.textContent = result.title;
+      observed.textContent = result.subtitle;
+      checked.textContent = result.observedAt ? `服务时间：${result.observedAt}` : `接口返回：HTTP ${result.httpStatus}`;
+      card.classList.toggle('changed', changed);
+      renderSummary(card, result);
+      if (changed) {
+        window.setTimeout(() => card.classList.remove('changed'), 1400);
+      }
+    }
+
+    function updateCheckTimeOnly(card, checkedAt) {
+      const checked = card.querySelector('.checked');
+      checked.textContent = `最近检查：${fmtTime(checkedAt)}`;
+    }
+
+    async function runCheck(item) {
+      let result;
+      try {
+        const response = await fetch(item.url, { cache: 'no-store' });
+        const text = await response.text();
+        let payload = null;
+        try {
+          payload = text ? JSON.parse(text) : null;
+        } catch {
+          payload = null;
+        }
+        result = normalizeResult(item, payload, response.status, response.ok, response.ok ? '' : '接口返回异常');
+      } catch (error) {
+        result = {
+          ok: false,
+          title: '离线',
+          subtitle: error instanceof Error ? error.message : String(error),
+          observedAt: null,
+          summary: [['当前状态', '不可达'], ['接口返回', '请求失败']],
+          httpStatus: 0,
+        };
+      }
+
+      const signature = JSON.stringify(result);
+      const prevSignature = stateCache.get(item.id);
+      const card = cards.get(item.id);
+      const checkedAt = new Date();
+      if (!card) return;
+      if (prevSignature !== signature) {
+        stateCache.set(item.id, signature);
+        updateCard(card, result, prevSignature !== undefined);
+      } else {
+        updateCheckTimeOnly(card, checkedAt);
+      }
+      return result;
+    }
+
+    function renderDownloads(releaseMap, sourceText) {
+      downloadList.innerHTML = '';
+      let count = 0;
+      for (const slot of releaseSlots) {
+        const item = releaseMap[slot.key];
+        if (!item) continue;
+        count += 1;
+        const link = document.createElement('a');
+        link.className = 'download-item';
+        link.href = item.downloadUrl;
+        link.target = '_blank';
+        link.rel = 'noreferrer';
+        link.innerHTML = `
+          <div class="download-meta">
+            <span class="download-badge">${slot.key.split(':')[0] === 'publisher' ? '驻阡陌' : '证书管家'}</span>
+            <code>v${item.version}</code>
+          </div>
+          <strong>${slot.title} v${item.version}</strong>
+          <span>${slot.note}</span>
+        `;
+        downloadList.appendChild(link);
+      }
+      if (count === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-slot';
+        empty.textContent = '当前还没有可用的 Windows 发布包，请先从打包机上传。';
+        downloadList.appendChild(empty);
+      }
+      downloadState.textContent = sourceText;
+    }
+
+    async function loadLatestDownloads() {
+      try {
+        const response = await fetch('/api/releases/latest', { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        const releaseMap = {};
+        for (const item of payload.items || []) {
+          releaseMap[`${item.product}:${item.channel}`] = item;
+        }
+        renderDownloads(releaseMap, '下载列表已按最新上传版本自动更新。');
+      } catch (error) {
+        renderDownloads(fallbackReleaseMap, `最新发布清单读取失败，已回退到内置下载项。${error instanceof Error ? ` (${error.message})` : ''}`);
+      }
+    }
+
+    async function refresh() {
+      const checkedAt = new Date();
+      lastRefresh.textContent = `最近检测：${fmtTime(checkedAt)}`;
+      footer.textContent = '状态巡检中…';
+      const results = await Promise.all(checks.map((item) => runCheck(item)));
+      const okCount = results.filter((item) => item && item.ok).length;
+      footer.textContent = `本轮完成：${okCount}/${checks.length} 项在线。`;
+    }
+
+    function init() {
+      renderServiceEntrances();
+      for (const item of checks) {
+        const card = createCard(item);
+        cards.set(item.id, card);
+        grid.appendChild(card);
+      }
+      void loadLatestDownloads();
+      refresh();
+      setInterval(refresh, 15000);
+      setInterval(() => { void loadLatestDownloads(); }, 60000);
+    }
+
+    init();
+  </script>
+</body>
+</html>

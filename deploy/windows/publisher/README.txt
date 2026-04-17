@@ -52,10 +52,10 @@ Large cache directories safe to delete and rebuild:
 - `outputs/windows-publisher`
 
 Gitee collaboration flow:
-- This machine only syncs code, scripts, and docs to Gitee.
+- This cloud machine keeps the Linux/server-side build local and only hands the Windows packaging chain to Gitee + packager.
 - Another machine pulls from Gitee and runs the build scripts to produce installers.
-- Built installers are uploaded manually from that build machine.
-- After upload, this side can place the approved installer into the download center.
+- Built installers should be uploaded from that build machine with `scripts/upload_windows_artifacts.sh publisher` or the one-shot `scripts/packager_build_and_upload.sh publisher`.
+- After upload, `manage.020309.top` downloads switch to the newest uploaded publisher artifact automatically.
 - Do not commit large build caches or installer binaries to the repo.
 
 Files future AI should read first:

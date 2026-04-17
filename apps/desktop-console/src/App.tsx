@@ -149,6 +149,23 @@ const publisherRoutes: RouteMeta[] = [
 
 const protocolList: PublishProtocol[] = ["http", "https", "tcp", "udp", "socks5"];
 
+function suggestedPublicPortValue(protocol: PublishProtocol, index: number) {
+  const suggested = defaultPublicPortForProtocol(protocol, index);
+  return suggested > 0 ? String(suggested) : "";
+}
+
+function publishPublicPortLabel(protocol: PublishProtocol | string) {
+  return protocol === "https" ? "内部端口（可留空）" : "公网端口";
+}
+
+function serializePublishPublicPort(protocol: PublishProtocol | string, publicPort: string) {
+  const trimmed = publicPort.trim();
+  if (protocol === "https") {
+    return trimmed ? Number(trimmed) : 0;
+  }
+  return Number(trimmed);
+}
+
 const initialLocalServiceForm = {
   name: "",
   targetHost: "127.0.0.1",
@@ -905,13 +922,13 @@ export default function App() {
   }, [localServices, publishForm.localServiceId]);
 
   useEffect(() => {
-    if (!publishForm.publicPort) {
+    if (!publishForm.publicPort && publishForm.protocol !== "https") {
       setPublishForm((current) => ({
         ...current,
-        publicPort: String(defaultPublicPortForProtocol(current.protocol, publishableTunnels.length)),
+        publicPort: suggestedPublicPortValue(current.protocol, publishableTunnels.length),
       }));
     }
-  }, [publishForm.publicPort, publishableTunnels.length]);
+  }, [publishForm.protocol, publishForm.publicPort, publishableTunnels.length]);
 
   useEffect(() => {
     if (!drawerTunnel) {
@@ -1212,7 +1229,7 @@ export default function App() {
     setPublishForm((current) => ({
       ...current,
       localServiceId: current.localServiceId || localServices[0]?.id || "",
-      publicPort: current.publicPort || String(defaultPublicPortForProtocol(current.protocol, publishableTunnels.length)),
+      publicPort: current.publicPort || suggestedPublicPortValue(current.protocol, publishableTunnels.length),
     }));
     setDrawerState({ kind: "create-rule" });
   }
@@ -1232,7 +1249,7 @@ export default function App() {
       setError("请先在本地服务页录入至少一个本地服务。");
       return;
     }
-    if (!publishForm.publicPort || Number(publishForm.publicPort) <= 0) {
+    if (publishForm.protocol !== "https" && (!publishForm.publicPort || Number(publishForm.publicPort) <= 0)) {
       setError("请填写有效的公网端口。");
       return;
     }
@@ -1253,7 +1270,7 @@ export default function App() {
           transportPolicy: publishForm.transportPolicy,
           targetHost: publishForm.protocol === "socks5" ? "socks5" : service.targetHost,
           targetPort: publishForm.protocol === "socks5" ? 1080 : Number(service.targetPort),
-          publicPort: Number(publishForm.publicPort),
+          publicPort: serializePublishPublicPort(publishForm.protocol, publishForm.publicPort),
           domain: publishForm.protocol === "https" ? publishForm.domain.trim() : undefined,
           tlsMode: publishForm.protocol === "https" ? "edge_terminate" : undefined,
           probePath: publishForm.protocol === "http" || publishForm.protocol === "https" ? normalizeProbePath(publishForm.probePath) : undefined,
@@ -1282,6 +1299,10 @@ export default function App() {
       setError("HTTPS 发布规则必须保留 domain。");
       return;
     }
+    if (drawerTunnel.type !== "https" && (!editForm.publicPort || Number(editForm.publicPort) <= 0)) {
+      setError("请填写有效的公网端口。");
+      return;
+    }
     setBusy("save-rule");
     setError("");
     setMessage("");
@@ -1294,7 +1315,7 @@ export default function App() {
         status: drawerTunnel.status,
         targetHost: editForm.targetHost.trim(),
         targetPort: Number(editForm.targetPort),
-        publicPort: Number(editForm.publicPort),
+        publicPort: serializePublishPublicPort(drawerTunnel.type, editForm.publicPort),
         domain: drawerTunnel.type === "http" || drawerTunnel.type === "https" ? editForm.domain.trim() : "",
         probePath: drawerTunnel.type === "http" || drawerTunnel.type === "https" ? normalizeProbePath(editForm.probePath) : "",
         transportPolicy: editForm.transportPolicy,
@@ -1549,7 +1570,7 @@ export default function App() {
                 <span>协议</span>
                 <select value={publishForm.protocol} onChange={(event) => {
                   const nextProtocol = event.target.value as PublishProtocol;
-                  setPublishForm((current) => ({ ...current, protocol: nextProtocol, publicPort: String(defaultPublicPortForProtocol(nextProtocol, publishableTunnels.length)) }));
+                  setPublishForm((current) => ({ ...current, protocol: nextProtocol, publicPort: suggestedPublicPortValue(nextProtocol, publishableTunnels.length) }));
                   if (nextProtocol === "https") {
                     void refreshManagedHTTPSDomains();
                   }
@@ -1559,8 +1580,8 @@ export default function App() {
               </label>
               <div className="surface-banner info protocol-entry-hint">{protocolEntryHint(publishForm.protocol)}</div>
               <label>
-                <span>公网端口</span>
-                <input value={publishForm.publicPort} onChange={(event) => setPublishForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required />
+                <span>{publishPublicPortLabel(publishForm.protocol)}</span>
+                <input value={publishForm.publicPort} onChange={(event) => setPublishForm((current) => ({ ...current, publicPort: event.target.value }))} inputMode="numeric" required={publishForm.protocol !== "https"} placeholder={publishForm.protocol === "https" ? "留空即可，标准入口固定走 443" : ""} />
               </label>
               <label>
                 <span>传输策略</span>
@@ -1702,8 +1723,8 @@ export default function App() {
                 <input value={editForm.targetPort} onChange={(event) => setEditForm((current) => current ? { ...current, targetPort: event.target.value } : current)} inputMode="numeric" />
               </label>
               <label>
-                <span>公网端口</span>
-                <input value={editForm.publicPort} onChange={(event) => setEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" />
+                <span>{publishPublicPortLabel(drawerTunnel.type)}</span>
+                <input value={editForm.publicPort} onChange={(event) => setEditForm((current) => current ? { ...current, publicPort: event.target.value } : current)} inputMode="numeric" placeholder={drawerTunnel.type === "https" ? "留空即可，标准入口固定走 443" : ""} />
               </label>
               {drawerTunnel.type === "http" || drawerTunnel.type === "https" ? (
                 <>

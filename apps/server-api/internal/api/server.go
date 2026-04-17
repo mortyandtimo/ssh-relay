@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,8 +62,8 @@ type Server struct {
 	accessTokenTTL       time.Duration
 	refreshTokenTTL      time.Duration
 	adminBootstrapSecret string
-	releaseUploadDir      string
-	releasePublicBaseURL  string
+	releaseUploadDir     string
+	releasePublicBaseURL string
 	allowedOrigins       map[string]struct{}
 	authCookiesSecure    bool
 	controlExecuteMu     sync.Mutex
@@ -84,8 +85,8 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 		accessTokenTTL:       15 * time.Minute,
 		refreshTokenTTL:      7 * 24 * time.Hour,
 		adminBootstrapSecret: strings.TrimSpace(os.Getenv("SERVER_API_ADMIN_BOOTSTRAP_SECRET")),
-		releaseUploadDir:      strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_UPLOAD_DIR")),
-		releasePublicBaseURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_PUBLIC_BASE_URL")), "/"),
+		releaseUploadDir:     strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_UPLOAD_DIR")),
+		releasePublicBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_PUBLIC_BASE_URL")), "/"),
 		allowedOrigins:       parseAllowedOrigins(os.Getenv("SERVER_API_ALLOWED_ORIGINS")),
 		authCookiesSecure:    parseBoolEnv(os.Getenv("SERVER_API_AUTH_COOKIES_SECURE")),
 		controlExecuteActive: map[string]struct{}{},
@@ -151,6 +152,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/server/metrics", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleServerMetrics)))
 	s.mux.Handle("/api/admin/release-artifacts/upload", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleReleaseArtifactUpload)))
 	s.mux.Handle("/api/admin/release-artifacts", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleReleaseArtifactList)))
+	s.mux.HandleFunc("/api/releases/latest", s.handleLatestReleaseArtifacts)
 	s.mux.Handle("/downloads/releases/", s.releaseArtifactDownloadHandler())
 	s.mux.Handle("/api/managed-domains/https", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleManagedHTTPSDomains)))
 	s.mux.Handle("/api/relay/tcp/runtime", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleRelayTCPRuntime)))
@@ -361,21 +363,35 @@ func (s *Server) handleReleaseArtifactList(w http.ResponseWriter, r *http.Reques
 		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	if strings.TrimSpace(s.releaseUploadDir) == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
+	writeJSON(w, http.StatusOK, map[string]any{"items": s.listReleaseArtifacts()})
+}
+
+func (s *Server) handleLatestReleaseArtifacts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	type artifactEntry struct {
-		Product     string `json:"product"`
-		Version     string `json:"version"`
-		Channel     string `json:"channel"`
-		FileName    string `json:"fileName"`
-		Size        int64  `json:"size"`
-		SHA256      string `json:"sha256"`
-		DownloadURL string `json:"downloadUrl"`
-		UploadedAt  string `json:"uploadedAt"`
+	writeJSON(w, http.StatusOK, map[string]any{"items": latestReleaseArtifacts(s.listReleaseArtifacts())})
+}
+
+type releaseArtifactEntry struct {
+	Product      string    `json:"product"`
+	Version      string    `json:"version"`
+	Channel      string    `json:"channel"`
+	FileName     string    `json:"fileName"`
+	Size         int64     `json:"size"`
+	SHA256       string    `json:"sha256"`
+	DownloadPath string    `json:"downloadPath"`
+	DownloadURL  string    `json:"downloadUrl"`
+	UploadedAt   string    `json:"uploadedAt"`
+	uploadedAt   time.Time `json:"-"`
+}
+
+func (s *Server) listReleaseArtifacts() []releaseArtifactEntry {
+	if strings.TrimSpace(s.releaseUploadDir) == "" {
+		return []releaseArtifactEntry{}
 	}
-	var items []artifactEntry
+	items := make([]releaseArtifactEntry, 0)
 	products := []string{"publisher", "cert-keeper"}
 	for _, product := range products {
 		productDir := filepath.Join(s.releaseUploadDir, product)
@@ -415,23 +431,60 @@ func (s *Server) handleReleaseArtifactList(w http.ResponseWriter, r *http.Reques
 				if s.releasePublicBaseURL != "" {
 					downloadURL = s.releasePublicBaseURL + downloadPath
 				}
-				items = append(items, artifactEntry{
-					Product:     product,
-					Version:     version,
-					Channel:     channel,
-					FileName:    fEntry.Name(),
-					Size:        info.Size(),
-					SHA256:      sha256Hex,
-					DownloadURL: downloadURL,
-					UploadedAt:  info.ModTime().UTC().Format(time.RFC3339),
+				items = append(items, releaseArtifactEntry{
+					Product:      product,
+					Version:      version,
+					Channel:      channel,
+					FileName:     fEntry.Name(),
+					Size:         info.Size(),
+					SHA256:       sha256Hex,
+					DownloadPath: downloadPath,
+					DownloadURL:  downloadURL,
+					UploadedAt:   info.ModTime().UTC().Format(time.RFC3339),
+					uploadedAt:   info.ModTime().UTC(),
 				})
 			}
 		}
 	}
-	if items == nil {
-		items = []artifactEntry{}
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].uploadedAt.Equal(items[j].uploadedAt) {
+			return items[i].uploadedAt.After(items[j].uploadedAt)
+		}
+		if items[i].Product != items[j].Product {
+			return items[i].Product < items[j].Product
+		}
+		if items[i].Channel != items[j].Channel {
+			return items[i].Channel < items[j].Channel
+		}
+		if items[i].Version != items[j].Version {
+			return items[i].Version > items[j].Version
+		}
+		return items[i].FileName < items[j].FileName
+	})
+	return items
+}
+
+func latestReleaseArtifacts(items []releaseArtifactEntry) []releaseArtifactEntry {
+	if len(items) == 0 {
+		return []releaseArtifactEntry{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	out := make([]releaseArtifactEntry, 0, 4)
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		key := item.Product + ":" + item.Channel
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Product != out[j].Product {
+			return out[i].Product < out[j].Product
+		}
+		return out[i].Channel < out[j].Channel
+	})
+	return out
 }
 
 func (s *Server) releaseArtifactDownloadHandler() http.Handler {
@@ -1440,16 +1493,16 @@ func (s *Server) deriveTunnelHealth(ctx context.Context, tunnel types.TunnelSpec
 }
 
 func isTunnelMisconfigured(tunnel types.TunnelSpec) bool {
-	if strings.TrimSpace(tunnel.NodeID) == "" || tunnel.PublicPort <= 0 {
+	if strings.TrimSpace(tunnel.NodeID) == "" {
 		return true
 	}
 	switch tunnel.Type {
 	case "", "tcp", "http", "udp":
-		return strings.TrimSpace(tunnel.TargetHost) == "" || tunnel.TargetPort <= 0
+		return tunnel.PublicPort <= 0 || strings.TrimSpace(tunnel.TargetHost) == "" || tunnel.TargetPort <= 0
 	case "https":
 		return strings.TrimSpace(tunnel.TargetHost) == "" || tunnel.TargetPort <= 0 || strings.TrimSpace(tunnel.Domain) == "" || strings.TrimSpace(tunnel.TLSMode) != "edge_terminate"
 	case "socks5":
-		return strings.TrimSpace(tunnel.TargetHost) != "socks5" || tunnel.TargetPort != 1080
+		return tunnel.PublicPort <= 0 || strings.TrimSpace(tunnel.TargetHost) != "socks5" || tunnel.TargetPort != 1080
 	default:
 		return true
 	}
@@ -1775,6 +1828,9 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 	if spec.Type == "" {
 		spec.Type = "tcp"
 	}
+	if spec.PublicPort < 0 {
+		return types.TunnelSpec{}, errors.New("publicPort must be zero or greater")
+	}
 	spec.TransportPolicy = strings.TrimSpace(spec.TransportPolicy)
 	if spec.TransportPolicy == "" {
 		spec.TransportPolicy = types.TunnelTransportRelayOnly
@@ -1784,10 +1840,16 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 	}
 	switch spec.Type {
 	case "tcp":
+		if spec.PublicPort <= 0 {
+			return types.TunnelSpec{}, errors.New("tcp tunnel requires publicPort")
+		}
 		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {
 			return types.TunnelSpec{}, errors.New("tcp tunnel requires targetHost and targetPort")
 		}
 	case "http":
+		if spec.PublicPort <= 0 {
+			return types.TunnelSpec{}, errors.New("http tunnel requires publicPort")
+		}
 		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {
 			return types.TunnelSpec{}, errors.New("http tunnel requires targetHost and targetPort")
 		}
@@ -1812,9 +1874,15 @@ func normalizeManagedTunnelSpec(spec types.TunnelSpec) (types.TunnelSpec, error)
 		}
 		spec.ProbePath = normalizeProbePath(spec.ProbePath)
 	case "socks5":
+		if spec.PublicPort <= 0 {
+			return types.TunnelSpec{}, errors.New("socks5 tunnel requires publicPort")
+		}
 		spec.TargetHost = "socks5"
 		spec.TargetPort = 1080
 	case "udp":
+		if spec.PublicPort <= 0 {
+			return types.TunnelSpec{}, errors.New("udp tunnel requires publicPort")
+		}
 		if strings.TrimSpace(spec.TargetHost) == "" || spec.TargetPort <= 0 {
 			return types.TunnelSpec{}, errors.New("udp tunnel requires targetHost and targetPort")
 		}

@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http/cookiejar"
+	"mime/multipart"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/textproto"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -1979,6 +1982,285 @@ func loginAndCollectCookies(t *testing.T, server *Server, email, password string
 		t.Fatalf("expected login 200 for %s, got %d", email, res.Code)
 	}
 	return res.Result().Cookies()
+}
+
+func TestReleaseArtifactUploadRequiresAdmin(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	server.releaseUploadDir = t.TempDir()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	_ = writer.WriteField("product", "publisher")
+	_ = writer.WriteField("channel", "setup")
+	_ = writer.WriteField("version", "0.1.0")
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", `form-data; name="file"; filename="artifact.exe"`)
+	h.Set("Content-Type", "application/octet-stream")
+	part, err := writer.CreatePart(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("binary")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/release-artifacts/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("expected upload without auth 401, got %d", res.Code)
+	}
+}
+
+func TestReleaseArtifactUploadStoresFileAndServesDownload(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	server.releaseUploadDir = t.TempDir()
+	server.releasePublicBaseURL = "https://downloads.example.com"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	_ = writer.WriteField("product", "publisher")
+	_ = writer.WriteField("channel", "setup")
+	_ = writer.WriteField("version", "0.1.0")
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", `form-data; name="file"; filename="artifact.exe"`)
+	h.Set("Content-Type", "application/octet-stream")
+	part, err := writer.CreatePart(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("publisher-binary")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/release-artifacts/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	applyCookies(req, adminCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("expected upload status 201, got %d: %s", res.Code, res.Body.String())
+	}
+
+	var out map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	storedPath, _ := out["storedPath"].(string)
+	if storedPath == "" {
+		t.Fatal("expected storedPath in response")
+	}
+	data, err := os.ReadFile(storedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "publisher-binary" {
+		t.Fatalf("expected stored file payload, got %q", string(data))
+	}
+	downloadPath, _ := out["downloadPath"].(string)
+	if downloadPath == "" {
+		t.Fatal("expected downloadPath in response")
+	}
+	downloadURL, _ := out["downloadUrl"].(string)
+	if downloadURL != "https://downloads.example.com"+downloadPath {
+		t.Fatalf("unexpected downloadUrl %q", downloadURL)
+	}
+
+	downloadReq := httptest.NewRequest(http.MethodGet, downloadPath, nil)
+	downloadRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(downloadRes, downloadReq)
+	if downloadRes.Code != http.StatusOK {
+		t.Fatalf("expected download status 200, got %d", downloadRes.Code)
+	}
+	if downloadRes.Body.String() != "publisher-binary" {
+		t.Fatalf("expected downloaded file contents, got %q", downloadRes.Body.String())
+	}
+}
+
+func TestReleaseArtifactUploadRejectsInvalidChannelExtension(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	server.releaseUploadDir = t.TempDir()
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	_ = writer.WriteField("product", "cert-keeper")
+	_ = writer.WriteField("channel", "portable")
+	_ = writer.WriteField("version", "0.1.0")
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", `form-data; name="file"; filename="artifact.exe"`)
+	h.Set("Content-Type", "application/octet-stream")
+	part, err := writer.CreatePart(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("bad")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/release-artifacts/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	applyCookies(req, adminCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid extension status 400, got %d", res.Code)
+	}
+}
+
+func TestLatestReleaseArtifactsReturnsNewestPerProductChannel(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	server.releaseUploadDir = t.TempDir()
+	server.releasePublicBaseURL = "https://manage.020309.top"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	first := uploadReleaseArtifactForTest(t, server, adminCookies, "publisher", "setup", "1.0.0", "artifact.exe", "publisher-setup-v1")
+	second := uploadReleaseArtifactForTest(t, server, adminCookies, "publisher", "setup", "1.0.1", "artifact.exe", "publisher-setup-v2")
+	portable := uploadReleaseArtifactForTest(t, server, adminCookies, "cert-keeper", "portable", "1.2.0", "artifact.zip", "cert-keeper-portable")
+
+	firstPath, _ := first["storedPath"].(string)
+	secondPath, _ := second["storedPath"].(string)
+	portablePath, _ := portable["storedPath"].(string)
+	older := time.Now().Add(-2 * time.Hour)
+	middle := time.Now().Add(-1 * time.Hour)
+	newest := time.Now()
+	if err := os.Chtimes(firstPath, older, older); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(secondPath, newest, newest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(portablePath, middle, middle); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/releases/latest", nil)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected latest releases status 200, got %d: %s", res.Code, res.Body.String())
+	}
+
+	var payload struct {
+		Items []struct {
+			Product      string `json:"product"`
+			Version      string `json:"version"`
+			Channel      string `json:"channel"`
+			DownloadPath string `json:"downloadPath"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("expected 2 latest items, got %d", len(payload.Items))
+	}
+	found := map[string]struct {
+		Version string
+		Path    string
+	}{}
+	for _, item := range payload.Items {
+		found[item.Product+":"+item.Channel] = struct {
+			Version string
+			Path    string
+		}{Version: item.Version, Path: item.DownloadPath}
+	}
+	if got := found["publisher:setup"]; got.Version != "1.0.1" || !strings.Contains(got.Path, "/publisher/1.0.1/") {
+		t.Fatalf("expected publisher setup latest to be 1.0.1, got %+v", got)
+	}
+	if got := found["cert-keeper:portable"]; got.Version != "1.2.0" || !strings.Contains(got.Path, "/cert-keeper/1.2.0/") {
+		t.Fatalf("expected cert-keeper portable latest to be 1.2.0, got %+v", got)
+	}
+}
+
+func TestHTTPSTunnelCreateAllowsReservedPublicPortZero(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+	registerOut := registerNodeThroughAgent(t, server, "https-node")
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-https-zero-port",
+		"nodeId":     registerOut.NodeID,
+		"name":       "img-host",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 9095,
+		"publicPort": 0,
+		"domain":     "img.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(req, adminCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("expected create status 201, got %d: %s", res.Code, res.Body.String())
+	}
+
+	var created types.TunnelSpec
+	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.PublicPort != 0 {
+		t.Fatalf("expected reserved publicPort 0, got %d", created.PublicPort)
+	}
+	if created.HealthStatus == types.TunnelHealthMisconfigured {
+		t.Fatalf("expected https tunnel with reserved public port to avoid misconfigured health, got %s", created.HealthStatus)
+	}
+}
+
+func uploadReleaseArtifactForTest(t *testing.T, server *Server, cookies []*http.Cookie, product, channel, version, fileName, payload string) map[string]any {
+	t.Helper()
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	_ = writer.WriteField("product", product)
+	_ = writer.WriteField("channel", channel)
+	_ = writer.WriteField("version", version)
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileName))
+	h.Set("Content-Type", "application/octet-stream")
+	part, err := writer.CreatePart(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/release-artifacts/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	applyCookies(req, cookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("expected release upload 201, got %d: %s", res.Code, res.Body.String())
+	}
+
+	var out map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func applyCookies(req *http.Request, cookies []*http.Cookie) {
