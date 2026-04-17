@@ -10,6 +10,7 @@ UPLOAD_RETRY_COUNT="${UPLOAD_RETRY_COUNT:-4}"
 UPLOAD_RETRY_DELAY="${UPLOAD_RETRY_DELAY:-2}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+UPLOAD_FALLBACK_URLS="${UPLOAD_FALLBACK_URLS:-}"
 
 usage() {
   cat <<'EOF'
@@ -24,6 +25,8 @@ Optional env:
                If omitted, a traceable default is derived from package version + git commit.
   ADMIN_EMAIL / ADMIN_PASSWORD
                if provided, the script can refresh an expired admin cookie jar automatically after a 401
+  UPLOAD_FALLBACK_URLS
+               optional whitespace-separated alternate base URLs tried after SERVER_URL for transient upload failures
 EOF
 }
 
@@ -50,6 +53,7 @@ json_escape() {
 }
 
 login_admin_session() {
+  local base_url="${1:-$SERVER_URL}"
   if [ -z "$ADMIN_EMAIL" ] || [ -z "$ADMIN_PASSWORD" ]; then
     return 1
   fi
@@ -62,15 +66,41 @@ login_admin_session() {
     -d "$payload" \
     -o "$response_file" \
     -w '%{http_code}' \
-    "$SERVER_URL/api/auth/login")"
+    "$base_url/api/auth/login")"
   if [ "$status_code" -lt 200 ] || [ "$status_code" -ge 300 ]; then
-    echo "admin login failed while refreshing upload session: http $status_code" >&2
+    echo "admin login failed while refreshing upload session against $base_url: http $status_code" >&2
     cat "$response_file" >&2
     rm -f "$response_file"
     return 1
   fi
   rm -f "$response_file"
   return 0
+}
+
+append_unique_url() {
+  local value="$1"
+  if [ -z "$value" ]; then
+    return
+  fi
+  local existing
+  for existing in "${UPLOAD_BASE_URLS[@]:-}"; do
+    if [ "$existing" = "$value" ]; then
+      return
+    fi
+  done
+  UPLOAD_BASE_URLS+=("$value")
+}
+
+derive_default_fallback_urls() {
+  local primary="$1"
+  case "$primary" in
+    https://manage.020309.top)
+      printf '%s\n' "https://publisher.manage.020309.top"
+      ;;
+    https://publisher.manage.020309.top)
+      printf '%s\n' "https://manage.020309.top"
+      ;;
+  esac
 }
 
 sha256_file() {
@@ -102,63 +132,89 @@ upload_one() {
   local file_hash
   file_hash="$(sha256_file "$file_path")"
   echo "Uploading $product/$channel -> $file_path"
-  local response_file status_code curl_exit attempt max_attempts retry_delay relogin_attempted
+  local response_file status_code curl_exit attempt max_attempts retry_delay relogin_attempted base_url
   response_file="$(mktemp)"
   max_attempts="$UPLOAD_RETRY_COUNT"
   retry_delay="$UPLOAD_RETRY_DELAY"
-  relogin_attempted=0
 
   for attempt in $(seq 1 "$max_attempts"); do
-    status_code=""
-    curl_exit=0
-    if ! status_code="$(curl --silent --show-error --location \
-      -b "$COOKIE_FILE" \
-      -F "product=$product" \
-      -F "channel=$channel" \
-      -F "version=$VERSION" \
-      -F "sha256=$file_hash" \
-      -F "file=@$file_path" \
-      -o "$response_file" \
-      -w '%{http_code}' \
-      "$SERVER_URL/api/admin/release-artifacts/upload")"; then
-      curl_exit=$?
-    fi
-
-    if [ "$curl_exit" -eq 0 ] && [ "$status_code" -ge 200 ] && [ "$status_code" -lt 300 ]; then
-      cat "$response_file"
-      rm -f "$response_file"
-      echo
-      return 0
-    fi
-
-    if [ "$curl_exit" -eq 0 ] && [ "$status_code" = "401" ] && [ "$relogin_attempted" = "0" ]; then
-      if login_admin_session; then
-        relogin_attempted=1
-        echo "warning: upload session expired; refreshed admin login and retrying immediately" >&2
-        continue
+    relogin_attempted=0
+    for base_url in "${UPLOAD_BASE_URLS[@]}"; do
+      status_code=""
+      curl_exit=0
+      if [ "$base_url" != "$SERVER_URL" ]; then
+        echo "warning: trying fallback upload endpoint $base_url" >&2
       fi
-    fi
+      if ! status_code="$(curl --silent --show-error --location \
+        -b "$COOKIE_FILE" \
+        -F "product=$product" \
+        -F "channel=$channel" \
+        -F "version=$VERSION" \
+        -F "sha256=$file_hash" \
+        -F "file=@$file_path" \
+        -o "$response_file" \
+        -w '%{http_code}' \
+        "$base_url/api/admin/release-artifacts/upload")"; then
+        curl_exit=$?
+      fi
+
+      if [ "$curl_exit" -eq 0 ] && [ "$status_code" -ge 200 ] && [ "$status_code" -lt 300 ]; then
+        cat "$response_file"
+        rm -f "$response_file"
+        echo
+        return 0
+      fi
+
+      if [ "$curl_exit" -eq 0 ] && [ "$status_code" = "401" ] && [ "$relogin_attempted" = "0" ]; then
+        if login_admin_session "$base_url"; then
+          relogin_attempted=1
+          echo "warning: upload session expired for $base_url; refreshed admin login and retrying immediately" >&2
+          if status_code="$(curl --silent --show-error --location \
+            -b "$COOKIE_FILE" \
+            -F "product=$product" \
+            -F "channel=$channel" \
+            -F "version=$VERSION" \
+            -F "sha256=$file_hash" \
+            -F "file=@$file_path" \
+            -o "$response_file" \
+            -w '%{http_code}' \
+            "$base_url/api/admin/release-artifacts/upload")"; then
+            curl_exit=0
+          else
+            curl_exit=$?
+          fi
+          if [ "$curl_exit" -eq 0 ] && [ "$status_code" -ge 200 ] && [ "$status_code" -lt 300 ]; then
+            cat "$response_file"
+            rm -f "$response_file"
+            echo
+            return 0
+          fi
+        fi
+      fi
+
+      if [ "$attempt" -lt "$max_attempts" ]; then
+        if [ "$curl_exit" -ne 0 ] || [ "$status_code" = "408" ] || [ "$status_code" = "429" ] || [ "$status_code" = "500" ] || [ "$status_code" = "502" ] || [ "$status_code" = "503" ] || [ "$status_code" = "504" ]; then
+          if [ -n "$status_code" ]; then
+            echo "warning: upload attempt $attempt/$max_attempts via $base_url failed with http $status_code" >&2
+          else
+            echo "warning: upload attempt $attempt/$max_attempts via $base_url failed with curl exit $curl_exit" >&2
+          fi
+          continue
+        fi
+      fi
+
+      if [ -n "$status_code" ]; then
+        echo "upload failed via $base_url: http $status_code" >&2
+      else
+        echo "upload failed via $base_url: curl exit $curl_exit" >&2
+      fi
+      cat "$response_file" >&2
+    done
 
     if [ "$attempt" -lt "$max_attempts" ]; then
-      if [ "$curl_exit" -ne 0 ] || [ "$status_code" = "408" ] || [ "$status_code" = "429" ] || [ "$status_code" = "500" ] || [ "$status_code" = "502" ] || [ "$status_code" = "503" ] || [ "$status_code" = "504" ]; then
-        if [ -n "$status_code" ]; then
-          echo "warning: upload attempt $attempt/$max_attempts failed with http $status_code; retrying in ${retry_delay}s" >&2
-        else
-          echo "warning: upload attempt $attempt/$max_attempts failed with curl exit $curl_exit; retrying in ${retry_delay}s" >&2
-        fi
-        sleep "$retry_delay"
-        continue
-      fi
+      echo "warning: all upload endpoints failed for attempt $attempt/$max_attempts; retrying in ${retry_delay}s" >&2
+      sleep "$retry_delay"
     fi
-
-    if [ -n "$status_code" ]; then
-      echo "upload failed: http $status_code" >&2
-    else
-      echo "upload failed: curl exit $curl_exit" >&2
-    fi
-    cat "$response_file" >&2
-    rm -f "$response_file"
-    return 1
   done
 
   rm -f "$response_file"
@@ -207,8 +263,21 @@ else
   VERSION="$DETECTED_VERSION"
 fi
 
+UPLOAD_BASE_URLS=()
+append_unique_url "$SERVER_URL"
+for url in $UPLOAD_FALLBACK_URLS; do
+  append_unique_url "${url%/}"
+done
+while IFS= read -r url; do
+  append_unique_url "${url%/}"
+done < <(derive_default_fallback_urls "$SERVER_URL")
+
 echo "Release upload target: $SERVER_URL"
 echo "Release version: $VERSION"
+if [ "${#UPLOAD_BASE_URLS[@]}" -gt 1 ]; then
+  printf 'Upload fallback endpoints:%s\n' "" >&2
+  printf '  %s\n' "${UPLOAD_BASE_URLS[@]:1}" >&2
+fi
 if [ "$VERSION_SOURCE" = "env" ] && [ "$VERSION" != "$DETECTED_VERSION" ]; then
   echo "warning: VERSION came from environment; current checkout would default to $DETECTED_VERSION" >&2
 fi
