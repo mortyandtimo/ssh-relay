@@ -81,7 +81,7 @@ if [ "$FORCE_NPM_INSTALL" = "1" ]; then
 elif [ ! -d "$NODE_MODULES_DIR" ]; then
   run_install
 elif [ ! -f "$STAMP_FILE" ]; then
-  run_install
+  echo "Reusing existing npm dependencies in $APP_DIR (adopting pre-existing node_modules without fingerprint stamp)"
 elif [ "$(cat "$STAMP_FILE")" != "$CURRENT_FINGERPRINT" ]; then
   run_install
 else
