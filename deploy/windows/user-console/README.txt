@@ -11,7 +11,7 @@ Expected outputs:
 
 Payload contents:
 - CloudRelayUser.exe: Tauri desktop shell
-- runtime/easytier-core.exe: optional EasyTier runtime binary bundled by the packager when present
+- runtime/easytier-core.exe: bundled EasyTier runtime binary prepared automatically for packager builds
 - WebView2Loader.dll: WebView runtime loader when bundled by Tauri
 - README.txt: local packaging and handoff notes
 
@@ -37,8 +37,15 @@ Authoritative build entrypoints:
 
 Build notes:
 - `deploy/windows/user-console/build-windows-artifacts.sh` reuses existing `node_modules` by default and only reinstalls when `package.json` / `package-lock.json` fingerprint changes, then rebuilds frontend assets, runs Tauri without bundle, and repacks portable + NSIS outputs.
-- If `deploy/windows/user-console/runtime/` exists on the packager, its contents are copied verbatim into the final package under `runtime/`.
-- To make P2P actually runnable, place `easytier-core.exe` in `deploy/windows/user-console/runtime/` before building on the packager.
+- The user build now runs `scripts/prepare_easytier_runtime.sh` before packaging so `deploy/windows/user-console/runtime/` is populated automatically on the packager.
+- Default behavior is to auto-resolve the latest EasyTier stable GitHub release and stage the runtime into `deploy/windows/user-console/runtime/`.
+- Override sources when needed:
+  `EASYTIER_VERSION=vX.Y.Z ./scripts/build_windows_artifacts.sh user`
+  `EASYTIER_DOWNLOAD_URL=https://...zip ./scripts/build_windows_artifacts.sh user`
+  `EASYTIER_CORE_SOURCE=/path/to/easytier-windows-x86_64-vX.Y.Z.zip ./scripts/build_windows_artifacts.sh user`
+  `EASYTIER_CORE_SOURCE=/path/to/extracted/runtime-dir ./scripts/build_windows_artifacts.sh user`
+- Use `FORCE_EASYTIER_PREPARE=1` to overwrite an already prepared runtime, or `SKIP_EASYTIER_PREPARE=1` to package the current `deploy/windows/user-console/runtime/` contents as-is.
+- Runtime sidecar files shipped in the EasyTier zip, such as `Packet.dll` or `wintun.dll`, are copied together with `easytier-core.exe` when available.
 - `scripts/build_windows_nsis_installer.sh` skips setup generation when `makensis` is missing; portable zip remains available.
 - `TAURI_TARGET` can override the default build target. Default is `x86_64-pc-windows-gnu`.
 - If you need a full dependency refresh on the packager, run with `FORCE_NPM_INSTALL=1`.
@@ -55,6 +62,7 @@ Large cache directories safe to delete and rebuild:
 Gitee collaboration flow:
 - This cloud machine keeps the Linux/server-side build local and only hands the Windows packaging chain to Gitee + packager.
 - Another machine pulls from Gitee and runs the build scripts to produce installers.
+- The packager can let the script auto-download EasyTier, or pin/override it with the `EASYTIER_*` env vars above.
 - Built installers should be uploaded from that build machine with `scripts/upload_windows_artifacts.sh user` or the one-shot `scripts/packager_build_and_upload.sh user`.
 - After upload, `manage.020309.top` downloads switch to the newest uploaded user-console artifact automatically.
 - Do not commit large build caches or installer binaries to the repo.

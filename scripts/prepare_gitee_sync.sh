@@ -35,6 +35,12 @@ echo "  2. export COOKIE_FILE=/path/to/admin.cookies"
 echo "  3. export VERSION=<release-version>   # optional but recommended for formal releases"
 echo "  4. ./scripts/packager_build_and_upload.sh all"
 echo
+echo "Optional EasyTier overrides for user-console builds on the packager:"
+echo "  - EASYTIER_VERSION=vX.Y.Z ./scripts/packager_build_and_upload.sh user"
+echo "  - EASYTIER_DOWNLOAD_URL=https://...zip ./scripts/packager_build_and_upload.sh user"
+echo "  - EASYTIER_CORE_SOURCE=/path/to/easytier-windows-x86_64-vX.Y.Z.zip ./scripts/packager_build_and_upload.sh user"
+echo "  - FORCE_EASYTIER_PREPARE=1 ./scripts/packager_build_and_upload.sh user"
+echo
 echo "Direct manual equivalents remain available:"
 echo "  - ./scripts/build_windows_artifacts.sh [publisher|cert-keeper|user|all]"
 echo "  - ./scripts/upload_windows_artifacts.sh [publisher|cert-keeper|user|all]"

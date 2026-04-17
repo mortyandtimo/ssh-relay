@@ -44,6 +44,7 @@ External tools required for rebuilds:
 - zip
 - NSIS `makensis`
 - Go for Publisher because it rebuilds `client-agent.exe`
+- curl and unzip when the packager auto-prepares EasyTier for User Console from a release zip
 
 Gitee collaboration boundary:
 - Current repo remote is already Gitee.
@@ -53,6 +54,12 @@ Gitee collaboration boundary:
 - That build machine now uploads installer artifacts directly through `scripts/upload_windows_artifacts.sh` or `scripts/packager_build_and_upload.sh`.
 - `https://manage.020309.top/` now reads the latest uploaded release metadata automatically; no more hand-editing download links after each upload.
 - Repo should not store bulky caches or installer binaries.
+- The User Console build now auto-stages `deploy/windows/user-console/runtime/easytier-core.exe` on the packager through `scripts/prepare_easytier_runtime.sh`.
+- EasyTier source overrides on the packager:
+  `EASYTIER_VERSION=vX.Y.Z ./scripts/packager_build_and_upload.sh user`
+  `EASYTIER_DOWNLOAD_URL=https://...zip ./scripts/packager_build_and_upload.sh user`
+  `EASYTIER_CORE_SOURCE=/path/to/easytier-windows-x86_64-vX.Y.Z.zip ./scripts/packager_build_and_upload.sh user`
+  `FORCE_EASYTIER_PREPARE=1 ./scripts/packager_build_and_upload.sh user`
 
 Recommended split:
 - Cloud machine: edit code, run server-side tests, build/deploy server-side locally, commit, push to Gitee.

@@ -30,6 +30,11 @@ Optional env:
   SKIP_UPLOAD      1 to stop after build
   ALLOW_DIRTY      1 to bypass dirty-worktree protection
   FORCE_NPM_INSTALL 1 to force fresh npm dependency install before desktop builds
+  EASYTIER_VERSION  pin EasyTier runtime version for user-console packaging
+  EASYTIER_DOWNLOAD_URL override EasyTier runtime zip URL for user-console packaging
+  EASYTIER_CORE_SOURCE local path, extracted dir, or URL for user-console runtime staging
+  FORCE_EASYTIER_PREPARE 1 to overwrite an already prepared EasyTier runtime
+  SKIP_EASYTIER_PREPARE 1 to skip automatic EasyTier runtime preparation
 
 Required env for upload phase:
   SERVER_URL
