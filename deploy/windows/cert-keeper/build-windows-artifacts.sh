@@ -9,6 +9,7 @@ PORTABLE_DIR="$OUT_DIR/CertKeeperPortable"
 PAYLOAD_DIR="$OUT_DIR/CertKeeperPayload"
 INSTALLER_SCRIPT="$ROOT_DIR/deploy/windows/cert-keeper/installer.nsi"
 INSTALLER_HELPER="$ROOT_DIR/scripts/build_windows_nsis_installer.sh"
+ENSURE_NPM_DEPS_SCRIPT="$ROOT_DIR/scripts/ensure_npm_dependencies.sh"
 ICON_FILE="$APP_DIR/src-tauri/icons/icon.ico"
 README_FILE="$ROOT_DIR/deploy/windows/cert-keeper/README.txt"
 APP_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$APP_DIR/package.json")"
@@ -22,7 +23,7 @@ rm -f "$FINAL_DIR/CertKeeperSetup-x64.exe"
 mkdir -p "$PORTABLE_DIR/logs" "$PAYLOAD_DIR"
 
 pushd "$APP_DIR" >/dev/null
-npm install
+"$ENSURE_NPM_DEPS_SCRIPT" "$APP_DIR"
 npm run build
 npm run tauri -- build --target "$TARGET" --no-bundle
 popd >/dev/null

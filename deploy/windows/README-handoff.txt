@@ -14,6 +14,7 @@ What is already implemented:
 - CertKeeper installer is now aligned to the same finish-page model and shortcut/autostart behavior.
 - Shared NSIS execution helper: `scripts/build_windows_nsis_installer.sh`
 - Publisher repack flow: `scripts/repack_windows_publisher.sh`
+- Frontend dependency reuse helper: `scripts/ensure_npm_dependencies.sh`
 
 Key build entrypoints:
 - Build all: `scripts/build_windows_artifacts.sh all`
@@ -21,6 +22,7 @@ Key build entrypoints:
 - Build cert-keeper only: `scripts/build_windows_artifacts.sh cert-keeper`
 - Clean rebuild caches: `scripts/clean_windows_packaging_cache.sh all`
 - Print Gitee sync workflow: `scripts/prepare_gitee_sync.sh`
+- Force fresh npm deps on packager when lockfiles change unexpectedly: `FORCE_NPM_INSTALL=1 ./scripts/packager_build_and_upload.sh all`
 
 Large caches safe to delete:
 - `apps/desktop-console/node_modules`

@@ -29,6 +29,7 @@ Optional env:
   SYNC_FROM_GITEE  1 to run git pull --ff-only, 0 to use current checkout
   SKIP_UPLOAD      1 to stop after build
   ALLOW_DIRTY      1 to bypass dirty-worktree protection
+  FORCE_NPM_INSTALL 1 to force fresh npm dependency install before desktop builds
 
 Required env for upload phase:
   SERVER_URL

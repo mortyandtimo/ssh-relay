@@ -35,9 +35,10 @@ Authoritative build entrypoints:
 - Gitee sync guidance: `scripts/prepare_gitee_sync.sh`
 
 Build notes:
-- `deploy/windows/cert-keeper/build-windows-artifacts.sh` reinstalls frontend deps, rebuilds frontend assets, runs Tauri without bundle, then repacks portable + NSIS outputs.
+- `deploy/windows/cert-keeper/build-windows-artifacts.sh` reuses existing `node_modules` by default and only reinstalls when `package.json` / `package-lock.json` fingerprint changes, then rebuilds frontend assets, runs Tauri without bundle, and repacks portable + NSIS outputs.
 - `scripts/build_windows_nsis_installer.sh` skips setup generation when `makensis` is missing; portable zip remains available.
 - `TAURI_TARGET` can override the default build target. Default is `x86_64-pc-windows-gnu`.
+- If you need a full dependency refresh on the packager, run with `FORCE_NPM_INSTALL=1`.
 
 Final artifact locations:
 - `outputs/windows-cert-keeper/final/CertKeeper-x64-portable.zip`
