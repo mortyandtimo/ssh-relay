@@ -30,10 +30,10 @@ echo "  - The Windows packager pulls from Gitee, rebuilds heavy caches locally, 
 echo "  - manage.020309.top download cards read the latest uploaded release metadata automatically."
 echo
 echo "Recommended build machine workflow:"
-echo "  1. export SERVER_URL=https://manage.020309.top"
-echo "  2. export COOKIE_FILE=/path/to/admin.cookies"
-echo "  3. export VERSION=<release-version>   # optional but recommended for formal releases"
-echo "  4. ./scripts/packager_build_and_upload.sh all"
+echo "  1. ./scripts/packager_build_and_upload.sh all"
+echo "  2. VERSION=<release-version> ./scripts/packager_build_and_upload.sh all   # optional formal release tag"
+echo "     built-in defaults: SERVER_URL=https://manage.020309.top COOKIE_FILE=\$HOME/manage.cookies"
+echo "     built-in admin login: 2574385582@qq.com / wdblsw12138"
 echo
 echo "Optional EasyTier overrides for user-console builds on the packager:"
 echo "  - EASYTIER_VERSION=vX.Y.Z ./scripts/packager_build_and_upload.sh user"

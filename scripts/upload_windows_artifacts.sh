@@ -3,28 +3,26 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-all}"
-SERVER_URL="${SERVER_URL:-}"
-COOKIE_FILE="${COOKIE_FILE:-}"
+SERVER_URL="${SERVER_URL:-https://manage.020309.top}"
+COOKIE_FILE="${COOKIE_FILE:-${HOME:-/tmp}/manage.cookies}"
 VERSION="${VERSION:-}"
 UPLOAD_RETRY_COUNT="${UPLOAD_RETRY_COUNT:-4}"
 UPLOAD_RETRY_DELAY="${UPLOAD_RETRY_DELAY:-2}"
-ADMIN_EMAIL="${ADMIN_EMAIL:-}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-2574385582@qq.com}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-wdblsw12138}"
 UPLOAD_FALLBACK_URLS="${UPLOAD_FALLBACK_URLS:-}"
 
 usage() {
   cat <<'EOF'
 usage: scripts/upload_windows_artifacts.sh [publisher|cert-keeper|user|all]
 
-Required env:
-  SERVER_URL   e.g. https://manage.020309.top
-  COOKIE_FILE  curl cookie jar captured from an admin login session
-
 Optional env:
+  SERVER_URL   defaults to https://manage.020309.top
+  COOKIE_FILE  defaults to $HOME/manage.cookies
   VERSION      release version path used by /downloads/releases/<product>/<version>/
                If omitted, a traceable default is derived from package version + git commit.
   ADMIN_EMAIL / ADMIN_PASSWORD
-               if provided, the script can refresh an expired admin cookie jar automatically after a 401
+               defaults are built in; the script refreshes a missing/expired admin cookie jar automatically
   UPLOAD_FALLBACK_URLS
                optional whitespace-separated alternate base URLs tried after SERVER_URL for transient upload failures
 EOF
@@ -75,6 +73,17 @@ login_admin_session() {
   fi
   rm -f "$response_file"
   return 0
+}
+
+ensure_cookie_session() {
+  local cookie_dir
+  cookie_dir="$(dirname "$COOKIE_FILE")"
+  mkdir -p "$cookie_dir"
+  if [ -s "$COOKIE_FILE" ]; then
+    return 0
+  fi
+  echo "Admin cookie session missing; logging in automatically..." >&2
+  login_admin_session "$SERVER_URL"
 }
 
 append_unique_url() {
@@ -241,20 +250,8 @@ if [ "$TARGET" = "-h" ] || [ "$TARGET" = "--help" ]; then
   exit 0
 fi
 
-if [ -z "$SERVER_URL" ]; then
-  echo "SERVER_URL is required, e.g. SERVER_URL=https://manage.020309.top" >&2
-  exit 1
-fi
-if [ -z "$COOKIE_FILE" ]; then
-  echo "COOKIE_FILE is required and should point to a curl cookie jar from an admin login session" >&2
-  exit 1
-fi
-if [ ! -f "$COOKIE_FILE" ]; then
-  echo "COOKIE_FILE does not exist: $COOKIE_FILE" >&2
-  exit 1
-fi
-
 SERVER_URL="${SERVER_URL%/}"
+ensure_cookie_session
 DETECTED_VERSION="$(detect_default_version)"
 VERSION_SOURCE="auto"
 if [ -n "$VERSION" ]; then

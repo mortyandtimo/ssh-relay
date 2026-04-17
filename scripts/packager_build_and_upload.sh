@@ -36,9 +36,11 @@ Optional env:
   FORCE_EASYTIER_PREPARE 1 to overwrite an already prepared EasyTier runtime
   SKIP_EASYTIER_PREPARE 1 to skip automatic EasyTier runtime preparation
 
-Required env for upload phase:
-  SERVER_URL
-  COOKIE_FILE
+Upload phase defaults now built in:
+  SERVER_URL       defaults to https://manage.020309.top
+  COOKIE_FILE      defaults to $HOME/manage.cookies
+  ADMIN_EMAIL / ADMIN_PASSWORD
+                   default admin credentials are embedded for automatic login refresh
   VERSION          optional; forwarded to upload_windows_artifacts.sh
 EOF
 }
