@@ -327,13 +327,13 @@ func deriveServiceP2PURL(tunnel types.TunnelSpec, node types.NodeSummary) string
 	if port <= 0 {
 		return ""
 	}
-	ipv4 := strings.TrimSpace(node.LatestMetrics["p2p:ipv4"])
-	if ipv4 == "" {
+	host := normalizeP2PMetricHost(node.LatestMetrics["p2p:ipv4"])
+	if host == "" {
 		return ""
 	}
 	switch tunnel.Type {
 	case "http", "https":
-		baseURL := fmt.Sprintf("http://%s:%d", urlHost(ipv4), port)
+		baseURL := fmt.Sprintf("http://%s:%d", urlHost(host), port)
 		path := normalizeServiceURLPath(tunnel.Metadata[serviceMetaP2PPathKey])
 		if path == "" {
 			return baseURL
@@ -360,6 +360,17 @@ func normalizeServiceURLPath(value string) string {
 	}
 	if !strings.HasPrefix(value, "/") {
 		return "/" + value
+	}
+	return value
+}
+
+func normalizeP2PMetricHost(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if ip, _, err := net.ParseCIDR(value); err == nil && ip != nil {
+		return ip.String()
 	}
 	return value
 }

@@ -2189,7 +2189,7 @@ func TestUserServiceCatalogDerivesP2PURLFromDedicatedServiceNode(t *testing.T) {
 		Metrics: map[string]string{
 			"p2p:running":    "true",
 			"p2p:runtime":    "easytier",
-			"p2p:ipv4":       "10.88.0.21",
+			"p2p:ipv4":       "10.88.0.21/24",
 			"p2p:peer_count": "3",
 		},
 	})
