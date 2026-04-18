@@ -2681,6 +2681,7 @@ fn bridge_http_connection_with_host_rewrite(
     mut incoming: TcpStream,
     spec: P2PServiceForwarderSpec,
 ) -> io::Result<()> {
+    let _ = incoming.set_nonblocking(false);
     let trace_id = next_p2p_forwarder_trace_id();
     let bridge_result = (|| -> io::Result<()> {
         let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
@@ -2822,6 +2823,7 @@ fn bridge_http_connection_with_host_rewrite(
 }
 
 fn bridge_tcp_connection(mut incoming: TcpStream, spec: P2PServiceForwarderSpec) -> io::Result<()> {
+    let _ = incoming.set_nonblocking(false);
     if !spec.rewrite_host.trim().is_empty() {
         return bridge_http_connection_with_host_rewrite(incoming, spec);
     }

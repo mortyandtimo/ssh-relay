@@ -1370,6 +1370,7 @@ fn bridge_workspace_proxy_connection(
     mut incoming: TcpStream,
     spec: ServiceWorkspaceProxySpec,
 ) -> io::Result<()> {
+    let _ = incoming.set_nonblocking(false);
     let trace_id = next_workspace_proxy_trace_id();
     let bridge_result = (|| -> io::Result<()> {
         let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
