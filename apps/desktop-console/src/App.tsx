@@ -53,7 +53,36 @@ type TunnelEditForm = {
   domain: string;
   probePath: string;
   transportPolicy: string;
+  serviceKey: string;
+  serviceTitle: string;
+  serviceKind: "app" | "drive" | "gallery";
+  serviceSummary: string;
+  servicePublicUrl: string;
+  serviceP2PUrl: string;
+  serviceP2PNodeId: string;
+  serviceP2PTargetPort: string;
+  serviceP2PPath: string;
+  serviceCloudAccess: "all_users" | "admin_only" | "disabled";
+  serviceP2PAccess: "all_users" | "admin_only" | "disabled";
+  servicePreferredPath: "dual" | "cloud" | "p2p";
 };
+
+type ServiceMetadataDraft = {
+  serviceKey: string;
+  serviceTitle: string;
+  serviceKind: "app" | "drive" | "gallery";
+  serviceSummary: string;
+  servicePublicUrl: string;
+  serviceP2PUrl: string;
+  serviceP2PNodeId: string;
+  serviceP2PTargetPort: string;
+  serviceP2PPath: string;
+  serviceCloudAccess: "all_users" | "admin_only" | "disabled";
+  serviceP2PAccess: "all_users" | "admin_only" | "disabled";
+  servicePreferredPath: "dual" | "cloud" | "p2p";
+};
+
+type ServiceTemplateKey = "drive" | "gallery";
 
 type RelayEndpointPreset = {
   id: string;
@@ -208,6 +237,35 @@ const publisherRoutes: RouteMeta[] = [
 ];
 
 const protocolList: PublishProtocol[] = ["http", "https", "tcp", "udp", "socks5"];
+const serviceMetadataKeys = [
+  "serviceKey",
+  "serviceTitle",
+  "serviceKind",
+  "serviceSummary",
+  "servicePublicUrl",
+  "serviceP2PUrl",
+  "serviceP2PNodeId",
+  "serviceP2PTargetPort",
+  "serviceP2PPath",
+  "serviceCloudAccess",
+  "serviceP2PAccess",
+  "servicePreferredPath",
+] as const;
+
+const emptyServiceMetadataDraft: ServiceMetadataDraft = {
+  serviceKey: "",
+  serviceTitle: "",
+  serviceKind: "app",
+  serviceSummary: "",
+  servicePublicUrl: "",
+  serviceP2PUrl: "",
+  serviceP2PNodeId: "",
+  serviceP2PTargetPort: "",
+  serviceP2PPath: "",
+  serviceCloudAccess: "all_users",
+  serviceP2PAccess: "all_users",
+  servicePreferredPath: "dual",
+};
 
 function suggestedPublicPortValue(protocol: PublishProtocol, index: number) {
   const suggested = defaultPublicPortForProtocol(protocol, index);
@@ -226,6 +284,111 @@ function serializePublishPublicPort(protocol: PublishProtocol | string, publicPo
   return Number(trimmed);
 }
 
+function extractTunnelServiceFields(metadata?: Record<string, string>): ServiceMetadataDraft {
+  return {
+    serviceKey: metadata?.serviceKey || "",
+    serviceTitle: metadata?.serviceTitle || "",
+    serviceKind: (metadata?.serviceKind || "app") as "app" | "drive" | "gallery",
+    serviceSummary: metadata?.serviceSummary || "",
+    servicePublicUrl: metadata?.servicePublicUrl || "",
+    serviceP2PUrl: metadata?.serviceP2PUrl || "",
+    serviceP2PNodeId: metadata?.serviceP2PNodeId || "",
+    serviceP2PTargetPort: metadata?.serviceP2PTargetPort || "",
+    serviceP2PPath: metadata?.serviceP2PPath || "",
+    serviceCloudAccess: (metadata?.serviceCloudAccess || "all_users") as "all_users" | "admin_only" | "disabled",
+    serviceP2PAccess: (metadata?.serviceP2PAccess || "all_users") as "all_users" | "admin_only" | "disabled",
+    servicePreferredPath: (metadata?.servicePreferredPath || "dual") as "dual" | "cloud" | "p2p",
+  };
+}
+
+function buildTunnelServiceMetadata(baseMetadata: Record<string, string> | undefined, form: ServiceMetadataDraft) {
+  const next = { ...(baseMetadata || {}) };
+  for (const key of serviceMetadataKeys) {
+    delete next[key];
+  }
+  if (!form.serviceKey.trim()) {
+    return next;
+  }
+  next.serviceKey = form.serviceKey.trim().toLowerCase();
+  if (form.serviceTitle.trim()) next.serviceTitle = form.serviceTitle.trim();
+  if (form.serviceKind.trim()) next.serviceKind = form.serviceKind.trim();
+  if (form.serviceSummary.trim()) next.serviceSummary = form.serviceSummary.trim();
+  if (form.servicePublicUrl.trim()) next.servicePublicUrl = form.servicePublicUrl.trim();
+  if (form.serviceP2PUrl.trim()) next.serviceP2PUrl = form.serviceP2PUrl.trim();
+  if (form.serviceP2PNodeId.trim()) next.serviceP2PNodeId = form.serviceP2PNodeId.trim();
+  if (form.serviceP2PTargetPort.trim()) next.serviceP2PTargetPort = form.serviceP2PTargetPort.trim();
+  if (form.serviceP2PPath.trim()) next.serviceP2PPath = form.serviceP2PPath.trim();
+  next.serviceCloudAccess = form.serviceCloudAccess;
+  next.serviceP2PAccess = form.serviceP2PAccess;
+  next.servicePreferredPath = form.servicePreferredPath;
+  return next;
+}
+
+function serviceKindLabel(kind?: string) {
+  switch (kind) {
+    case "drive":
+      return "网盘";
+    case "gallery":
+      return "图床";
+    case "app":
+      return "通用应用";
+    default:
+      return kind || "未指定";
+  }
+}
+
+function serviceAccessLabel(value?: string) {
+  switch (value) {
+    case "admin_only":
+      return "仅管理员";
+    case "disabled":
+      return "已禁用";
+    default:
+      return "全部用户";
+  }
+}
+
+function servicePreferredPathLabel(value?: string) {
+  switch (value) {
+    case "cloud":
+      return "优先云端";
+    case "p2p":
+      return "优先 P2P";
+    case "dual":
+      return "双入口";
+    default:
+      return value || "未指定";
+  }
+}
+
+function buildServiceTemplate(template: ServiceTemplateKey, targetPort: string): Partial<ServiceMetadataDraft> {
+  const normalizedPort = targetPort.trim();
+  if (template === "drive") {
+    return {
+      serviceKey: "drive",
+      serviceTitle: "网盘服务",
+      serviceKind: "drive",
+      serviceSummary: "公网入口保留目录与分享，用户端工作台只通过 P2P 下载与访问。",
+      serviceCloudAccess: "admin_only",
+      serviceP2PAccess: "all_users",
+      servicePreferredPath: "dual",
+      serviceP2PTargetPort: normalizedPort,
+      serviceP2PPath: "/",
+    };
+  }
+  return {
+    serviceKey: "gallery",
+    serviceTitle: "图床服务",
+    serviceKind: "gallery",
+    serviceSummary: "公网 HTTPS 继续承担展示与轻量访问，批量上传与下载通过 P2P 工作台接入。",
+    serviceCloudAccess: "all_users",
+    serviceP2PAccess: "all_users",
+    servicePreferredPath: "dual",
+    serviceP2PTargetPort: normalizedPort,
+    serviceP2PPath: "/",
+  };
+}
+
 const initialLocalServiceForm = {
   name: "",
   targetHost: "127.0.0.1",
@@ -240,6 +403,7 @@ const initialPublishRuleForm: PublishRuleForm = {
   domain: "",
   probePath: "/",
   transportPolicy: "relay_only",
+  ...emptyServiceMetadataDraft,
 };
 
 const relayEndpointPresets: RelayEndpointPreset[] = (() => {
@@ -1109,6 +1273,7 @@ export default function App() {
       domain: drawerTunnel.domain || "",
       probePath: drawerTunnel.probePath || "/",
       transportPolicy: drawerTunnel.transportPolicy || "relay_only",
+      ...extractTunnelServiceFields(drawerTunnel.metadata),
     });
   }, [drawerTunnel]);
 
@@ -1438,6 +1603,7 @@ export default function App() {
           domain: publishForm.protocol === "https" ? publishForm.domain.trim() : undefined,
           tlsMode: publishForm.protocol === "https" ? "edge_terminate" : undefined,
           probePath: publishForm.protocol === "http" || publishForm.protocol === "https" ? normalizeProbePath(publishForm.probePath) : undefined,
+          metadata: buildTunnelServiceMetadata(undefined, publishForm),
           status: "active",
         }),
       });
@@ -1484,6 +1650,7 @@ export default function App() {
         probePath: drawerTunnel.type === "http" || drawerTunnel.type === "https" ? normalizeProbePath(editForm.probePath) : "",
         transportPolicy: editForm.transportPolicy,
         tlsMode: drawerTunnel.tlsMode || "",
+        metadata: buildTunnelServiceMetadata(drawerTunnel.metadata, editForm),
       });
       await refreshPublisherData(false, "manual");
       setMessage(`发布规则已更新，并保持绑定到当前 runtime 节点 ${runtimeBoundDevice.nodeName} (${runtimeBoundDevice.nodeId})。`);
@@ -1777,6 +1944,7 @@ export default function App() {
     }
 
     if (drawerState.kind === "create-rule") {
+      const selectedLocalService = localServices.find((item) => item.id === publishForm.localServiceId) || localServices[0] || null;
       return (
         <div className="drawer-overlay" onClick={(event) => event.target === event.currentTarget && closeDrawer()}>
           <div className="drawer drawer-wide">
@@ -1816,7 +1984,7 @@ export default function App() {
                 <span>传输策略</span>
                 <select value={publishForm.transportPolicy} onChange={(event) => setPublishForm((current) => ({ ...current, transportPolicy: event.target.value }))}>
                   <option value="relay_only">relay_only</option>
-                  <option value="p2p_preferred">p2p_preferred (partial)</option>
+                  <option value="p2p_preferred">p2p_preferred / 可登记 P2P 服务</option>
                 </select>
               </label>
               {publishForm.protocol === "https" ? (
@@ -1875,7 +2043,13 @@ export default function App() {
                   <div className="helper-text">仅用于连通性探测和示例命令，不影响实际转发路由，默认 /。</div>
                 </label>
               ) : null}
-              <div className="drawer-note">当前主路径继续按 HTTP / HTTPS / TCP / UDP / SOCKS5 走；P2P 仍按 partial / non-blocking 处理。</div>
+              <ServiceMetadataEditor
+                form={publishForm}
+                targetPortHint={selectedLocalService?.targetPort || ""}
+                nodeIdHint={runtimeBoundDevice?.nodeId || runtimeStatus.nodeId || ""}
+                onChange={(patch) => setPublishForm((current) => ({ ...current, ...patch }))}
+              />
+              <div className="drawer-note">云端入口和用户端 P2P 工作台现在按服务元数据拆开登记，不再把所有业务流量混成统一回退路径。</div>
               <div className="surface-banner info">当前 runtime 节点：{runtimeBoundDevice ? `${runtimeBoundDevice.nodeName} (${runtimeBoundDevice.nodeId})` : runtimeStatus.nodeId ? `等待注册 ${runtimeStatus.nodeId}` : "未生成 nodeId"}</div>
               {runtimeBindingIssue ? <div className="surface-banner danger">{runtimeBindingIssue}{runtimeStatus.stderrLogPath ? <button className="btn btn-link-inline" type="button" onClick={() => void openRuntimeLog("stderr")}>打开 stderr 日志</button> : null}</div> : null}
               <button className="btn btn-primary" type="submit" disabled={busy === "create-rule" || localServices.length === 0 || Boolean(runtimeBindingIssue)}><i className="fas fa-plus" /> {busy === "create-rule" ? "创建中..." : "创建规则"}</button>
@@ -1888,6 +2062,7 @@ export default function App() {
 
     if (!drawerTunnel || !drawerRuleState || !drawerCloudEntry || !editForm) return null;
     const linkedService = resolveLinkedService(drawerTunnel, localServices);
+    const registeredService = extractTunnelServiceFields(drawerTunnel.metadata);
     const quickCommand = buildQuickCommand(drawerTunnel, drawerCloudEntry.publicUrl, normalizedCloudPublicHost);
     const probe = probeResults[drawerTunnel.id];
 
@@ -2017,11 +2192,36 @@ export default function App() {
                 <span>transportPolicy</span>
                 <select value={editForm.transportPolicy} onChange={(event) => setEditForm((current) => current ? { ...current, transportPolicy: event.target.value } : current)}>
                   <option value="relay_only">relay_only</option>
-                  <option value="p2p_preferred">p2p_preferred (partial)</option>
+                  <option value="p2p_preferred">p2p_preferred / 可登记 P2P 服务</option>
                 </select>
               </label>
+              <ServiceMetadataEditor
+                form={editForm}
+                targetPortHint={editForm.targetPort || String(drawerTunnel.targetPort || "")}
+                nodeIdHint={drawerTunnel.nodeId || runtimeBoundDevice?.nodeId || ""}
+                onChange={(patch) => setEditForm((current) => current ? { ...current, ...patch } : current)}
+              />
               <button className="btn btn-primary" type="submit" disabled={busy === "save-rule"}><i className="fas fa-save" /> {busy === "save-rule" ? "保存中..." : "保存绑定"}</button>
             </form>
+          </div>
+
+          <div className="drawer-section">
+            <div className="section-title"><i className="fas fa-layer-group" /> 服务登记</div>
+            {registeredService.serviceKey ? (
+              <div className="drawer-grid">
+                <MetricBox label="服务标识" value={registeredService.serviceKey} />
+                <MetricBox label="服务类型" value={serviceKindLabel(registeredService.serviceKind)} />
+                <MetricBox label="云端入口权限" value={serviceAccessLabel(registeredService.serviceCloudAccess)} />
+                <MetricBox label="P2P 入口权限" value={serviceAccessLabel(registeredService.serviceP2PAccess)} />
+                <MetricBox label="用户端首选" value={servicePreferredPathLabel(registeredService.servicePreferredPath)} />
+                <MetricBox label="P2P 节点" value={registeredService.serviceP2PNodeId || drawerTunnel.nodeId || "沿用当前规则节点"} />
+              </div>
+            ) : (
+              <div className="surface-banner info">
+                当前规则还没有登记成服务工作台入口。这样它仍然可以走云端反代，但用户端不会把它识别成“网盘”或“图床”。
+              </div>
+            )}
+            {registeredService.serviceSummary ? <div className="drawer-note" style={{ marginTop: 12 }}>{registeredService.serviceSummary}</div> : null}
           </div>
 
           <div className="drawer-section">
@@ -2143,10 +2343,25 @@ export default function App() {
                 const state = evaluateRuleState(item);
                 const entry = deriveCloudEntry(item, normalizedCloudPublicHost);
                 const service = resolveLinkedService(item, localServices);
+                const registeredService = extractTunnelServiceFields(item.metadata);
                 return (
                   <tr key={item.id}>
-                    <td>{service?.name || `${item.targetHost}:${item.targetPort}`}</td>
-                    <td>{item.type.toUpperCase()} · {entry.publicLabel}</td>
+                    <td>
+                      <div>{registeredService.serviceTitle || service?.name || `${item.targetHost}:${item.targetPort}`}</div>
+                      <div className="weak-note">
+                        {registeredService.serviceKey
+                          ? `${registeredService.serviceKey} · ${serviceKindLabel(registeredService.serviceKind)}`
+                          : `未登记服务工作台 · ${service?.name || `${item.targetHost}:${item.targetPort}`}`}
+                      </div>
+                    </td>
+                    <td>
+                      <div>{item.type.toUpperCase()} · {entry.publicLabel}</div>
+                      <div className="weak-note">
+                        {registeredService.serviceKey
+                          ? `云端 ${serviceAccessLabel(registeredService.serviceCloudAccess)} / P2P ${serviceAccessLabel(registeredService.serviceP2PAccess)} / 首选 ${servicePreferredPathLabel(registeredService.servicePreferredPath)}`
+                          : "当前仅作为普通发布规则存在"}
+                      </div>
+                    </td>
                     <td><span className={`status-badge ${state.attention ? "warning" : ""}`}>{item.status === "active" && !state.attention ? "Active" : item.status === "paused" ? "Paused" : state.attention ? "Pending" : item.status}</span></td>
                     <td className="action-icons">
                       <i className="fas fa-chart-bar detail-trigger" onClick={() => setDrawerState({ kind: "rule", tunnelId: item.id })} />
@@ -2387,23 +2602,37 @@ export default function App() {
         <div style={{ marginTop: 20 }}>
           <div className="section-title" style={{ marginBottom: 8 }}><i className="fas fa-project-diagram" /> 当前设备的 P2P 服务候选</div>
           <div className="surface-banner info" style={{ marginTop: 0 }}>
-            这里先把 `transportPolicy=p2p_preferred` 的规则单独拎出来。下一阶段会继续把服务级元数据、独立服务工作台和统计页接上。
+            这里单独列出声明了 `p2p_preferred` 的规则。现在可以直接在发布规则里登记网盘/图床等服务元数据，用户端工作台会按这里的服务登记进行识别。
           </div>
           <div className="table-wrapper" style={{ marginTop: 12 }}>
             <table>
-              <thead><tr><th>规则名称</th><th>目标服务</th><th>传输策略</th><th>运行路径</th><th>运行状态</th></tr></thead>
+              <thead><tr><th>规则名称</th><th>服务登记</th><th>传输策略</th><th>运行路径</th><th>运行状态</th></tr></thead>
               <tbody>
                 {p2pCandidateRules.length === 0 ? (
                   <tr><td colSpan={5}>当前还没有 `p2p_preferred` 的发布规则</td></tr>
-                ) : p2pCandidateRules.map((item) => (
-                  <tr key={item.id}>
-                    <td>{item.name}</td>
-                    <td>{item.targetHost}:{item.targetPort}</td>
-                    <td>{item.transportPolicy}</td>
-                    <td>{item.runtimePath || "未上报"}</td>
-                    <td>{item.runtimeState || "未上报"}</td>
-                  </tr>
-                ))}
+                ) : p2pCandidateRules.map((item) => {
+                  const registeredService = extractTunnelServiceFields(item.metadata);
+                  return (
+                    <tr key={item.id}>
+                      <td>{item.name}</td>
+                      <td>
+                        {registeredService.serviceKey ? (
+                          <>
+                            <div>{registeredService.serviceTitle || registeredService.serviceKey}</div>
+                            <div className="weak-note">
+                              {serviceKindLabel(registeredService.serviceKind)} · P2P {serviceAccessLabel(registeredService.serviceP2PAccess)}
+                            </div>
+                          </>
+                        ) : (
+                          <span className="weak-note">未登记服务元数据</span>
+                        )}
+                      </td>
+                      <td>{item.transportPolicy}</td>
+                      <td>{item.runtimePath || "未上报"}</td>
+                      <td>{item.runtimeState || "未上报"}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -2895,6 +3124,139 @@ function CloseDialogChoice({ onClick, onCancel }: { onClick: (action: "tray" | "
         <button className="btn btn-primary" type="button" onClick={() => onClick("tray", dontAsk)}>最小化到托盘</button>
         <button className="btn" type="button" onClick={() => onClick("exit", dontAsk)}>退出程序</button>
         <button className="btn" type="button" onClick={onCancel} style={{ marginLeft: "auto" }}>取消</button>
+      </div>
+    </div>
+  );
+}
+
+function ServiceMetadataEditor({
+  form,
+  onChange,
+  targetPortHint,
+  nodeIdHint,
+}: {
+  form: ServiceMetadataDraft;
+  onChange: (patch: Partial<ServiceMetadataDraft>) => void;
+  targetPortHint: string;
+  nodeIdHint: string;
+}) {
+  const applyTemplate = (template: ServiceTemplateKey) => {
+    onChange(buildServiceTemplate(template, targetPortHint));
+  };
+
+  return (
+    <div className="service-meta-panel">
+      <div className="service-meta-header">
+        <div>
+          <strong>服务工作台登记</strong>
+          <p>把这条发布规则登记成网盘、图床或其他服务后，云端目录和用户端工作台才能按业务身份识别它，而不是只把它当普通隧道。</p>
+        </div>
+        <div className="service-meta-actions">
+          <button className="btn btn-sm" type="button" onClick={() => applyTemplate("drive")}><i className="fas fa-hard-drive" /> 网盘模板</button>
+          <button className="btn btn-sm" type="button" onClick={() => applyTemplate("gallery")}><i className="fas fa-images" /> 图床模板</button>
+          <button className="btn btn-sm" type="button" onClick={() => onChange({ ...emptyServiceMetadataDraft })}><i className="fas fa-eraser" /> 清空登记</button>
+        </div>
+      </div>
+
+      <div className="surface-banner info" style={{ marginTop: 0 }}>
+        {form.serviceKey.trim()
+          ? `当前登记为 ${serviceKindLabel(form.serviceKind)} · ${form.serviceKey.trim()}。留空的 P2P 节点和端口会自动沿用当前发布规则。`
+          : "不填写服务标识时，这条规则仍会正常发布，但用户端不会把它识别成网盘或图床工作台入口。"}
+      </div>
+
+      <div className="service-meta-grid">
+        <label>
+          <span>服务标识</span>
+          <input value={form.serviceKey} onChange={(event) => onChange({ serviceKey: event.target.value })} placeholder="例如 drive、gallery" />
+          <small>这是服务目录里的稳定 key。建议网盘用 `drive`，图床用 `gallery`。</small>
+        </label>
+
+        <label>
+          <span>服务标题</span>
+          <input value={form.serviceTitle} onChange={(event) => onChange({ serviceTitle: event.target.value })} placeholder="例如 网盘服务" />
+          <small>用户端与云端目录里展示给用户看的名称。</small>
+        </label>
+
+        <label>
+          <span>服务类型</span>
+          <select value={form.serviceKind} onChange={(event) => onChange({ serviceKind: event.target.value as "app" | "drive" | "gallery" })}>
+            <option value="app">通用应用</option>
+            <option value="drive">网盘</option>
+            <option value="gallery">图床</option>
+          </select>
+          <small>用于用户端工作台决定采用哪类界面与交互。</small>
+        </label>
+
+        <label>
+          <span>用户端首选路径</span>
+          <select value={form.servicePreferredPath} onChange={(event) => onChange({ servicePreferredPath: event.target.value as "dual" | "cloud" | "p2p" })}>
+            <option value="dual">dual / 双入口</option>
+            <option value="cloud">cloud / 云端优先</option>
+            <option value="p2p">p2p / P2P 优先</option>
+          </select>
+          <small>用户端工作台会据此决定默认展示哪条入口策略。</small>
+        </label>
+
+        <label className="drawer-wide-field">
+          <span>服务说明</span>
+          <textarea value={form.serviceSummary} onChange={(event) => onChange({ serviceSummary: event.target.value })} placeholder="说明公网入口和 P2P 工作台各自承担什么职责" />
+          <small>建议直接写清楚云端入口与 P2P 入口的分工，便于后续联调和运营。</small>
+        </label>
+
+        <label>
+          <span>云端入口权限</span>
+          <select value={form.serviceCloudAccess} onChange={(event) => onChange({ serviceCloudAccess: event.target.value as "all_users" | "admin_only" | "disabled" })}>
+            <option value="all_users">all_users / 全部用户</option>
+            <option value="admin_only">admin_only / 仅管理员</option>
+            <option value="disabled">disabled / 禁用</option>
+          </select>
+          <small>控制云端目录和公开入口对哪些人可见。</small>
+        </label>
+
+        <label>
+          <span>P2P 入口权限</span>
+          <select value={form.serviceP2PAccess} onChange={(event) => onChange({ serviceP2PAccess: event.target.value as "all_users" | "admin_only" | "disabled" })}>
+            <option value="all_users">all_users / 全部用户</option>
+            <option value="admin_only">admin_only / 仅管理员</option>
+            <option value="disabled">disabled / 禁用</option>
+          </select>
+          <small>控制用户端工作台能否使用这条 P2P 服务入口。</small>
+        </label>
+
+        <label>
+          <span>P2P 节点 ID</span>
+          <input value={form.serviceP2PNodeId} onChange={(event) => onChange({ serviceP2PNodeId: event.target.value })} placeholder={nodeIdHint ? `留空则沿用当前规则节点 ${nodeIdHint}` : "留空则沿用当前规则节点"} />
+          <small>当 P2P 实际业务服务跑在另一台服务端时，在这里显式指定节点。</small>
+        </label>
+
+        <label>
+          <span>P2P 目标端口</span>
+          <input value={form.serviceP2PTargetPort} onChange={(event) => onChange({ serviceP2PTargetPort: event.target.value })} inputMode="numeric" placeholder={targetPortHint ? `留空则复用 targetPort ${targetPortHint}` : "留空则复用当前规则 targetPort"} />
+          <small>例如网盘 `5212`、图床 `8180`；不填就沿用这条规则的目标端口。</small>
+        </label>
+
+        <label>
+          <span>P2P 路径</span>
+          <input value={form.serviceP2PPath} onChange={(event) => onChange({ serviceP2PPath: event.target.value })} placeholder="例如 / 或 /workspace/" />
+          <small>用户端工作台最终会打开到这条路径。</small>
+        </label>
+      </div>
+
+      <div className="service-meta-advanced">
+        <div className="service-meta-advanced-title">高级覆盖</div>
+        <div className="service-meta-grid">
+          <label>
+            <span>云端入口 URL</span>
+            <input value={form.servicePublicUrl} onChange={(event) => onChange({ servicePublicUrl: event.target.value })} placeholder="留空则按当前发布规则自动推导" />
+            <small>只有在你需要覆盖默认公网入口时才填写。</small>
+          </label>
+
+          <label>
+            <span>P2P 入口 URL</span>
+            <input value={form.serviceP2PUrl} onChange={(event) => onChange({ serviceP2PUrl: event.target.value })} placeholder="留空则按 EasyTier IPv4 + 目标端口自动推导" />
+            <small>只有在你需要完全手动指定 P2P 工作台地址时才填写。</small>
+          </label>
+        </div>
       </div>
     </div>
   );

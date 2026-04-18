@@ -20,6 +20,18 @@ export type PublishRuleForm = {
   domain: string;
   probePath: string;
   transportPolicy: string;
+  serviceKey: string;
+  serviceTitle: string;
+  serviceKind: "app" | "drive" | "gallery";
+  serviceSummary: string;
+  servicePublicUrl: string;
+  serviceP2PUrl: string;
+  serviceP2PNodeId: string;
+  serviceP2PTargetPort: string;
+  serviceP2PPath: string;
+  serviceCloudAccess: "all_users" | "admin_only" | "disabled";
+  serviceP2PAccess: "all_users" | "admin_only" | "disabled";
+  servicePreferredPath: "dual" | "cloud" | "p2p";
 };
 
 export type RuleStateEvaluation = {
@@ -96,10 +108,10 @@ export function buildProtocolCards(node: NodeSummary | null, tunnels: TunnelSpec
   cards.push({
     key: "p2p",
     label: "P2P",
-    state: "Partial",
+    state: "Integrated",
     tone: "neutral",
-    summary: "P2P 继续按 partial / non-blocking 处理，不作为首版桌面主路径前提。",
-    detail: "当前桌面产品仍围绕 HTTP / HTTPS / TCP / UDP / SOCKS5 组织。",
+    summary: "P2P 当前用于 EasyTier 入网、节点 telemetry 和服务工作台入口登记。",
+    detail: "真正的数据面由服务元数据决定，不再把所有业务都混成统一回退路径。",
   });
   return cards;
 }
@@ -196,7 +208,7 @@ export function evaluateRuleState(tunnel: TunnelSpec): RuleStateEvaluation {
     messages.push({ tone: "info", message: "HTTPS 当前缺少 domain，标准入口还不能直接对外使用。" });
   }
   if (partial) {
-    messages.push({ tone: "info", message: "transportPolicy 为 p2p_preferred，但 P2P 仍按 partial / non-blocking 处理。" });
+    messages.push({ tone: "info", message: "transportPolicy 为 p2p_preferred，表示这条规则已经声明存在 P2P 能力；真正的用户端工作台入口仍以服务元数据登记为准。" });
   }
   let nextStep = "去访问验证页执行 copy / open / probe，确认外部入口已经可用。";
   if (!active) {

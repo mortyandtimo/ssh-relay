@@ -81,6 +81,7 @@ export type TunnelSpec = {
   lastProbeError?: string;
   lastProbedAt?: string;
   lastProbeTargetEntry?: string;
+  metadata?: Record<string, string>;
 };
 
 export type TunnelListResponse = {
