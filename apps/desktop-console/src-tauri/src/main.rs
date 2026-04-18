@@ -2205,6 +2205,7 @@ fn should_skip_proxy_request_header(name: &str) -> bool {
         "host"
             | "connection"
             | "proxy-connection"
+            | "accept-encoding"
             | "content-length"
             | "transfer-encoding"
             | "expect"
@@ -2212,7 +2213,10 @@ fn should_skip_proxy_request_header(name: &str) -> bool {
 }
 
 fn should_skip_proxy_response_header(name: &str) -> bool {
-    matches!(name, "connection" | "transfer-encoding")
+    matches!(
+        name,
+        "connection" | "transfer-encoding" | "content-length" | "content-encoding"
+    )
 }
 
 fn write_proxy_response_line(
@@ -2518,6 +2522,7 @@ fn bridge_http_connection_with_host_rewrite(
     let mut request = client
         .request(method, url)
         .header(reqwest::header::HOST, spec.rewrite_host.as_str())
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .header(reqwest::header::CONNECTION, "close");
 
     for (name, value) in parsed.headers {

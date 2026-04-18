@@ -875,6 +875,7 @@ fn should_skip_workspace_request_header(name: &str) -> bool {
         "host"
             | "connection"
             | "proxy-connection"
+            | "accept-encoding"
             | "content-length"
             | "transfer-encoding"
             | "expect"
@@ -882,7 +883,10 @@ fn should_skip_workspace_request_header(name: &str) -> bool {
 }
 
 fn should_skip_workspace_response_header(name: &str) -> bool {
-    matches!(name, "connection" | "transfer-encoding")
+    matches!(
+        name,
+        "connection" | "transfer-encoding" | "content-length" | "content-encoding"
+    )
 }
 
 fn write_workspace_response_line(
@@ -929,6 +933,11 @@ fn write_workspace_response_headers(
                     &spec.bind_host,
                     spec.listen_port,
                 )
+            ),
+            "set-cookie" => format!(
+                "{}: {}\r\n",
+                name.as_str(),
+                rewrite_workspace_set_cookie_header(value_str, &spec.upstream_host)
             ),
             _ => format!("{}: {}\r\n", name.as_str(), value_str),
         };
@@ -1096,6 +1105,32 @@ fn rewrite_workspace_refresh_header(
     trimmed.to_string()
 }
 
+fn rewrite_workspace_set_cookie_header(value: &str, upstream_host: &str) -> String {
+    let mut parts = value.split(';');
+    let mut rebuilt = Vec::new();
+    if let Some(first) = parts.next() {
+        rebuilt.push(first.trim().to_string());
+    }
+    for part in parts {
+        let trimmed = part.trim();
+        if trimmed.eq_ignore_ascii_case("secure") {
+            continue;
+        }
+        if let Some((name, attr_value)) = trimmed.split_once('=') {
+            if name.trim().eq_ignore_ascii_case("domain")
+                && attr_value
+                    .trim()
+                    .trim_start_matches('.')
+                    .eq_ignore_ascii_case(upstream_host)
+            {
+                continue;
+            }
+        }
+        rebuilt.push(trimmed.to_string());
+    }
+    rebuilt.join("; ")
+}
+
 fn rewrite_proxy_response_header(
     header: &[u8],
     spec: &ServiceWorkspaceProxySpec,
@@ -1186,6 +1221,7 @@ fn bridge_workspace_proxy_connection(
     let mut request = client
         .request(method, url)
         .header(reqwest::header::HOST, upstream_authority.as_str())
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .header(reqwest::header::CONNECTION, "close");
 
     for (name, value) in parsed.headers {
