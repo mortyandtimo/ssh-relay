@@ -3,10 +3,14 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD;
@@ -34,6 +38,8 @@ const USER_P2P_TCP_LISTENER: &str = "tcp://0.0.0.0:21010";
 const USER_P2P_UDP_LISTENER: &str = "udp://0.0.0.0:21010";
 const USER_P2P_RPC_PORTAL: &str = "127.0.0.1:29888";
 const USER_NODE_HEARTBEAT_SEC: u64 = 30;
+const WORKSPACE_PROXY_BIND_HOST: &str = "127.0.0.1";
+const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 
 fn background_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
@@ -69,6 +75,11 @@ struct UserNodeAgentState {
     identity: Mutex<UserNodeIdentityState>,
     launch: Mutex<UserNodeLaunchState>,
     op: Mutex<()>,
+}
+
+#[derive(Default)]
+struct ServiceWorkspaceProxyManagerState {
+    handles: Mutex<HashMap<String, ServiceWorkspaceProxyHandle>>,
 }
 
 #[derive(Clone, Default)]
@@ -117,6 +128,23 @@ struct P2PRuntimeLaunchState {
     instance_id: String,
     peer_count: usize,
     connected_peers: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServiceWorkspaceProxySpec {
+    key: String,
+    bind_host: String,
+    listen_port: u16,
+    upstream_scheme: String,
+    upstream_host: String,
+    upstream_port: u16,
+    launch_path_and_query: String,
+}
+
+struct ServiceWorkspaceProxyHandle {
+    spec: ServiceWorkspaceProxySpec,
+    shutdown: Sender<()>,
+    join: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -524,6 +552,7 @@ fn app_exit(app: AppHandle) -> Result<(), String> {
     if let Some(runtime) = app.try_state::<P2PRuntimeManagerState>() {
         let _ = stop_p2p_runtime_process(&app, &runtime);
     }
+    stop_all_service_workspace_proxies(&app);
     save_bounds_on_exit(&app);
     app.exit(0);
     Ok(())
@@ -562,14 +591,529 @@ fn open_external(url: String) -> Result<(), String> {
     Err("unsupported platform".to_string())
 }
 
+fn socket_addr(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn workspace_proxy_spec_from_url(
+    key: &str,
+    url: &reqwest::Url,
+) -> Result<ServiceWorkspaceProxySpec, String> {
+    let scheme = url.scheme().trim().to_ascii_lowercase();
+    if scheme != "http" {
+        return Err(format!("暂不支持的工作台协议: {}", url.scheme()));
+    }
+    let upstream_host = url
+        .host_str()
+        .map(str::to_string)
+        .ok_or_else(|| "服务工作台 URL 缺少 host".to_string())?;
+    let upstream_port = url
+        .port_or_known_default()
+        .ok_or_else(|| "服务工作台 URL 缺少端口".to_string())?;
+    let mut launch_path_and_query = url.path().to_string();
+    if launch_path_and_query.is_empty() {
+        launch_path_and_query = "/".to_string();
+    }
+    if let Some(query) = url.query() {
+        launch_path_and_query.push('?');
+        launch_path_and_query.push_str(query);
+    }
+    Ok(ServiceWorkspaceProxySpec {
+        key: key.to_string(),
+        bind_host: WORKSPACE_PROXY_BIND_HOST.to_string(),
+        listen_port: 0,
+        upstream_scheme: scheme,
+        upstream_host,
+        upstream_port,
+        launch_path_and_query,
+    })
+}
+
+fn stop_service_workspace_proxy(handle: ServiceWorkspaceProxyHandle) {
+    let _ = handle.shutdown.send(());
+    if let Some(join) = handle.join {
+        let _ = join.join();
+    }
+}
+
+fn stop_all_service_workspace_proxies(app: &AppHandle) {
+    let Some(manager) = app.try_state::<ServiceWorkspaceProxyManagerState>() else {
+        return;
+    };
+    let handles = {
+        let Ok(mut guard) = manager.handles.lock() else {
+            return;
+        };
+        guard.drain().map(|(_, handle)| handle).collect::<Vec<_>>()
+    };
+    for handle in handles {
+        stop_service_workspace_proxy(handle);
+    }
+}
+
+struct PrefixedReader<R> {
+    prefix: Vec<u8>,
+    pos: usize,
+    inner: R,
+}
+
+impl<R> PrefixedReader<R> {
+    fn new(prefix: Vec<u8>, inner: R) -> Self {
+        Self {
+            prefix,
+            pos: 0,
+            inner,
+        }
+    }
+}
+
+impl<R: Read> Read for PrefixedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos < self.prefix.len() {
+            let remaining = self.prefix.len() - self.pos;
+            let count = remaining.min(buf.len());
+            buf[..count].copy_from_slice(&self.prefix[self.pos..self.pos + count]);
+            self.pos += count;
+            return Ok(count);
+        }
+        self.inner.read(buf)
+    }
+}
+
+fn read_http_header(stream: &mut TcpStream) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            let split = position + 4;
+            let body = buffer.split_off(split);
+            return Ok((buffer, body));
+        }
+        if buffer.len() >= MAX_HTTP_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "http header too large",
+            ));
+        }
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "http header truncated",
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+}
+
+fn read_line_crlf<R: BufRead>(reader: &mut R) -> io::Result<Vec<u8>> {
+    let mut line = Vec::new();
+    let read = reader.read_until(b'\n', &mut line)?;
+    if read == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unexpected eof while reading line",
+        ));
+    }
+    Ok(line)
+}
+
+fn copy_exact_bytes<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    mut remaining: usize,
+) -> io::Result<()> {
+    let mut buffer = [0_u8; 8192];
+    while remaining > 0 {
+        let chunk_len = buffer.len().min(remaining);
+        let read = reader.read(&mut buffer[..chunk_len])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected eof while copying body",
+            ));
+        }
+        writer.write_all(&buffer[..read])?;
+        remaining -= read;
+    }
+    Ok(())
+}
+
+fn copy_http_body(
+    body_buffer: Vec<u8>,
+    incoming: &mut TcpStream,
+    outgoing: &mut TcpStream,
+    content_length: Option<usize>,
+    chunked: bool,
+) -> io::Result<()> {
+    if let Some(length) = content_length {
+        let mut reader = PrefixedReader::new(body_buffer, incoming);
+        return copy_exact_bytes(&mut reader, outgoing, length);
+    }
+    if chunked {
+        let prefixed = PrefixedReader::new(body_buffer, incoming);
+        let mut reader = BufReader::new(prefixed);
+        loop {
+            let size_line = read_line_crlf(&mut reader)?;
+            outgoing.write_all(&size_line)?;
+            let line = String::from_utf8_lossy(&size_line);
+            let size_token = line.split(';').next().unwrap_or_default().trim();
+            let chunk_size = usize::from_str_radix(size_token, 16)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size"))?;
+            if chunk_size == 0 {
+                loop {
+                    let trailer_line = read_line_crlf(&mut reader)?;
+                    outgoing.write_all(&trailer_line)?;
+                    if trailer_line == b"\r\n" {
+                        return Ok(());
+                    }
+                }
+            }
+            copy_exact_bytes(&mut reader, outgoing, chunk_size + 2)?;
+        }
+    }
+    if !body_buffer.is_empty() {
+        outgoing.write_all(&body_buffer)?;
+    }
+    Ok(())
+}
+
+fn rewrite_proxy_request_header(
+    header: &[u8],
+    upstream_authority: &str,
+) -> io::Result<(Vec<u8>, Option<usize>, bool)> {
+    let header_text = String::from_utf8_lossy(header);
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().unwrap_or_default().trim_end_matches('\n');
+    if request_line.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing request line",
+        ));
+    }
+
+    let mut rebuilt = Vec::new();
+    rebuilt.push(request_line.to_string());
+    let mut has_host = false;
+    let mut has_connection = false;
+    let mut content_length = None;
+    let mut chunked = false;
+
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let lower = name.trim().to_ascii_lowercase();
+            let value = value.trim();
+            match lower.as_str() {
+                "host" => {
+                    has_host = true;
+                    rebuilt.push(format!("Host: {}", upstream_authority));
+                }
+                "connection" => {
+                    has_connection = true;
+                    rebuilt.push("Connection: close".to_string());
+                }
+                "proxy-connection" => {}
+                "content-length" => {
+                    content_length = value.parse::<usize>().ok();
+                    rebuilt.push(format!("{}: {}", name.trim(), value));
+                }
+                "transfer-encoding" => {
+                    if value.to_ascii_lowercase().contains("chunked") {
+                        chunked = true;
+                    }
+                    rebuilt.push(format!("{}: {}", name.trim(), value));
+                }
+                _ => rebuilt.push(format!("{}: {}", name.trim(), value)),
+            }
+        }
+    }
+
+    if !has_host {
+        rebuilt.push(format!("Host: {}", upstream_authority));
+    }
+    if !has_connection {
+        rebuilt.push("Connection: close".to_string());
+    }
+    rebuilt.push(String::new());
+    rebuilt.push(String::new());
+
+    Ok((rebuilt.join("\r\n").into_bytes(), content_length, chunked))
+}
+
+fn rewrite_absolute_workspace_url(
+    value: &str,
+    upstream_host: &str,
+    upstream_port: u16,
+    local_host: &str,
+    local_port: u16,
+) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    if let Ok(mut url) = reqwest::Url::parse(trimmed) {
+        let parsed_port = url.port_or_known_default();
+        if url
+            .host_str()
+            .map(|host| host.eq_ignore_ascii_case(upstream_host))
+            .unwrap_or(false)
+            && parsed_port == Some(upstream_port)
+        {
+            let _ = url.set_scheme("http");
+            let _ = url.set_host(Some(local_host));
+            let _ = url.set_port(Some(local_port));
+            return url.to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn rewrite_workspace_refresh_header(
+    value: &str,
+    upstream_host: &str,
+    upstream_port: u16,
+    local_host: &str,
+    local_port: u16,
+) -> String {
+    let trimmed = value.trim();
+    if let Some((prefix, url_value)) = trimmed.split_once("url=") {
+        return format!(
+            "{}url={}",
+            prefix,
+            rewrite_absolute_workspace_url(
+                url_value,
+                upstream_host,
+                upstream_port,
+                local_host,
+                local_port,
+            )
+        );
+    }
+    trimmed.to_string()
+}
+
+fn rewrite_proxy_response_header(
+    header: &[u8],
+    spec: &ServiceWorkspaceProxySpec,
+) -> io::Result<Vec<u8>> {
+    let header_text = String::from_utf8_lossy(header);
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines.next().unwrap_or_default().trim_end_matches('\n');
+    if status_line.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing response status line",
+        ));
+    }
+
+    let mut rebuilt = Vec::new();
+    rebuilt.push(status_line.to_string());
+    let mut has_connection = false;
+
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let lower = name.trim().to_ascii_lowercase();
+            let value = value.trim();
+            match lower.as_str() {
+                "location" => rebuilt.push(format!(
+                    "{}: {}",
+                    name.trim(),
+                    rewrite_absolute_workspace_url(
+                        value,
+                        &spec.upstream_host,
+                        spec.upstream_port,
+                        &spec.bind_host,
+                        spec.listen_port,
+                    )
+                )),
+                "refresh" => rebuilt.push(format!(
+                    "{}: {}",
+                    name.trim(),
+                    rewrite_workspace_refresh_header(
+                        value,
+                        &spec.upstream_host,
+                        spec.upstream_port,
+                        &spec.bind_host,
+                        spec.listen_port,
+                    )
+                )),
+                "connection" => {
+                    has_connection = true;
+                    rebuilt.push("Connection: close".to_string());
+                }
+                _ => rebuilt.push(format!("{}: {}", name.trim(), value)),
+            }
+        }
+    }
+
+    if !has_connection {
+        rebuilt.push("Connection: close".to_string());
+    }
+    rebuilt.push(String::new());
+    rebuilt.push(String::new());
+
+    Ok(rebuilt.join("\r\n").into_bytes())
+}
+
+fn bridge_workspace_proxy_connection(
+    mut incoming: TcpStream,
+    spec: ServiceWorkspaceProxySpec,
+) -> io::Result<()> {
+    let upstream_addr = socket_addr(&spec.upstream_host, spec.upstream_port);
+    let upstream_authority = if (spec.upstream_scheme == "http" && spec.upstream_port == 80)
+        || (spec.upstream_scheme == "https" && spec.upstream_port == 443)
+    {
+        spec.upstream_host.clone()
+    } else {
+        format!("{}:{}", spec.upstream_host, spec.upstream_port)
+    };
+
+    let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
+    let (rewritten_request, content_length, chunked) =
+        rewrite_proxy_request_header(&request_header, &upstream_authority)?;
+
+    let mut outgoing = TcpStream::connect(&upstream_addr)?;
+    let _ = incoming.set_nodelay(true);
+    let _ = outgoing.set_nodelay(true);
+    outgoing.write_all(&rewritten_request)?;
+    copy_http_body(
+        request_body_buffer,
+        &mut incoming,
+        &mut outgoing,
+        content_length,
+        chunked,
+    )?;
+    outgoing.flush()?;
+
+    let (response_header, response_body_buffer) = read_http_header(&mut outgoing)?;
+    let rewritten_response = rewrite_proxy_response_header(&response_header, &spec)?;
+    incoming.write_all(&rewritten_response)?;
+    if !response_body_buffer.is_empty() {
+        incoming.write_all(&response_body_buffer)?;
+    }
+    io::copy(&mut outgoing, &mut incoming)?;
+    let _ = incoming.flush();
+    Ok(())
+}
+
+fn run_service_workspace_proxy(
+    listener: TcpListener,
+    shutdown_rx: std::sync::mpsc::Receiver<()>,
+    spec: ServiceWorkspaceProxySpec,
+) {
+    loop {
+        match shutdown_rx.try_recv() {
+            Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let proxy_spec = spec.clone();
+                thread::spawn(move || {
+                    if let Err(err) = bridge_workspace_proxy_connection(stream, proxy_spec) {
+                        eprintln!("service workspace proxy failed: {err}");
+                    }
+                });
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(150));
+            }
+            Err(err) => {
+                eprintln!("service workspace proxy accept failed: {err}");
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+}
+
+fn start_service_workspace_proxy(
+    mut spec: ServiceWorkspaceProxySpec,
+) -> Result<ServiceWorkspaceProxyHandle, String> {
+    let bind_addr = socket_addr(&spec.bind_host, 0);
+    let listener = TcpListener::bind(&bind_addr)
+        .map_err(|err| format!("本地工作台代理监听失败 {bind_addr}: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("本地工作台代理初始化失败 {bind_addr}: {err}"))?;
+    spec.listen_port = listener.local_addr().map_err(|err| err.to_string())?.port();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let thread_spec = spec.clone();
+    let join =
+        thread::spawn(move || run_service_workspace_proxy(listener, shutdown_rx, thread_spec));
+    Ok(ServiceWorkspaceProxyHandle {
+        spec,
+        shutdown: shutdown_tx,
+        join: Some(join),
+    })
+}
+
+fn ensure_service_workspace_proxy(
+    app: &AppHandle,
+    key: &str,
+    upstream_url: &reqwest::Url,
+) -> Result<String, String> {
+    let desired = workspace_proxy_spec_from_url(key, upstream_url)?;
+    let manager = app
+        .try_state::<ServiceWorkspaceProxyManagerState>()
+        .ok_or_else(|| "工作台代理状态不可用".to_string())?;
+
+    let mut handles = manager
+        .handles
+        .lock()
+        .map_err(|_| "工作台代理锁不可用".to_string())?;
+
+    if let Some(existing) = handles.get(key) {
+        let mut expected = desired.clone();
+        expected.listen_port = existing.spec.listen_port;
+        if existing.spec == expected {
+            return Ok(format!(
+                "http://{}:{}{}",
+                existing.spec.bind_host,
+                existing.spec.listen_port,
+                existing.spec.launch_path_and_query
+            ));
+        }
+    }
+
+    let old = handles.remove(key);
+    drop(handles);
+    if let Some(handle) = old {
+        stop_service_workspace_proxy(handle);
+    }
+
+    let handle = start_service_workspace_proxy(desired)?;
+    let local_url = format!(
+        "http://{}:{}{}",
+        handle.spec.bind_host, handle.spec.listen_port, handle.spec.launch_path_and_query
+    );
+    let mut handles = manager
+        .handles
+        .lock()
+        .map_err(|_| "工作台代理锁不可用".to_string())?;
+    handles.insert(key.to_string(), handle);
+    Ok(local_url)
+}
+
 #[tauri::command]
 fn open_service_workspace(app: AppHandle, input: ServiceWorkspaceInput) -> Result<(), String> {
-    let url = reqwest::Url::parse(input.url.trim()).map_err(|err| err.to_string())?;
     let key = if input.key.trim().is_empty() {
         "service".to_string()
     } else {
         sanitize_node_token(input.key.trim())
     };
+    let upstream_url = reqwest::Url::parse(input.url.trim()).map_err(|err| err.to_string())?;
+    let local_url = ensure_service_workspace_proxy(&app, &key, &upstream_url)?;
+    let url = reqwest::Url::parse(&local_url).map_err(|err| err.to_string())?;
     let label = format!("service-{}", key);
     if let Some(window) = app.get_webview_window(&label) {
         window
@@ -2043,6 +2587,7 @@ fn handle_installer_quit_request(app: &AppHandle) {
     if let Some(runtime) = app.try_state::<P2PRuntimeManagerState>() {
         let _ = stop_p2p_runtime_process(app, &runtime);
     }
+    stop_all_service_workspace_proxies(app);
     save_bounds_on_exit(app);
     app.exit(0);
 }
@@ -2133,6 +2678,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 if let Some(runtime) = app.try_state::<P2PRuntimeManagerState>() {
                     let _ = stop_p2p_runtime_process(app, &runtime);
                 }
+                stop_all_service_workspace_proxies(app);
                 app.exit(0);
             }
             _ => {}
@@ -2168,6 +2714,7 @@ fn main() {
         .manage(http_state)
         .manage(P2PRuntimeManagerState::default())
         .manage(UserNodeAgentState::default())
+        .manage(ServiceWorkspaceProxyManagerState::default())
         .setup(move |app| {
             ensure_config_dir(app.handle())
                 .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
@@ -2200,6 +2747,7 @@ fn main() {
                         {
                             let _ = stop_p2p_runtime_process(&window.app_handle(), &runtime);
                         }
+                        stop_all_service_workspace_proxies(&window.app_handle());
                         save_bounds_on_exit(&window.app_handle());
                         window.app_handle().exit(0);
                     }
@@ -2246,6 +2794,7 @@ fn main() {
             if let Some(runtime) = app_handle.try_state::<P2PRuntimeManagerState>() {
                 let _ = stop_p2p_runtime_process(&app_handle, &runtime);
             }
+            stop_all_service_workspace_proxies(&app_handle);
         }
     });
 }
