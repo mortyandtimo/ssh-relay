@@ -115,6 +115,7 @@ export type P2PServiceForwarderRuleInput = {
   targetPort: number;
   listenPort: number;
   rewriteHost?: string;
+  rewriteScheme?: string;
 };
 
 export async function loadRuntimeStatus(): Promise<RuntimeStatus> {

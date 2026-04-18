@@ -313,6 +313,18 @@ function hostFromServiceUrl(value?: string) {
   }
 }
 
+function schemeFromServiceUrl(value?: string) {
+  const trimmed = (value || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    return new URL(trimmed).protocol.replace(/:$/, "");
+  } catch {
+    return "";
+  }
+}
+
 function buildTunnelServiceMetadata(baseMetadata: Record<string, string> | undefined, form: ServiceMetadataDraft) {
   const next = { ...(baseMetadata || {}) };
   for (const key of serviceMetadataKeys) {
@@ -422,6 +434,7 @@ function buildDesiredP2PServiceForwarders(tunnels: TunnelSpec[]): P2PServiceForw
         targetPort,
         listenPort,
         rewriteHost: (tunnel.domain || hostFromServiceUrl(service.servicePublicUrl)).trim(),
+        rewriteScheme: (schemeFromServiceUrl(service.servicePublicUrl) || tunnel.type || "http").trim().toLowerCase(),
       } satisfies P2PServiceForwarderRuleInput;
     })
     .filter((item): item is P2PServiceForwarderRuleInput => item !== null);

@@ -7,6 +7,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 use std::thread;
@@ -56,6 +57,9 @@ const PUBLISHER_P2P_TCP_LISTENER: &str = "tcp://0.0.0.0:21110";
 const PUBLISHER_P2P_UDP_LISTENER: &str = "udp://0.0.0.0:21110";
 const PUBLISHER_P2P_RPC_PORTAL: &str = "127.0.0.1:15888";
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const P2P_FORWARDER_LOG_FILE: &str = "p2p-service-forwarder.log";
+
+static P2P_FORWARDER_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn background_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
@@ -150,6 +154,8 @@ struct P2PServiceForwarderSpec {
     target_host: String,
     target_port: u16,
     rewrite_host: String,
+    rewrite_scheme: String,
+    log_path: PathBuf,
 }
 
 struct P2PServiceForwarderHandle {
@@ -336,6 +342,7 @@ struct P2PServiceForwarderInput {
     target_port: u16,
     listen_port: u16,
     rewrite_host: Option<String>,
+    rewrite_scheme: Option<String>,
 }
 
 #[tauri::command]
@@ -1953,6 +1960,53 @@ fn socket_addr(host: &str, port: u16) -> String {
     }
 }
 
+fn p2p_forwarder_log_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_log_dir()
+        .map_err(|err| err.to_string())?
+        .join(P2P_FORWARDER_LOG_FILE))
+}
+
+fn next_p2p_forwarder_trace_id() -> u64 {
+    P2P_FORWARDER_TRACE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn sanitize_proxy_log_value(value: &str) -> String {
+    value
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .trim()
+        .to_string()
+}
+
+fn append_proxy_log_line(log_path: &Path, scope: &str, trace_id: u64, message: &str) {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "[{millis}] [{scope}] [#{trace_id}] {}",
+        sanitize_proxy_log_value(message)
+    );
+}
+
+fn proxy_header_value(headers: &[(String, String)], name: &str) -> String {
+    headers
+        .iter()
+        .rev()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default()
+}
+
 fn build_forwarder_spec(
     bind_host: &str,
     item: &P2PServiceForwarderInput,
@@ -1983,6 +2037,13 @@ fn build_forwarder_spec(
             .unwrap_or_default()
             .trim()
             .to_string(),
+        rewrite_scheme: item
+            .rewrite_scheme
+            .as_deref()
+            .unwrap_or("http")
+            .trim()
+            .to_ascii_lowercase(),
+        log_path: PathBuf::new(),
     })
 }
 
@@ -2407,6 +2468,7 @@ fn rewrite_request_absolute_url(
     local_host: &str,
     local_port: u16,
     rewrite_host: &str,
+    rewrite_scheme: &str,
 ) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() || rewrite_host.trim().is_empty() {
@@ -2420,6 +2482,11 @@ fn rewrite_request_absolute_url(
             .unwrap_or(false)
             && parsed_port == Some(local_port)
         {
+            let _ = url.set_scheme(if rewrite_scheme.trim().is_empty() {
+                "http"
+            } else {
+                rewrite_scheme
+            });
             let _ = url.set_host(Some(rewrite_host));
             let _ = url.set_port(None);
             return url.to_string();
@@ -2509,7 +2576,13 @@ fn rewrite_http_request_header(
                 "origin" | "referer" => rebuilt.push(format!(
                     "{}: {}",
                     name.trim(),
-                    rewrite_request_absolute_url(value, local_host, local_port, rewrite_host)
+                    rewrite_request_absolute_url(
+                        value,
+                        local_host,
+                        local_port,
+                        rewrite_host,
+                        "http",
+                    )
                 )),
                 "connection" => {
                     has_connection = true;
@@ -2608,12 +2681,40 @@ fn bridge_http_connection_with_host_rewrite(
     mut incoming: TcpStream,
     spec: P2PServiceForwarderSpec,
 ) -> io::Result<()> {
+    let trace_id = next_p2p_forwarder_trace_id();
     let bridge_result = (|| -> io::Result<()> {
         let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
         let parsed = parse_proxy_request_header(&request_header)?;
         let request_method = parsed.method.clone();
         let request_target = parsed.target.clone();
         let url = build_forwarder_target_url(&spec, &parsed.target)?;
+        let host_header = proxy_header_value(&parsed.headers, "host");
+        let origin_header = proxy_header_value(&parsed.headers, "origin");
+        let referer_header = proxy_header_value(&parsed.headers, "referer");
+        let content_type = proxy_header_value(&parsed.headers, "content-type");
+        let transfer_encoding = proxy_header_value(&parsed.headers, "transfer-encoding");
+        append_proxy_log_line(
+            &spec.log_path,
+            "forwarder-request",
+            trace_id,
+            &format!(
+                "bind={} target={} rewrite_host={} rewrite_scheme={} method={} request_target={} host={} origin={} referer={} content_type={} content_length={:?} transfer_encoding={} chunked={} buffered_body_bytes={}",
+                socket_addr(&spec.bind_host, spec.listen_port),
+                url,
+                spec.rewrite_host,
+                spec.rewrite_scheme,
+                request_method,
+                request_target,
+                host_header,
+                origin_header,
+                referer_header,
+                content_type,
+                parsed.content_length,
+                transfer_encoding,
+                parsed.chunked,
+                request_body_buffer.len()
+            ),
+        );
         let method = parsed
             .method
             .parse::<Method>()
@@ -2640,6 +2741,7 @@ fn bridge_http_connection_with_host_rewrite(
                     &spec.bind_host,
                     spec.listen_port,
                     &spec.rewrite_host,
+                    &spec.rewrite_scheme,
                 ),
                 _ => value,
             };
@@ -2665,6 +2767,26 @@ fn bridge_http_connection_with_host_rewrite(
                 request_method, request_target, err
             ))
         })?;
+        append_proxy_log_line(
+            &spec.log_path,
+            "forwarder-response",
+            trace_id,
+            &format!(
+                "status={} final_url={} location={} set_cookie_count={}",
+                response.status().as_u16(),
+                response.url(),
+                response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default(),
+                response
+                    .headers()
+                    .get_all(reqwest::header::SET_COOKIE)
+                    .iter()
+                    .count()
+            ),
+        );
         let _ = incoming.set_nodelay(true);
         write_proxy_response_line(&mut incoming, response.status())?;
         write_proxy_response_headers(
@@ -2686,6 +2808,12 @@ fn bridge_http_connection_with_host_rewrite(
 
     if let Err(err) = bridge_result {
         eprintln!("p2p service forwarder failed: {err}");
+        append_proxy_log_line(
+            &spec.log_path,
+            "forwarder-error",
+            trace_id,
+            &format!("error={}", err),
+        );
         let _ = write_proxy_error_response(&mut incoming, 502, &err.to_string());
         return Err(err);
     }
@@ -2788,11 +2916,15 @@ fn sync_p2p_service_forwarders(
     } else {
         String::new()
     };
+    let log_path = p2p_forwarder_log_path(&app)?;
 
     let desired_specs = items
         .iter()
         .filter_map(|item| build_forwarder_spec(&bind_host, item))
-        .map(|spec| (spec.tunnel_id.clone(), spec))
+        .map(|mut spec| {
+            spec.log_path = log_path.clone();
+            (spec.tunnel_id.clone(), spec)
+        })
         .collect::<HashMap<String, P2PServiceForwarderSpec>>();
 
     let mut handles = forwarders

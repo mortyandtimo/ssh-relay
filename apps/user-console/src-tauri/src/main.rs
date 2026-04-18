@@ -7,6 +7,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 use std::thread;
@@ -40,6 +41,9 @@ const USER_P2P_RPC_PORTAL: &str = "127.0.0.1:29888";
 const USER_NODE_HEARTBEAT_SEC: u64 = 30;
 const WORKSPACE_PROXY_BIND_HOST: &str = "127.0.0.1";
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const WORKSPACE_PROXY_LOG_FILE: &str = "workspace-proxy.log";
+
+static WORKSPACE_PROXY_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn background_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
@@ -139,6 +143,7 @@ struct ServiceWorkspaceProxySpec {
     upstream_host: String,
     upstream_port: u16,
     launch_path_and_query: String,
+    log_path: PathBuf,
 }
 
 struct ServiceWorkspaceProxyHandle {
@@ -622,6 +627,53 @@ fn socket_addr(host: &str, port: u16) -> String {
     }
 }
 
+fn workspace_proxy_log_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_log_dir()
+        .map_err(|err| err.to_string())?
+        .join(WORKSPACE_PROXY_LOG_FILE))
+}
+
+fn next_workspace_proxy_trace_id() -> u64 {
+    WORKSPACE_PROXY_TRACE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn sanitize_proxy_log_value(value: &str) -> String {
+    value
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .trim()
+        .to_string()
+}
+
+fn append_proxy_log_line(log_path: &Path, scope: &str, trace_id: u64, message: &str) {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "[{millis}] [{scope}] [#{trace_id}] {}",
+        sanitize_proxy_log_value(message)
+    );
+}
+
+fn workspace_header_value(headers: &[(String, String)], name: &str) -> String {
+    headers
+        .iter()
+        .rev()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default()
+}
+
 fn workspace_proxy_spec_from_url(
     key: &str,
     url: &reqwest::Url,
@@ -653,6 +705,7 @@ fn workspace_proxy_spec_from_url(
         upstream_host,
         upstream_port,
         launch_path_and_query,
+        log_path: PathBuf::new(),
     })
 }
 
@@ -1317,12 +1370,39 @@ fn bridge_workspace_proxy_connection(
     mut incoming: TcpStream,
     spec: ServiceWorkspaceProxySpec,
 ) -> io::Result<()> {
+    let trace_id = next_workspace_proxy_trace_id();
     let bridge_result = (|| -> io::Result<()> {
         let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
         let parsed = parse_workspace_request_header(&request_header)?;
         let request_method = parsed.method.clone();
         let request_target = parsed.target.clone();
         let url = build_workspace_target_url(&spec, &parsed.target)?;
+        let host_header = workspace_header_value(&parsed.headers, "host");
+        let origin_header = workspace_header_value(&parsed.headers, "origin");
+        let referer_header = workspace_header_value(&parsed.headers, "referer");
+        let content_type = workspace_header_value(&parsed.headers, "content-type");
+        let transfer_encoding = workspace_header_value(&parsed.headers, "transfer-encoding");
+        append_proxy_log_line(
+            &spec.log_path,
+            "workspace-request",
+            trace_id,
+            &format!(
+                "listen=http://{}:{} upstream={} method={} target={} host={} origin={} referer={} content_type={} content_length={:?} transfer_encoding={} chunked={} buffered_body_bytes={}",
+                spec.bind_host,
+                spec.listen_port,
+                url,
+                request_method,
+                request_target,
+                host_header,
+                origin_header,
+                referer_header,
+                content_type,
+                parsed.content_length,
+                transfer_encoding,
+                parsed.chunked,
+                request_body_buffer.len()
+            ),
+        );
         let method = parsed
             .method
             .parse::<Method>()
@@ -1380,6 +1460,26 @@ fn bridge_workspace_proxy_connection(
                 request_method, request_target, err
             ))
         })?;
+        append_proxy_log_line(
+            &spec.log_path,
+            "workspace-response",
+            trace_id,
+            &format!(
+                "status={} final_url={} location={} set_cookie_count={}",
+                response.status().as_u16(),
+                response.url(),
+                response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default(),
+                response
+                    .headers()
+                    .get_all(reqwest::header::SET_COOKIE)
+                    .iter()
+                    .count()
+            ),
+        );
         let _ = incoming.set_nodelay(true);
         write_workspace_response_line(&mut incoming, response.status())?;
         write_workspace_response_headers(&mut incoming, response.headers(), &spec)?;
@@ -1395,6 +1495,12 @@ fn bridge_workspace_proxy_connection(
 
     if let Err(err) = bridge_result {
         eprintln!("service workspace proxy failed: {err}");
+        append_proxy_log_line(
+            &spec.log_path,
+            "workspace-error",
+            trace_id,
+            &format!("error={}", err),
+        );
         let _ = write_workspace_proxy_error_response(&mut incoming, 502, &err.to_string());
         return Err(err);
     }
@@ -1458,7 +1564,8 @@ fn ensure_service_workspace_proxy(
     key: &str,
     upstream_url: &reqwest::Url,
 ) -> Result<String, String> {
-    let desired = workspace_proxy_spec_from_url(key, upstream_url)?;
+    let mut desired = workspace_proxy_spec_from_url(key, upstream_url)?;
+    desired.log_path = workspace_proxy_log_path(app)?;
     let manager = app
         .try_state::<ServiceWorkspaceProxyManagerState>()
         .ok_or_else(|| "工作台代理状态不可用".to_string())?;
