@@ -107,6 +107,15 @@ export type TrafficHistorySnapshot = {
   months: TrafficHistoryMonthEntry[];
 };
 
+export type P2PServiceForwarderRuleInput = {
+  tunnelId: string;
+  serviceKey: string;
+  serviceTitle: string;
+  targetHost: string;
+  targetPort: number;
+  listenPort: number;
+};
+
 export async function loadRuntimeStatus(): Promise<RuntimeStatus> {
   try {
     return await invoke<RuntimeStatus>("runtime_status");
@@ -204,6 +213,10 @@ export async function stopP2PRuntime(): Promise<P2PRuntimeStatus> {
 
 export async function openP2PRuntimeLog(kind: "stdout" | "stderr"): Promise<void> {
   await invoke("open_p2p_runtime_log", { kind });
+}
+
+export async function syncP2PServiceForwarders(items: P2PServiceForwarderRuleInput[]): Promise<void> {
+  await invoke("sync_p2p_service_forwarders", { items });
 }
 
 export async function loadDesktopAppUsage(): Promise<DesktopAppUsage> {

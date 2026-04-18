@@ -32,7 +32,7 @@ import {
   type PublishRuleForm,
 } from "./app-services/publisherModel";
 import { ControlResultBlock } from "./controlResultBlock";
-import { appExit, createTauriDesktopTransport, decryptLoginPassword, deleteLoginProfile, ensureRuntimeStarted, loadAgentTraffic, loadAppConfig, loadAutoStartEnabled, loadDesktopAppUsage, loadDesktopHostPaths, loadP2PRuntimeStatus, loadRuntimeStatus, loadTrafficHistory, openDesktopExternal, openP2PRuntimeLog, openRuntimeLog, readLoginProfiles, recordTrafficDelta, saveAppConfig, saveLoginProfile, setAutoStart, startP2PRuntime, stopP2PRuntime, stopRuntime, windowMinimize, windowRequestClose, windowStartDrag, windowToggleMaximize, type AgentTrafficSnapshot, type AppConfig, type DesktopAppUsage, type LoginProfilesFile, type P2PRuntimeStatus, type RuntimeStatus, type TrafficHistoryDayEntry, type TrafficHistorySnapshot } from "./desktopHost";
+import { appExit, createTauriDesktopTransport, decryptLoginPassword, deleteLoginProfile, ensureRuntimeStarted, loadAgentTraffic, loadAppConfig, loadAutoStartEnabled, loadDesktopAppUsage, loadDesktopHostPaths, loadP2PRuntimeStatus, loadRuntimeStatus, loadTrafficHistory, openDesktopExternal, openP2PRuntimeLog, openRuntimeLog, readLoginProfiles, recordTrafficDelta, saveAppConfig, saveLoginProfile, setAutoStart, startP2PRuntime, stopP2PRuntime, stopRuntime, syncP2PServiceForwarders, windowMinimize, windowRequestClose, windowStartDrag, windowToggleMaximize, type AgentTrafficSnapshot, type AppConfig, type DesktopAppUsage, type LoginProfilesFile, type P2PRuntimeStatus, type P2PServiceForwarderRuleInput, type RuntimeStatus, type TrafficHistoryDayEntry, type TrafficHistorySnapshot } from "./desktopHost";
 
 type DesktopWindowEnv = {
   apiBaseUrl?: string;
@@ -387,6 +387,31 @@ function buildServiceTemplate(template: ServiceTemplateKey, targetPort: string):
     serviceP2PTargetPort: normalizedPort,
     serviceP2PPath: "/",
   };
+}
+
+function buildDesiredP2PServiceForwarders(tunnels: TunnelSpec[]): P2PServiceForwarderRuleInput[] {
+  return tunnels
+    .filter((tunnel) => tunnel.status === "active" && (tunnel.type === "http" || tunnel.type === "https"))
+    .map((tunnel) => {
+      const service = extractTunnelServiceFields(tunnel.metadata);
+      if (!service.serviceKey.trim() || service.serviceP2PAccess === "disabled") {
+        return null;
+      }
+      const listenPort = Number(service.serviceP2PTargetPort || tunnel.targetPort || 0);
+      const targetPort = Number(tunnel.targetPort || 0);
+      if (!listenPort || listenPort <= 0 || !targetPort || targetPort <= 0) {
+        return null;
+      }
+      return {
+        tunnelId: tunnel.id,
+        serviceKey: service.serviceKey.trim().toLowerCase(),
+        serviceTitle: service.serviceTitle.trim() || tunnel.name,
+        targetHost: tunnel.targetHost || "127.0.0.1",
+        targetPort,
+        listenPort,
+      } satisfies P2PServiceForwarderRuleInput;
+    })
+    .filter((item): item is P2PServiceForwarderRuleInput => Boolean(item));
 }
 
 const initialLocalServiceForm = {
@@ -1124,6 +1149,14 @@ export default function App() {
     () => publishableTunnels.filter((item) => item.transportPolicy === "p2p_preferred"),
     [publishableTunnels],
   );
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const items = p2pStatus?.running ? buildDesiredP2PServiceForwarders(publishableTunnels) : [];
+    void syncP2PServiceForwarders(items).catch(() => {
+      // host-side P2P forwarder sync is best-effort; surface failures later in dedicated runtime UI
+    });
+  }, [currentUser, p2pStatus?.running, p2pStatus?.virtualIpv4, publishableTunnels]);
 
   const diagnosticsItems = useMemo(() => buildDiagnosticsItems(publishableTunnels), [publishableTunnels]);
   const activeRulesCount = useMemo(() => publishableTunnels.filter((item) => item.status === "active").length, [publishableTunnels]);

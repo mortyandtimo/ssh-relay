@@ -3,10 +3,14 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
+use std::io;
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -92,6 +96,11 @@ struct P2PRuntimeManagerState {
     op: Mutex<()>,
 }
 
+#[derive(Default)]
+struct P2PServiceForwarderManagerState {
+    handles: Mutex<HashMap<String, P2PServiceForwarderHandle>>,
+}
+
 #[derive(Clone, Default)]
 struct RuntimeLaunchState {
     available: bool,
@@ -128,6 +137,23 @@ struct P2PRuntimeLaunchState {
     instance_id: String,
     peer_count: usize,
     connected_peers: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct P2PServiceForwarderSpec {
+    tunnel_id: String,
+    service_key: String,
+    service_title: String,
+    bind_host: String,
+    listen_port: u16,
+    target_host: String,
+    target_port: u16,
+}
+
+struct P2PServiceForwarderHandle {
+    spec: P2PServiceForwarderSpec,
+    shutdown: Sender<()>,
+    join: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone, Copy)]
@@ -288,6 +314,17 @@ struct P2PRuntimeStatus {
     instance_id: String,
     peer_count: usize,
     connected_peers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct P2PServiceForwarderInput {
+    tunnel_id: String,
+    service_key: String,
+    service_title: String,
+    target_host: String,
+    target_port: u16,
+    listen_port: u16,
 }
 
 #[tauri::command]
@@ -1887,6 +1924,200 @@ fn current_p2p_runtime_status(
     })
 }
 
+fn normalize_p2p_bind_host(value: &str) -> String {
+    value
+        .trim()
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn socket_addr(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn build_forwarder_spec(
+    bind_host: &str,
+    item: &P2PServiceForwarderInput,
+) -> Option<P2PServiceForwarderSpec> {
+    if bind_host.trim().is_empty()
+        || item.tunnel_id.trim().is_empty()
+        || item.service_key.trim().is_empty()
+        || item.listen_port == 0
+        || item.target_port == 0
+    {
+        return None;
+    }
+    Some(P2PServiceForwarderSpec {
+        tunnel_id: item.tunnel_id.trim().to_string(),
+        service_key: item.service_key.trim().to_string(),
+        service_title: item.service_title.trim().to_string(),
+        bind_host: bind_host.trim().to_string(),
+        listen_port: item.listen_port,
+        target_host: if item.target_host.trim().is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            item.target_host.trim().to_string()
+        },
+        target_port: item.target_port,
+    })
+}
+
+fn stop_p2p_service_forwarder(handle: P2PServiceForwarderHandle) {
+    let _ = handle.shutdown.send(());
+    if let Some(join) = handle.join {
+        let _ = join.join();
+    }
+}
+
+fn bridge_tcp_connection(mut incoming: TcpStream, target_addr: String) -> io::Result<()> {
+    let mut outgoing = TcpStream::connect(&target_addr)?;
+    let _ = incoming.set_nodelay(true);
+    let _ = outgoing.set_nodelay(true);
+
+    let mut incoming_reader = incoming.try_clone()?;
+    let mut outgoing_writer = outgoing.try_clone()?;
+    let upstream = thread::spawn(move || {
+        let _ = io::copy(&mut incoming_reader, &mut outgoing_writer);
+        let _ = outgoing_writer.shutdown(Shutdown::Write);
+    });
+
+    let downstream = thread::spawn(move || {
+        let _ = io::copy(&mut outgoing, &mut incoming);
+        let _ = incoming.shutdown(Shutdown::Write);
+    });
+
+    let _ = upstream.join();
+    let _ = downstream.join();
+    Ok(())
+}
+
+fn run_p2p_service_forwarder(
+    listener: TcpListener,
+    shutdown_rx: std::sync::mpsc::Receiver<()>,
+    spec: P2PServiceForwarderSpec,
+) {
+    let target_addr = socket_addr(&spec.target_host, spec.target_port);
+    loop {
+        match shutdown_rx.try_recv() {
+            Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let target = target_addr.clone();
+                thread::spawn(move || {
+                    if let Err(err) = bridge_tcp_connection(stream, target.clone()) {
+                        eprintln!("p2p service forwarder connect {target} failed: {err}");
+                    }
+                });
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(150));
+            }
+            Err(err) => {
+                eprintln!(
+                    "p2p service forwarder {} accept failed: {}",
+                    socket_addr(&spec.bind_host, spec.listen_port),
+                    err
+                );
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+}
+
+fn start_p2p_service_forwarder(
+    spec: P2PServiceForwarderSpec,
+) -> Result<P2PServiceForwarderHandle, String> {
+    let bind_addr = socket_addr(&spec.bind_host, spec.listen_port);
+    let listener = TcpListener::bind(&bind_addr)
+        .map_err(|err| format!("P2P 服务监听失败 {bind_addr}: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("P2P 服务监听初始化失败 {bind_addr}: {err}"))?;
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let thread_spec = spec.clone();
+    let join = thread::spawn(move || run_p2p_service_forwarder(listener, shutdown_rx, thread_spec));
+    Ok(P2PServiceForwarderHandle {
+        spec,
+        shutdown: shutdown_tx,
+        join: Some(join),
+    })
+}
+
+#[tauri::command]
+fn sync_p2p_service_forwarders(
+    app: AppHandle,
+    runtime: State<P2PRuntimeManagerState>,
+    forwarders: State<P2PServiceForwarderManagerState>,
+    items: Vec<P2PServiceForwarderInput>,
+) -> Result<(), String> {
+    let status = current_p2p_runtime_status(&app, &runtime)?;
+    let bind_host = if status.running {
+        normalize_p2p_bind_host(&status.virtual_ipv4)
+    } else {
+        String::new()
+    };
+
+    let desired_specs = items
+        .iter()
+        .filter_map(|item| build_forwarder_spec(&bind_host, item))
+        .map(|spec| (spec.tunnel_id.clone(), spec))
+        .collect::<HashMap<String, P2PServiceForwarderSpec>>();
+
+    let mut handles = forwarders
+        .handles
+        .lock()
+        .map_err(|_| "P2P 服务转发器锁不可用".to_string())?;
+
+    let existing_ids = handles.keys().cloned().collect::<Vec<String>>();
+    let mut to_stop = Vec::new();
+    for tunnel_id in existing_ids {
+        let should_keep = desired_specs
+            .get(&tunnel_id)
+            .map(|desired| {
+                handles
+                    .get(&tunnel_id)
+                    .map(|current| current.spec == *desired)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if !should_keep {
+            if let Some(handle) = handles.remove(&tunnel_id) {
+                to_stop.push(handle);
+            }
+        }
+    }
+    drop(handles);
+
+    for handle in to_stop {
+        stop_p2p_service_forwarder(handle);
+    }
+
+    let mut handles = forwarders
+        .handles
+        .lock()
+        .map_err(|_| "P2P 服务转发器锁不可用".to_string())?;
+
+    for (tunnel_id, spec) in desired_specs {
+        if handles.contains_key(&tunnel_id) {
+            continue;
+        }
+        let handle = start_p2p_service_forwarder(spec)?;
+        handles.insert(tunnel_id, handle);
+    }
+
+    Ok(())
+}
+
 fn stop_p2p_runtime_process(
     app: &AppHandle,
     runtime: &P2PRuntimeManagerState,
@@ -2408,6 +2639,7 @@ fn main() {
         .manage(ResourceSampleState::default())
         .manage(RuntimeManagerState::default())
         .manage(P2PRuntimeManagerState::default())
+        .manage(P2PServiceForwarderManagerState::default())
         .setup(move |app| {
             ensure_runtime_dirs(app.handle())
                 .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
@@ -2463,6 +2695,7 @@ fn main() {
             p2p_runtime_start,
             p2p_runtime_stop,
             open_p2p_runtime_log,
+            sync_p2p_service_forwarders,
             window_start_drag,
             window_minimize,
             window_toggle_maximize,
@@ -2491,6 +2724,18 @@ fn main() {
     let app_handle = app.handle().clone();
     let _ = app.run(move |_, event| {
         if let tauri::RunEvent::Exit = event {
+            if let Some(forwarders) = app_handle.try_state::<P2PServiceForwarderManagerState>() {
+                if let Ok(mut handles) = forwarders.handles.lock() {
+                    let drained = handles
+                        .drain()
+                        .map(|(_, handle)| handle)
+                        .collect::<Vec<_>>();
+                    drop(handles);
+                    for handle in drained {
+                        stop_p2p_service_forwarder(handle);
+                    }
+                }
+            }
             if let Some(p2p_runtime) = app_handle.try_state::<P2PRuntimeManagerState>() {
                 let _ = stop_p2p_runtime_process(&app_handle, &p2p_runtime);
             }

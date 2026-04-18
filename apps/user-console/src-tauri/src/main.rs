@@ -557,6 +557,9 @@ fn open_service_workspace(app: AppHandle, input: ServiceWorkspaceInput) -> Resul
     };
     let label = format!("service-{}", key);
     if let Some(window) = app.get_webview_window(&label) {
+        window
+            .navigate(url.clone())
+            .map_err(|err| err.to_string())?;
         ensure_window_visible(&window);
         let _ = window.set_focus();
         return Ok(());
