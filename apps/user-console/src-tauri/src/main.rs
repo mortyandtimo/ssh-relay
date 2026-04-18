@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use reqwest::blocking::Client;
+use reqwest::blocking::{Body, Client};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
@@ -145,6 +145,14 @@ struct ServiceWorkspaceProxyHandle {
     spec: ServiceWorkspaceProxySpec,
     shutdown: Sender<()>,
     join: Option<JoinHandle<()>>,
+}
+
+struct ParsedWorkspaceRequest {
+    method: String,
+    target: String,
+    headers: Vec<(String, String)>,
+    content_length: Option<usize>,
+    chunked: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -781,6 +789,154 @@ fn copy_http_body(
     Ok(())
 }
 
+fn parse_workspace_request_header(header: &[u8]) -> io::Result<ParsedWorkspaceRequest> {
+    let header_text = String::from_utf8_lossy(header);
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().unwrap_or_default().trim_end_matches('\n');
+    if request_line.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing request line",
+        ));
+    }
+
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().trim().to_string();
+    let target = parts.next().unwrap_or_default().trim().to_string();
+    if method.is_empty() || target.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid request line",
+        ));
+    }
+
+    let mut headers = Vec::new();
+    let mut content_length = None;
+    let mut chunked = false;
+
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let key = name.trim().to_string();
+            let value = value.trim().to_string();
+            if key.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse::<usize>().ok();
+            }
+            if key.eq_ignore_ascii_case("transfer-encoding")
+                && value.to_ascii_lowercase().contains("chunked")
+            {
+                chunked = true;
+            }
+            headers.push((key, value));
+        }
+    }
+
+    Ok(ParsedWorkspaceRequest {
+        method,
+        target,
+        headers,
+        content_length,
+        chunked,
+    })
+}
+
+fn build_workspace_target_url(
+    spec: &ServiceWorkspaceProxySpec,
+    target: &str,
+) -> io::Result<reqwest::Url> {
+    if let Ok(parsed) = reqwest::Url::parse(target) {
+        let mut url = reqwest::Url::parse(&format!(
+            "http://{}:{}/",
+            spec.upstream_host, spec.upstream_port
+        ))
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+        url.set_path(parsed.path());
+        url.set_query(parsed.query());
+        return Ok(url);
+    }
+
+    let normalized = if target.starts_with('/') {
+        target.to_string()
+    } else {
+        format!("/{}", target)
+    };
+    reqwest::Url::parse(&format!(
+        "http://{}:{}{}",
+        spec.upstream_host, spec.upstream_port, normalized
+    ))
+    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))
+}
+
+fn should_skip_workspace_request_header(name: &str) -> bool {
+    matches!(
+        name,
+        "host"
+            | "connection"
+            | "proxy-connection"
+            | "content-length"
+            | "transfer-encoding"
+            | "expect"
+    )
+}
+
+fn should_skip_workspace_response_header(name: &str) -> bool {
+    matches!(name, "connection" | "transfer-encoding")
+}
+
+fn write_workspace_response_line(
+    incoming: &mut TcpStream,
+    status: reqwest::StatusCode,
+) -> io::Result<()> {
+    let reason = status.canonical_reason().unwrap_or("OK");
+    incoming.write_all(format!("HTTP/1.1 {} {}\r\n", status.as_u16(), reason).as_bytes())
+}
+
+fn write_workspace_response_headers(
+    incoming: &mut TcpStream,
+    headers: &reqwest::header::HeaderMap,
+    spec: &ServiceWorkspaceProxySpec,
+) -> io::Result<()> {
+    for (name, value) in headers {
+        let lower = name.as_str().trim().to_ascii_lowercase();
+        if should_skip_workspace_response_header(&lower) {
+            continue;
+        }
+        let value_str = match value.to_str() {
+            Ok(value) => value.trim(),
+            Err(_) => continue,
+        };
+        let line = match lower.as_str() {
+            "location" => format!(
+                "{}: {}\r\n",
+                name.as_str(),
+                rewrite_absolute_workspace_url(
+                    value_str,
+                    &spec.upstream_host,
+                    spec.upstream_port,
+                    &spec.bind_host,
+                    spec.listen_port,
+                )
+            ),
+            "refresh" => format!(
+                "{}: {}\r\n",
+                name.as_str(),
+                rewrite_workspace_refresh_header(
+                    value_str,
+                    &spec.upstream_host,
+                    spec.upstream_port,
+                    &spec.bind_host,
+                    spec.listen_port,
+                )
+            ),
+            _ => format!("{}: {}\r\n", name.as_str(), value_str),
+        };
+        incoming.write_all(line.as_bytes())?;
+    }
+    incoming.write_all(b"Connection: close\r\n\r\n")
+}
+
 fn rewrite_proxy_request_header(
     header: &[u8],
     local_host: &str,
@@ -1010,46 +1166,65 @@ fn bridge_workspace_proxy_connection(
     mut incoming: TcpStream,
     spec: ServiceWorkspaceProxySpec,
 ) -> io::Result<()> {
-    let upstream_addr = socket_addr(&spec.upstream_host, spec.upstream_port);
-    let upstream_authority = if (spec.upstream_scheme == "http" && spec.upstream_port == 80)
-        || (spec.upstream_scheme == "https" && spec.upstream_port == 443)
-    {
+    let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
+    let parsed = parse_workspace_request_header(&request_header)?;
+    let url = build_workspace_target_url(&spec, &parsed.target)?;
+    let method = parsed
+        .method
+        .parse::<Method>()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+    let upstream_authority = if spec.upstream_port == 80 {
         spec.upstream_host.clone()
     } else {
         format!("{}:{}", spec.upstream_host, spec.upstream_port)
     };
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
 
-    let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
-    let (rewritten_request, content_length, chunked) = rewrite_proxy_request_header(
-        &request_header,
-        &spec.bind_host,
-        spec.listen_port,
-        &spec.upstream_host,
-        spec.upstream_port,
-        &upstream_authority,
-    )?;
+    let mut request = client
+        .request(method, url)
+        .header(reqwest::header::HOST, upstream_authority.as_str())
+        .header(reqwest::header::CONNECTION, "close");
 
-    let mut outgoing = TcpStream::connect(&upstream_addr)?;
-    let _ = incoming.set_nodelay(true);
-    let _ = outgoing.set_nodelay(true);
-    outgoing.write_all(&rewritten_request)?;
-    copy_http_body(
-        request_body_buffer,
-        &mut incoming,
-        &mut outgoing,
-        content_length,
-        chunked,
-    )?;
-    outgoing.flush()?;
-    let _ = outgoing.shutdown(Shutdown::Write);
-
-    let (response_header, response_body_buffer) = read_http_header(&mut outgoing)?;
-    let rewritten_response = rewrite_proxy_response_header(&response_header, &spec)?;
-    incoming.write_all(&rewritten_response)?;
-    if !response_body_buffer.is_empty() {
-        incoming.write_all(&response_body_buffer)?;
+    for (name, value) in parsed.headers {
+        let lower = name.trim().to_ascii_lowercase();
+        if should_skip_workspace_request_header(&lower) {
+            continue;
+        }
+        let rewritten_value = match lower.as_str() {
+            "origin" | "referer" => rewrite_workspace_request_absolute_url(
+                &value,
+                &spec.bind_host,
+                spec.listen_port,
+                &spec.upstream_host,
+                spec.upstream_port,
+            ),
+            _ => value,
+        };
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+        let header_value = HeaderValue::from_str(&rewritten_value)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+        request = request.header(header_name, header_value);
     }
-    io::copy(&mut outgoing, &mut incoming)?;
+
+    if let Some(length) = parsed.content_length {
+        let reader = PrefixedReader::new(request_body_buffer, incoming.try_clone()?);
+        request = request.body(Body::sized(reader, length as u64));
+    } else if parsed.chunked {
+        let reader = PrefixedReader::new(request_body_buffer, incoming.try_clone()?);
+        request = request.body(Body::new(reader));
+    }
+
+    let mut response = request
+        .send()
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+    let _ = incoming.set_nodelay(true);
+    write_workspace_response_line(&mut incoming, response.status())?;
+    write_workspace_response_headers(&mut incoming, response.headers(), &spec)?;
+    io::copy(&mut response, &mut incoming)?;
     let _ = incoming.flush();
     Ok(())
 }
