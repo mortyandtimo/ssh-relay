@@ -101,6 +101,7 @@ export type UserServiceEntry = {
   title: string;
   kind: string;
   summary?: string;
+  registrationSource?: string;
   nodeId: string;
   nodeName?: string;
   nodeStatus?: string;

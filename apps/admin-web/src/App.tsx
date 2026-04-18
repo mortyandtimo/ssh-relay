@@ -160,6 +160,36 @@ type TunnelProbeResult = {
   targetEntry: string;
 };
 
+type UserServiceEntry = {
+  key: string;
+  title: string;
+  kind: string;
+  summary?: string;
+  registrationSource?: string;
+  nodeId: string;
+  nodeName?: string;
+  nodeStatus?: string;
+  tunnelId: string;
+  tunnelName: string;
+  tunnelType: string;
+  tunnelStatus: string;
+  transportPolicy: string;
+  runtimePath?: string;
+  runtimeState?: string;
+  healthStatus?: TunnelHealthStatus;
+  publicUrl?: string;
+  p2pUrl?: string;
+  cloudAccess: string;
+  p2pAccess: string;
+  cloudAllowed: boolean;
+  p2pAllowed: boolean;
+  preferredPath?: string;
+};
+
+type UserServiceCatalogResponse = {
+  items: UserServiceEntry[];
+};
+
 type PortRangePlan = {
   type: string;
   label: string;
@@ -271,7 +301,7 @@ type AuditFilterState = {
 };
 
 type MainView = "overview" | "connections" | "audit" | "permissions" | "releases";
-type ConnectionView = "nodes" | "tunnels";
+type ConnectionView = "nodes" | "tunnels" | "services";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
 
@@ -417,7 +447,9 @@ export default function App() {
   const [nodeSortMode, setNodeSortMode] = useState<NodeSortMode>("ops_priority");
   const [nodeEditForm, setNodeEditForm] = useState<NodeEditForm | null>(null);
   const [tunnels, setTunnels] = useState<TunnelSpec[]>([]);
+  const [services, setServices] = useState<UserServiceEntry[]>([]);
   const [editingTunnelID, setEditingTunnelID] = useState<string | null>(null);
+  const [selectedServiceTunnelID, setSelectedServiceTunnelID] = useState<string | null>(null);
   const [tunnelEditForm, setTunnelEditForm] = useState<TunnelEditForm | null>(null);
   const [users, setUsers] = useState<UserSummary[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
@@ -535,6 +567,16 @@ export default function App() {
       setTunnelEditForm(null);
     }
   }, [editingTunnelID, tunnels]);
+
+  useEffect(() => {
+    if (services.length === 0) {
+      setSelectedServiceTunnelID(null);
+      return;
+    }
+    if (!selectedServiceTunnelID || !services.some((service) => service.tunnelId === selectedServiceTunnelID)) {
+      setSelectedServiceTunnelID(services[0].tunnelId);
+    }
+  }, [selectedServiceTunnelID, services]);
 
   useEffect(() => {
     if (!currentUser) {
@@ -707,6 +749,7 @@ function buildAuditQuery(filter: AuditFilterState) {
               requestJSON<NodeListResponse>(nodePath),
               requestJSON<NodeOptionsResponse>(allNodesPath),
               requestJSON<{ items: TunnelSpec[] }>("/api/tunnels"),
+              requestJSON<UserServiceCatalogResponse>("/api/user/services"),
               requestJSON<ServerMetrics>("/api/server/metrics"),
               requestJSON<RelayRuntimeSummary>("/api/relay/tcp/runtime"),
             ]
@@ -714,6 +757,7 @@ function buildAuditQuery(filter: AuditFilterState) {
               Promise.resolve({ items: [] as NodeSummary[], total: 0, limit: nodeFilterValue.limit, offset: nodeFilterValue.offset }),
               Promise.resolve({ items: [] as NodeOption[] }),
               Promise.resolve({ items: [] as TunnelSpec[] }),
+              Promise.resolve({ items: [] as UserServiceEntry[] }),
               Promise.resolve(null as ServerMetrics | null),
               Promise.resolve(null as RelayRuntimeSummary | null),
             ];
@@ -733,10 +777,11 @@ function buildAuditQuery(filter: AuditFilterState) {
         return;
       }
 
-      const [nodesPayload, allNodesPayload, tunnelsOnlyPayload, metricsOnlyPayload, relayOnlyPayload, usersPayloadFixed, auditPayloadFixed] = results as [
+      const [nodesPayload, allNodesPayload, tunnelsOnlyPayload, servicesPayload, metricsOnlyPayload, relayOnlyPayload, usersPayloadFixed, auditPayloadFixed] = results as [
         NodeListResponse,
         NodeOptionsResponse,
         { items: TunnelSpec[] },
+        UserServiceCatalogResponse,
         ServerMetrics | null,
         RelayRuntimeSummary | null,
         { items: UserSummary[] } | undefined,
@@ -747,6 +792,7 @@ function buildAuditQuery(filter: AuditFilterState) {
       setNodeTotal(nodesPayload.total || 0);
       setAllNodes(allNodesPayload.items || []);
       setTunnels(tunnelsOnlyPayload.items || []);
+      setServices(servicesPayload.items || []);
       setMetrics(metricsOnlyPayload);
       setRelayRuntime(relayOnlyPayload);
       setUsers(usersPayloadFixed?.items || []);
@@ -779,6 +825,8 @@ function buildAuditQuery(filter: AuditFilterState) {
     setNodeFilter(initialNodeFilter);
     setNodeEditForm(null);
     setTunnels([]);
+    setServices([]);
+    setSelectedServiceTunnelID(null);
     setEditingTunnelID(null);
     setTunnelEditForm(null);
     setUsers([]);
@@ -1188,6 +1236,11 @@ function buildAuditQuery(filter: AuditFilterState) {
   const selectedProbeResult = editingTunnelID ? probeResults[editingTunnelID] ?? null : null;
   const persistedProbeResult = selectedTunnel ? toProbeResult(selectedTunnel) : null;
   const selectedTunnelVisibleInFilters = selectedTunnel ? matchesTunnelFilters(selectedTunnel, nodes, tunnelHealthFilter, tunnelTypeFilter, probeStateFilter, tunnelNodeStatusFilter) : true;
+  const selectedService =
+    (selectedServiceTunnelID ? services.find((service) => service.tunnelId === selectedServiceTunnelID) ?? null : null)
+    ?? services[0]
+    ?? null;
+  const selectedServiceNode = selectedService ? nodes.find((node) => node.nodeId === selectedService.nodeId) ?? null : null;
   const onlineNodes = nodes.filter((node) => node.status === "online").length;
   const activeTunnels = tunnels.filter((tunnel) => tunnel.status === "active").length;
   const filteredTunnels = sortTunnels(
@@ -1221,6 +1274,12 @@ function buildAuditQuery(filter: AuditFilterState) {
   const recentFailedTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "recent_failure").length;
   const staleTunnelCount = tunnels.filter((tunnel) => deriveProbeFreshnessState(tunnel) === "stale").length;
   const p2pPreferredTunnelCount = tunnels.filter((tunnel) => tunnel.transportPolicy === "p2p_preferred").length;
+  const serviceCount = services.length;
+  const p2pReadyServiceCount = services.filter((service) => serviceHasP2PReady(service, nodes)).length;
+  const metadataRegisteredServiceCount = services.filter((service) => service.registrationSource === "metadata").length;
+  const inferredServiceCount = services.filter((service) => service.registrationSource === "inferred").length;
+  const cloudOnlyServiceCount = services.filter((service) => Boolean(service.publicUrl) && !service.p2pUrl).length;
+  const p2pOnlyServiceCount = services.filter((service) => Boolean(service.p2pUrl) && !service.publicUrl).length;
   const overloadedNodes = nodes.filter((node) => buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId)).loadState === "high_load");
   const idleNodes = nodes.filter((node) => buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId)).loadState === "idle");
   const nodesWithProblemTunnels = nodes.filter((node) => buildNodeLoadProfile(node, tunnels.filter((tunnel) => tunnel.nodeId === node.nodeId)).problemCount > 0);
@@ -1413,6 +1472,10 @@ function buildAuditQuery(filter: AuditFilterState) {
                     </div>
                   </div>
                   <div className="signal-strip">
+                    <SignalCard label="服务目录项" value={serviceCount === 0 ? "无" : String(serviceCount)} />
+                    <SignalCard label="P2P ready 服务" value={p2pReadyServiceCount === 0 ? "无" : String(p2pReadyServiceCount)} />
+                    <SignalCard label="显式登记服务" value={metadataRegisteredServiceCount === 0 ? "无" : String(metadataRegisteredServiceCount)} />
+                    <SignalCard label="自动识别服务" value={inferredServiceCount === 0 ? "无" : String(inferredServiceCount)} />
                     <SignalCard label="当前已加载节点中支持 p2pAssist 的节点" value={p2pCapableNodeCount === 0 ? "无" : String(p2pCapableNodeCount)} />
                     <SignalCard label="当前已加载节点中具备基础 readiness 条件的潜在候选" value={p2pCandidateNodeCount === 0 ? "无" : String(p2pCandidateNodeCount)} />
                     <SignalCard label="p2p_preferred tunnel" value={p2pPreferredTunnelCount === 0 ? "无" : String(p2pPreferredTunnelCount)} />
@@ -1449,6 +1512,7 @@ function buildAuditQuery(filter: AuditFilterState) {
               <div className="inline-switches">
                 <button type="button" className={connectionView === "nodes" ? "nav-tab active" : "nav-tab"} onClick={() => setConnectionView("nodes")}>节点</button>
                 <button type="button" className={connectionView === "tunnels" ? "nav-tab active" : "nav-tab"} onClick={() => setConnectionView("tunnels")}>隧道</button>
+                <button type="button" className={connectionView === "services" ? "nav-tab active" : "nav-tab"} onClick={() => setConnectionView("services")}>服务工作台</button>
               </div>
             </div>
 
@@ -1868,6 +1932,195 @@ function buildAuditQuery(filter: AuditFilterState) {
                       </section>
                     </>
                   ) : <EmptyState title="未选择节点" body="请先在上方节点列表中选中节点。下方固定工作区会稳定承载节点状态、能力矩阵和承载入口。" />}
+                </section>
+              </div>
+            ) : connectionView === "services" ? (
+              <div className="module-flow service-module-flow">
+                <section className="subpanel module-summary-panel">
+                  <div className="section-head compact-head">
+                    <div>
+                      <h3>服务模块摘要</h3>
+                      <span className="muted-line">这里把“面向用户消费的服务入口”从 tunnel 里抽出来单独看，区分服务目录、服务节点和 P2P 就绪度。</span>
+                    </div>
+                  </div>
+                  <div className="signal-strip">
+                    <SignalCard label="服务目录项" value={serviceCount === 0 ? "无" : String(serviceCount)} />
+                    <SignalCard label="P2P ready" value={p2pReadyServiceCount === 0 ? "无" : String(p2pReadyServiceCount)} />
+                    <SignalCard label="显式登记" value={metadataRegisteredServiceCount === 0 ? "无" : String(metadataRegisteredServiceCount)} />
+                    <SignalCard label="自动识别" value={inferredServiceCount === 0 ? "无" : String(inferredServiceCount)} />
+                    <SignalCard label="仅云端入口" value={cloudOnlyServiceCount === 0 ? "无" : String(cloudOnlyServiceCount)} />
+                    <SignalCard label="仅 P2P 入口" value={p2pOnlyServiceCount === 0 ? "无" : String(p2pOnlyServiceCount)} />
+                  </div>
+                </section>
+
+                <section className="subpanel module-list-panel">
+                  <div className="section-head compact-head">
+                    <div>
+                      <h3>服务目录列表</h3>
+                      <span className="muted-line">显式登记优先保真；没有元数据时，平台会按现网网盘/图床入口自动识别，避免用户端看到空目录。</span>
+                    </div>
+                    <span className="muted-line">当前 {serviceCount} 项</span>
+                  </div>
+                  <div className="grouped-item-list wide-card-list">
+                    {services.length === 0 ? <EmptyState title="当前还没有服务目录项" body="说明现网 tunnel 还没有形成可消费的服务目录。可以补服务元数据，或依赖自动识别规则纳入网盘/图床。" /> : services.map((service) => {
+                      const p2pReady = serviceHasP2PReady(service, nodes);
+                      return (
+                        <article
+                          key={service.tunnelId}
+                          className={selectedService?.tunnelId === service.tunnelId ? "spotlight-card interactive-card selected-card grouped-tunnel-row" : "spotlight-card interactive-card grouped-tunnel-row"}
+                          onClick={() => setSelectedServiceTunnelID(service.tunnelId)}
+                        >
+                          <div className="spotlight-head">
+                            <div>
+                              <strong>{service.title}</strong>
+                              <span className="muted-line">{service.key} / {service.tunnelName}</span>
+                            </div>
+                            <div className="health-pill-row">
+                              <span className={serviceRegistrationPillClass(service.registrationSource)}>{serviceRegistrationLabel(service.registrationSource)}</span>
+                              <span className={statusPillClass(service.tunnelStatus)}>{service.tunnelStatus}</span>
+                              <span className={p2pReady ? "status-pill tone-good" : "status-pill tone-warn"}>{p2pReady ? "P2P ready" : "P2P 未就绪"}</span>
+                            </div>
+                          </div>
+                          <div className="grouped-node-meta">
+                            <span>{serviceKindLabel(service.kind)}</span>
+                            <span>{service.nodeName || service.nodeId}</span>
+                            <span>{service.publicUrl ? "云端入口已登记" : "无云端入口"}</span>
+                            <span>{service.p2pUrl ? "P2P 入口已登记" : "无 P2P 入口"}</span>
+                            <span>首选 {servicePreferredPathLabel(service.preferredPath)}</span>
+                          </div>
+                          <div className="muted-line">{service.summary || "当前未填写服务摘要。建议补上用户端说明文案。"}</div>
+                          <div className="table-status-stack">
+                            <span className={statusPillClass(service.nodeStatus || "offline")}>{service.nodeStatus || "unknown"}</span>
+                            <span className={tunnelHealthPillClass(service.healthStatus)}>{tunnelHealthLabel(service.healthStatus)}</span>
+                            <span className="status-pill tone-neutral">cloud {serviceAccessScopeLabel(service.cloudAccess)}</span>
+                            <span className="status-pill tone-neutral">p2p {serviceAccessScopeLabel(service.p2pAccess)}</span>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="subpanel detail-panel module-workbench service-workbench">
+                  <div className="section-head compact-head">
+                    <div>
+                      <h3>服务运营工作区</h3>
+                      <span className="muted-line">这里专门看服务，而不是 tunnel 细节。判断服务是否能被用户端连接器消费，关键是服务入口、服务节点和 P2P 就绪度三件事。</span>
+                    </div>
+                  </div>
+                  {selectedService ? (
+                    <>
+                      <div className="detail-hero workbench-hero">
+                        <div>
+                          <p className="eyebrow">当前服务</p>
+                          <strong>{selectedService.title}</strong>
+                          <span className="muted-line">{selectedService.key} / {selectedService.tunnelName}</span>
+                        </div>
+                        <div className="hero-status-group">
+                          <span className={serviceRegistrationPillClass(selectedService.registrationSource)}>{serviceRegistrationLabel(selectedService.registrationSource)}</span>
+                          <span className={statusPillClass(selectedService.tunnelStatus)}>{selectedService.tunnelStatus}</span>
+                          <span className={serviceHasP2PReady(selectedService, nodes) ? "status-pill tone-good" : "status-pill tone-warn"}>{serviceHasP2PReady(selectedService, nodes) ? "P2P ready" : "P2P 未就绪"}</span>
+                        </div>
+                      </div>
+
+                      <div className="workbench-grid workbench-grid-wide workbench-primary-grid">
+                        <div className="workbench-card workbench-card-primary">
+                          <div className="card-heading-row">
+                            <div>
+                              <span className="card-kicker">目录定义</span>
+                              <strong>服务入口与归属</strong>
+                            </div>
+                            <div className="card-status-rail">
+                              <span className={statusPillClass(selectedService.nodeStatus || "offline")}>{selectedService.nodeStatus || "unknown"}</span>
+                              <span className={tunnelHealthPillClass(selectedService.healthStatus)}>{tunnelHealthLabel(selectedService.healthStatus)}</span>
+                            </div>
+                          </div>
+                          <div className="fact-list">
+                            <FactRow label="服务键" value={<code>{selectedService.key}</code>} />
+                            <FactRow label="登记来源" value={<code>{serviceRegistrationLabel(selectedService.registrationSource)}</code>} />
+                            <FactRow label="服务节点" value={<code>{selectedService.nodeName || selectedService.nodeId}</code>} />
+                            <FactRow label="对应 tunnel" value={<code>{selectedService.tunnelName} / {selectedService.tunnelId}</code>} />
+                            <FactRow label="公网入口" value={<code>{selectedService.publicUrl || "未登记"}</code>} />
+                            <FactRow label="P2P 入口" value={<code>{selectedService.p2pUrl || "未登记"}</code>} />
+                            <FactRow label="云端权限" value={<code>{serviceAccessScopeLabel(selectedService.cloudAccess)}</code>} />
+                            <FactRow label="P2P 权限" value={<code>{serviceAccessScopeLabel(selectedService.p2pAccess)}</code>} />
+                            <FactRow label="用户端首选" value={<code>{servicePreferredPathLabel(selectedService.preferredPath)}</code>} />
+                          </div>
+                          <div className="actions-row actions-row-strong">
+                            <button type="button" className="secondary" onClick={() => {
+                              setConnectionView("tunnels");
+                              setEditingTunnelID(selectedService.tunnelId);
+                            }}>查看对应 tunnel</button>
+                            <button type="button" className="secondary" onClick={() => {
+                              setConnectionView("nodes");
+                              setSelectedNodeID(selectedService.nodeId);
+                            }}>查看服务节点</button>
+                          </div>
+                        </div>
+
+                        <div className="workbench-card workbench-card-aside">
+                          <div className="card-heading-row">
+                            <div>
+                              <span className="card-kicker">就绪度</span>
+                              <strong>P2P 服务判断</strong>
+                            </div>
+                          </div>
+                          <div className="ops-note-list">
+                            <div className={serviceHasP2PReady(selectedService, nodes) ? "ops-note tone-good" : "ops-note tone-warn"}>
+                              {serviceP2PReadinessNote(selectedService, selectedServiceNode)}
+                            </div>
+                            <div className={selectedService.registrationSource === "inferred" ? "ops-note tone-warn" : "ops-note tone-info"}>
+                              {selectedService.registrationSource === "inferred"
+                                ? "当前服务仍处于自动识别模式。建议补齐 serviceKey、标题、摘要、权限和 P2P 入口策略，避免后续运营语义漂移。"
+                                : "当前服务已显式登记，后续可以稳定扩展用户端工作台和服务策略。"}
+                            </div>
+                            <div className={selectedService.publicUrl ? "ops-note tone-info" : "ops-note tone-neutral"}>
+                              {selectedService.publicUrl
+                                ? "云端入口仍负责公开访问、目录和轻量交互。"
+                                : "当前没有云端入口；这个服务只能在内网或 P2P 体系内被消费。"}
+                            </div>
+                            <div className={selectedService.p2pUrl ? "ops-note tone-info" : "ops-note tone-danger note-strong"}>
+                              {selectedService.p2pUrl
+                                ? "P2P 入口已经形成，可以继续推进用户端工作台与服务端联调。"
+                                : "当前还没有 P2P 入口；用户端连接器无法把它作为真正的数据面服务使用。"}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>双入口策略</h3>
+                            <span className="muted-line">服务视角里需要分开看：云端入口负责公开能力，P2P 入口负责用户端连接器内的数据面。</span>
+                          </div>
+                        </div>
+                        <div className="signal-strip profile-strip">
+                          <SignalCard label="云端权限" value={serviceAccessScopeLabel(selectedService.cloudAccess)} />
+                          <SignalCard label="P2P 权限" value={serviceAccessScopeLabel(selectedService.p2pAccess)} />
+                          <SignalCard label="用户端首选" value={servicePreferredPathLabel(selectedService.preferredPath)} />
+                          <SignalCard label="运行态" value={`${selectedService.runtimePath || "未上报"} / ${selectedService.runtimeState || "未上报"}`} />
+                        </div>
+                      </section>
+
+                      <section className="workbench-section">
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>业务说明</h3>
+                            <span className="muted-line">后续用户端壳子会围绕这些服务项扩展，而不是直接围绕 tunnel 细节扩展。</span>
+                          </div>
+                        </div>
+                        <div className="ops-note-list">
+                          <div className="ops-note tone-neutral">{selectedService.summary || "当前服务没有摘要说明，建议补齐面向用户的服务描述。"}</div>
+                          {selectedService.kind === "drive" ? <div className="ops-note tone-info">网盘服务应该把“目录/鉴权”和“实际下载数据面”分开。用户端连接器里优先消费 P2P 工作台，云端继续保留公开入口和管理能力。</div> : null}
+                          {selectedService.kind === "gallery" ? <div className="ops-note tone-info">图床服务应该把“公网展示/轻量上传”和“批量上传下载”分开。用户端连接器里只接 P2P 工作台，云端保留展示和外链能力。</div> : null}
+                          <div className="ops-note tone-neutral">如果后续扩展更多服务，优先沿用这套“服务目录项 + 双入口策略 + 节点就绪度”的模型，而不是再把不同业务塞回 tunnel 表里解释。</div>
+                        </div>
+                      </section>
+                    </>
+                  ) : (
+                    <EmptyState title="未选择服务" body="请先在上方服务目录列表中选中一个服务。这里会固定承载该服务的入口、归属和 P2P 就绪度。" />
+                  )}
                 </section>
               </div>
             ) : (
@@ -2863,6 +3116,98 @@ function tunnelHealthPillClass(status?: TunnelHealthStatus) {
     default:
       return "status-pill tone-good";
   }
+}
+
+function serviceRegistrationLabel(source?: string) {
+  switch (source) {
+    case "metadata":
+      return "显式登记";
+    case "inferred":
+      return "自动识别";
+    default:
+      return "未标注";
+  }
+}
+
+function serviceRegistrationPillClass(source?: string) {
+  switch (source) {
+    case "metadata":
+      return "status-pill tone-info";
+    case "inferred":
+      return "status-pill tone-warn";
+    default:
+      return "status-pill tone-neutral";
+  }
+}
+
+function serviceKindLabel(kind?: string) {
+  switch (kind) {
+    case "drive":
+      return "网盘";
+    case "gallery":
+      return "图床";
+    default:
+      return "应用服务";
+  }
+}
+
+function serviceAccessScopeLabel(access?: string) {
+  switch (access) {
+    case "all_users":
+      return "全部用户";
+    case "admin_only":
+      return "仅管理员";
+    case "disabled":
+      return "禁用";
+    default:
+      return "未设置";
+  }
+}
+
+function servicePreferredPathLabel(value?: string) {
+  switch (value) {
+    case "cloud":
+      return "仅云端";
+    case "p2p":
+      return "仅 P2P";
+    case "dual":
+      return "双入口";
+    default:
+      return "未设置";
+  }
+}
+
+function serviceHasP2PReady(service: UserServiceEntry, nodes: NodeSummary[]) {
+  if (!service.p2pUrl) {
+    return false;
+  }
+  if (service.nodeStatus && service.nodeStatus !== "online") {
+    return false;
+  }
+  const node = nodes.find((item) => item.nodeId === service.nodeId) ?? null;
+  if (!node) {
+    return service.registrationSource === "metadata";
+  }
+  if (nodeHasLiveP2P(node)) {
+    return true;
+  }
+  return service.registrationSource === "metadata";
+}
+
+function serviceP2PReadinessNote(service: UserServiceEntry, node: NodeSummary | null) {
+  if (!service.p2pUrl) {
+    return "当前没有 P2P 入口，用户端连接器只能看到服务目录，不能把它当成真正的数据面服务启动。";
+  }
+  if (service.nodeStatus && service.nodeStatus !== "online") {
+    return "服务节点当前离线，P2P 入口即使已登记也不应视为可用。";
+  }
+  if (node && nodeHasLiveP2P(node)) {
+    return "服务节点已经上报 EasyTier 运行态，且服务目录存在 P2P 入口，用户端连接器可以按服务项启动工作台。";
+  }
+  if (service.registrationSource === "metadata") {
+    return "P2P 入口已显式登记，但当前还缺少节点侧 EasyTier 实时遥测；入口已形成，运行态仍需联调验证。";
+  }
+  return "当前入口主要来自自动识别或自动推导，建议尽快补齐显式服务元数据与节点遥测。";
 }
 
 function tunnelCardClass(tunnel: TunnelSpec, selected: boolean) {

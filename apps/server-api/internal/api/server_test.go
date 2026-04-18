@@ -2151,6 +2151,108 @@ func TestUserServiceCatalogDerivesP2PURLFromNodeMetrics(t *testing.T) {
 	}
 }
 
+func TestUserServiceCatalogInfersBuiltInServicesFromTunnelShape(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "service-node-c",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, item := range []map[string]any{
+		{
+			"nodeId":     registerOut.NodeID,
+			"name":       "网盘 HTTPS",
+			"type":       "https",
+			"targetHost": "127.0.0.1",
+			"targetPort": 5212,
+			"publicPort": 0,
+			"domain":     "drive.020309.top",
+			"tlsMode":    "edge_terminate",
+			"status":     "active",
+			"metadata":   map[string]string{},
+		},
+		{
+			"nodeId":     registerOut.NodeID,
+			"name":       "图床",
+			"type":       "https",
+			"targetHost": "127.0.0.1",
+			"targetPort": 8180,
+			"publicPort": 0,
+			"domain":     "img.020309.top",
+			"tlsMode":    "edge_terminate",
+			"status":     "active",
+			"metadata":   map[string]string{},
+		},
+	} {
+		createBody, _ := json.Marshal(item)
+		createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+		applyCookies(createReq, adminCookies)
+		createRes := httptest.NewRecorder()
+		server.Handler().ServeHTTP(createRes, createReq)
+		if createRes.Code != http.StatusCreated {
+			t.Fatalf("expected create tunnel 201, got %d: %s", createRes.Code, createRes.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/user/services", nil)
+	req.Host = "manage.020309.top"
+	applyCookies(req, adminCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected user services 200, got %d", res.Code)
+	}
+
+	var out types.UserServiceCatalogResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Items) != 2 {
+		t.Fatalf("expected 2 inferred services, got %d", len(out.Items))
+	}
+
+	servicesByKey := make(map[string]types.UserServiceEntry, len(out.Items))
+	for _, item := range out.Items {
+		servicesByKey[item.Key] = item
+	}
+
+	drive, ok := servicesByKey["drive"]
+	if !ok {
+		t.Fatal("expected inferred drive service")
+	}
+	if drive.RegistrationSource != "inferred" {
+		t.Fatalf("expected drive registrationSource inferred, got %q", drive.RegistrationSource)
+	}
+	if drive.PublicURL != "https://drive.020309.top" {
+		t.Fatalf("expected inferred drive public url, got %q", drive.PublicURL)
+	}
+
+	gallery, ok := servicesByKey["gallery"]
+	if !ok {
+		t.Fatal("expected inferred gallery service")
+	}
+	if gallery.RegistrationSource != "inferred" {
+		t.Fatalf("expected gallery registrationSource inferred, got %q", gallery.RegistrationSource)
+	}
+	if gallery.Title != "图床服务" {
+		t.Fatalf("expected inferred gallery title, got %q", gallery.Title)
+	}
+}
+
 func TestAgentEndpointsRemainAccessibleWithSessionAuthEnabled(t *testing.T) {
 	backend := store.NewInMemoryStore()
 	server := NewServer("test", backend, "")

@@ -25,6 +25,9 @@ const (
 	serviceAccessAllUsers  = "all_users"
 	serviceAccessAdminOnly = "admin_only"
 	serviceAccessDisabled  = "disabled"
+
+	serviceRegistrationSourceMetadata = "metadata"
+	serviceRegistrationSourceInferred = "inferred"
 )
 
 func (s *Server) handleUserServices(w http.ResponseWriter, r *http.Request) {
@@ -84,8 +87,8 @@ func userServiceEntryFromTunnel(
 	tunnel types.TunnelSpec,
 	node types.NodeSummary,
 ) (types.UserServiceEntry, bool) {
-	key := normalizeServiceKey(tunnel.Metadata[serviceMetaKeyKey])
-	if key == "" {
+	key, title, kind, summary, registrationSource, ok := resolveServiceIdentity(tunnel)
+	if !ok {
 		return types.UserServiceEntry{}, false
 	}
 
@@ -102,37 +105,113 @@ func userServiceEntryFromTunnel(
 	p2pAccess := normalizeServiceAccessPolicy(tunnel.Metadata[serviceMetaP2PAccessKey], p2pURL != "")
 	preferredPath := normalizeServicePreferredPath(tunnel.Metadata[serviceMetaPreferredPathKey], publicURL != "", p2pURL != "")
 
-	title := strings.TrimSpace(tunnel.Metadata[serviceMetaTitleKey])
-	if title == "" {
-		title = strings.TrimSpace(tunnel.Name)
-	}
-	kind := normalizeServiceKind(tunnel.Metadata[serviceMetaKindKey], key)
-	summary := strings.TrimSpace(tunnel.Metadata[serviceMetaSummaryKey])
-
 	return types.UserServiceEntry{
-		Key:             key,
-		Title:           title,
-		Kind:            kind,
-		Summary:         summary,
-		NodeID:          tunnel.NodeID,
-		NodeName:        node.NodeName,
-		NodeStatus:      node.Status,
-		TunnelID:        tunnel.ID,
-		TunnelName:      tunnel.Name,
-		TunnelType:      tunnel.Type,
-		TunnelStatus:    tunnel.Status,
-		TransportPolicy: tunnel.TransportPolicy,
-		RuntimePath:     tunnel.RuntimePath,
-		RuntimeState:    tunnel.RuntimeState,
-		HealthStatus:    string(tunnel.HealthStatus),
-		PublicURL:       publicURL,
-		P2PURL:          p2pURL,
-		CloudAccess:     cloudAccess,
-		P2PAccess:       p2pAccess,
-		CloudAllowed:    serviceAccessAllowed(cloudAccess, user.Role),
-		P2PAllowed:      serviceAccessAllowed(p2pAccess, user.Role),
-		PreferredPath:   preferredPath,
+		Key:                key,
+		Title:              title,
+		Kind:               kind,
+		Summary:            summary,
+		RegistrationSource: registrationSource,
+		NodeID:             tunnel.NodeID,
+		NodeName:           node.NodeName,
+		NodeStatus:         node.Status,
+		TunnelID:           tunnel.ID,
+		TunnelName:         tunnel.Name,
+		TunnelType:         tunnel.Type,
+		TunnelStatus:       tunnel.Status,
+		TransportPolicy:    tunnel.TransportPolicy,
+		RuntimePath:        tunnel.RuntimePath,
+		RuntimeState:       tunnel.RuntimeState,
+		HealthStatus:       string(tunnel.HealthStatus),
+		PublicURL:          publicURL,
+		P2PURL:             p2pURL,
+		CloudAccess:        cloudAccess,
+		P2PAccess:          p2pAccess,
+		CloudAllowed:       serviceAccessAllowed(cloudAccess, user.Role),
+		P2PAllowed:         serviceAccessAllowed(p2pAccess, user.Role),
+		PreferredPath:      preferredPath,
 	}, true
+}
+
+type inferredServiceIdentity struct {
+	key     string
+	title   string
+	kind    string
+	summary string
+}
+
+func resolveServiceIdentity(tunnel types.TunnelSpec) (key, title, kind, summary, registrationSource string, ok bool) {
+	inferred, inferredOK := inferServiceIdentity(tunnel)
+	key = normalizeServiceKey(tunnel.Metadata[serviceMetaKeyKey])
+	if key == "" {
+		if !inferredOK {
+			return "", "", "", "", "", false
+		}
+		return inferred.key, inferred.title, inferred.kind, inferred.summary, serviceRegistrationSourceInferred, true
+	}
+
+	title = strings.TrimSpace(tunnel.Metadata[serviceMetaTitleKey])
+	if title == "" {
+		if inferredOK {
+			title = inferred.title
+		} else {
+			title = strings.TrimSpace(tunnel.Name)
+		}
+	}
+
+	kindSeed := strings.TrimSpace(tunnel.Metadata[serviceMetaKindKey])
+	if kindSeed == "" && inferredOK {
+		kindSeed = inferred.kind
+	}
+	kind = normalizeServiceKind(kindSeed, key)
+
+	summary = strings.TrimSpace(tunnel.Metadata[serviceMetaSummaryKey])
+	if summary == "" && inferredOK {
+		summary = inferred.summary
+	}
+
+	return key, title, kind, summary, serviceRegistrationSourceMetadata, true
+}
+
+func inferServiceIdentity(tunnel types.TunnelSpec) (inferredServiceIdentity, bool) {
+	if tunnel.Type != "http" && tunnel.Type != "https" {
+		return inferredServiceIdentity{}, false
+	}
+
+	name := strings.ToLower(strings.TrimSpace(tunnel.Name))
+	domain := strings.ToLower(strings.TrimSpace(tunnel.Domain))
+
+	if strings.Contains(name, "网盘") || strings.Contains(name, "drive") || matchesServiceDomain(domain, "drive") {
+		return inferredServiceIdentity{
+			key:     "drive",
+			title:   "网盘服务",
+			kind:    "drive",
+			summary: "面向大文件访问，云端保留目录与公开入口，用户端工作台通过 P2P 接入。",
+		}, true
+	}
+
+	if strings.Contains(name, "图床") || strings.Contains(name, "gallery") || matchesServiceDomain(domain, "gallery", "img", "image") {
+		return inferredServiceIdentity{
+			key:     "gallery",
+			title:   "图床服务",
+			kind:    "gallery",
+			summary: "公网 HTTPS 继续承担展示与轻量访问，批量上传与下载通过 P2P 工作台接入。",
+		}, true
+	}
+
+	return inferredServiceIdentity{}, false
+}
+
+func matchesServiceDomain(domain string, prefixes ...string) bool {
+	for _, prefix := range prefixes {
+		prefix = strings.TrimSpace(strings.ToLower(prefix))
+		if prefix == "" {
+			continue
+		}
+		if strings.HasPrefix(domain, prefix+".") || strings.Contains(domain, "."+prefix+".") {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeServiceKey(value string) string {

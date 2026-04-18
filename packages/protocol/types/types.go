@@ -448,28 +448,29 @@ type TunnelPortSuggestionResponse struct {
 }
 
 type UserServiceEntry struct {
-	Key             string `json:"key"`
-	Title           string `json:"title"`
-	Kind            string `json:"kind"`
-	Summary         string `json:"summary,omitempty"`
-	NodeID          string `json:"nodeId"`
-	NodeName        string `json:"nodeName,omitempty"`
-	NodeStatus      string `json:"nodeStatus,omitempty"`
-	TunnelID        string `json:"tunnelId"`
-	TunnelName      string `json:"tunnelName"`
-	TunnelType      string `json:"tunnelType"`
-	TunnelStatus    string `json:"tunnelStatus"`
-	TransportPolicy string `json:"transportPolicy"`
-	RuntimePath     string `json:"runtimePath,omitempty"`
-	RuntimeState    string `json:"runtimeState,omitempty"`
-	HealthStatus    string `json:"healthStatus,omitempty"`
-	PublicURL       string `json:"publicUrl,omitempty"`
-	P2PURL          string `json:"p2pUrl,omitempty"`
-	CloudAccess     string `json:"cloudAccess"`
-	P2PAccess       string `json:"p2pAccess"`
-	CloudAllowed    bool   `json:"cloudAllowed"`
-	P2PAllowed      bool   `json:"p2pAllowed"`
-	PreferredPath   string `json:"preferredPath,omitempty"`
+	Key                string `json:"key"`
+	Title              string `json:"title"`
+	Kind               string `json:"kind"`
+	Summary            string `json:"summary,omitempty"`
+	RegistrationSource string `json:"registrationSource,omitempty"`
+	NodeID             string `json:"nodeId"`
+	NodeName           string `json:"nodeName,omitempty"`
+	NodeStatus         string `json:"nodeStatus,omitempty"`
+	TunnelID           string `json:"tunnelId"`
+	TunnelName         string `json:"tunnelName"`
+	TunnelType         string `json:"tunnelType"`
+	TunnelStatus       string `json:"tunnelStatus"`
+	TransportPolicy    string `json:"transportPolicy"`
+	RuntimePath        string `json:"runtimePath,omitempty"`
+	RuntimeState       string `json:"runtimeState,omitempty"`
+	HealthStatus       string `json:"healthStatus,omitempty"`
+	PublicURL          string `json:"publicUrl,omitempty"`
+	P2PURL             string `json:"p2pUrl,omitempty"`
+	CloudAccess        string `json:"cloudAccess"`
+	P2PAccess          string `json:"p2pAccess"`
+	CloudAllowed       bool   `json:"cloudAllowed"`
+	P2PAllowed         bool   `json:"p2pAllowed"`
+	PreferredPath      string `json:"preferredPath,omitempty"`
 }
 
 type UserServiceCatalogResponse struct {

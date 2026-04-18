@@ -1888,6 +1888,20 @@ fn maybe_auto_start_p2p(app: &AppHandle) {
     }
 }
 
+fn start_background_bootstrap_tasks(app: &AppHandle) {
+    let app_handle = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(80));
+        maybe_auto_start_p2p(&app_handle);
+        if let (Some(runtime), Some(node_state)) = (
+            app_handle.try_state::<P2PRuntimeManagerState>(),
+            app_handle.try_state::<UserNodeAgentState>(),
+        ) {
+            let _ = sync_user_node_registration(&app_handle, &runtime, &node_state);
+        }
+    });
+}
+
 fn start_user_node_agent_loop(app: &AppHandle) {
     let app_handle = app.clone();
     thread::spawn(move || loop {
@@ -2127,13 +2141,7 @@ fn main() {
                 set_window_icon(&window);
                 let _ = window.show();
             }
-            maybe_auto_start_p2p(app.handle());
-            if let (Some(runtime), Some(node_state)) = (
-                app.handle().try_state::<P2PRuntimeManagerState>(),
-                app.handle().try_state::<UserNodeAgentState>(),
-            ) {
-                let _ = sync_user_node_registration(app.handle(), &runtime, &node_state);
-            }
+            start_background_bootstrap_tasks(app.handle());
             start_user_node_agent_loop(app.handle());
             Ok(())
         })
