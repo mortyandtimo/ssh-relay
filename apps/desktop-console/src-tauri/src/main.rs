@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -55,6 +55,7 @@ const P2P_CLI_RELATIVE_PATH: &str = "runtime/easytier-cli.exe";
 const PUBLISHER_P2P_TCP_LISTENER: &str = "tcp://0.0.0.0:21110";
 const PUBLISHER_P2P_UDP_LISTENER: &str = "udp://0.0.0.0:21110";
 const PUBLISHER_P2P_RPC_PORTAL: &str = "127.0.0.1:15888";
+const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 
 fn background_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
@@ -148,6 +149,7 @@ struct P2PServiceForwarderSpec {
     listen_port: u16,
     target_host: String,
     target_port: u16,
+    rewrite_host: String,
 }
 
 struct P2PServiceForwarderHandle {
@@ -325,6 +327,7 @@ struct P2PServiceForwarderInput {
     target_host: String,
     target_port: u16,
     listen_port: u16,
+    rewrite_host: Option<String>,
 }
 
 #[tauri::command]
@@ -1966,6 +1969,12 @@ fn build_forwarder_spec(
             item.target_host.trim().to_string()
         },
         target_port: item.target_port,
+        rewrite_host: item
+            .rewrite_host
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     })
 }
 
@@ -1976,7 +1985,381 @@ fn stop_p2p_service_forwarder(handle: P2PServiceForwarderHandle) {
     }
 }
 
-fn bridge_tcp_connection(mut incoming: TcpStream, target_addr: String) -> io::Result<()> {
+struct PrefixedReader<R> {
+    prefix: Vec<u8>,
+    pos: usize,
+    inner: R,
+}
+
+impl<R> PrefixedReader<R> {
+    fn new(prefix: Vec<u8>, inner: R) -> Self {
+        Self {
+            prefix,
+            pos: 0,
+            inner,
+        }
+    }
+}
+
+impl<R: Read> Read for PrefixedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos < self.prefix.len() {
+            let remaining = self.prefix.len() - self.pos;
+            let count = remaining.min(buf.len());
+            buf[..count].copy_from_slice(&self.prefix[self.pos..self.pos + count]);
+            self.pos += count;
+            return Ok(count);
+        }
+        self.inner.read(buf)
+    }
+}
+
+fn read_http_header(stream: &mut TcpStream) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            let split = position + 4;
+            let body = buffer.split_off(split);
+            return Ok((buffer, body));
+        }
+        if buffer.len() >= MAX_HTTP_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "http header too large",
+            ));
+        }
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "http header truncated",
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+}
+
+fn read_line_crlf<R: BufRead>(reader: &mut R) -> io::Result<Vec<u8>> {
+    let mut line = Vec::new();
+    let read = reader.read_until(b'\n', &mut line)?;
+    if read == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unexpected eof while reading line",
+        ));
+    }
+    Ok(line)
+}
+
+fn copy_exact_bytes<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    mut remaining: usize,
+) -> io::Result<()> {
+    let mut buffer = [0_u8; 8192];
+    while remaining > 0 {
+        let read = reader.read(&mut buffer[..buffer.len().min(remaining)])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected eof while copying body",
+            ));
+        }
+        writer.write_all(&buffer[..read])?;
+        remaining -= read;
+    }
+    Ok(())
+}
+
+fn copy_request_body(
+    body_buffer: Vec<u8>,
+    incoming: &mut TcpStream,
+    outgoing: &mut TcpStream,
+    content_length: Option<usize>,
+    chunked: bool,
+) -> io::Result<()> {
+    if let Some(length) = content_length {
+        let mut reader = PrefixedReader::new(body_buffer, incoming);
+        return copy_exact_bytes(&mut reader, outgoing, length);
+    }
+    if chunked {
+        let prefixed = PrefixedReader::new(body_buffer, incoming);
+        let mut reader = BufReader::new(prefixed);
+        loop {
+            let size_line = read_line_crlf(&mut reader)?;
+            outgoing.write_all(&size_line)?;
+            let line = String::from_utf8_lossy(&size_line);
+            let size_token = line.split(';').next().unwrap_or_default().trim();
+            let chunk_size = usize::from_str_radix(size_token, 16)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size"))?;
+            if chunk_size == 0 {
+                loop {
+                    let trailer_line = read_line_crlf(&mut reader)?;
+                    outgoing.write_all(&trailer_line)?;
+                    if trailer_line == b"\r\n" {
+                        return Ok(());
+                    }
+                }
+            }
+            copy_exact_bytes(&mut reader, outgoing, chunk_size + 2)?;
+        }
+    }
+    if !body_buffer.is_empty() {
+        outgoing.write_all(&body_buffer)?;
+    }
+    Ok(())
+}
+
+fn rewrite_absolute_url(
+    value: &str,
+    rewrite_host: &str,
+    local_host: &str,
+    local_port: u16,
+) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || rewrite_host.trim().is_empty() {
+        return trimmed.to_string();
+    }
+    if let Ok(mut url) = reqwest::Url::parse(trimmed) {
+        if url
+            .host_str()
+            .map(|host| host.eq_ignore_ascii_case(rewrite_host))
+            .unwrap_or(false)
+        {
+            let _ = url.set_scheme("http");
+            let _ = url.set_host(Some(local_host));
+            let _ = url.set_port(Some(local_port));
+            return url.to_string();
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("//") {
+        let expected_prefix = format!("{}/", rewrite_host);
+        if rest.eq_ignore_ascii_case(rewrite_host)
+            || rest
+                .to_ascii_lowercase()
+                .starts_with(&expected_prefix.to_ascii_lowercase())
+        {
+            return format!("http://{}:{}", local_host, local_port) + &rest[rewrite_host.len()..];
+        }
+    }
+    trimmed.to_string()
+}
+
+fn rewrite_refresh_header(
+    value: &str,
+    rewrite_host: &str,
+    local_host: &str,
+    local_port: u16,
+) -> String {
+    let trimmed = value.trim();
+    if let Some((prefix, url_value)) = trimmed.split_once("url=") {
+        return format!(
+            "{}url={}",
+            prefix,
+            rewrite_absolute_url(url_value, rewrite_host, local_host, local_port)
+        );
+    }
+    trimmed.to_string()
+}
+
+fn rewrite_set_cookie_header(value: &str, rewrite_host: &str) -> String {
+    let mut parts = value.split(';');
+    let mut rebuilt = Vec::new();
+    if let Some(first) = parts.next() {
+        rebuilt.push(first.trim().to_string());
+    }
+    for part in parts {
+        let trimmed = part.trim();
+        if trimmed.eq_ignore_ascii_case("secure") {
+            continue;
+        }
+        if let Some((name, attr_value)) = trimmed.split_once('=') {
+            if name.trim().eq_ignore_ascii_case("domain")
+                && attr_value
+                    .trim()
+                    .trim_start_matches('.')
+                    .eq_ignore_ascii_case(rewrite_host)
+            {
+                continue;
+            }
+        }
+        rebuilt.push(trimmed.to_string());
+    }
+    rebuilt.join("; ")
+}
+
+fn rewrite_http_request_header(
+    header: &[u8],
+    rewrite_host: &str,
+) -> io::Result<(Vec<u8>, Option<usize>, bool)> {
+    let header_text = String::from_utf8_lossy(header);
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().unwrap_or_default().trim_end_matches('\n');
+    if request_line.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing request line",
+        ));
+    }
+
+    let mut rebuilt = Vec::new();
+    rebuilt.push(request_line.to_string());
+    let mut has_host = false;
+    let mut has_connection = false;
+    let mut content_length = None;
+    let mut chunked = false;
+
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let lower = name.trim().to_ascii_lowercase();
+            let value = value.trim();
+            match lower.as_str() {
+                "host" => {
+                    has_host = true;
+                    rebuilt.push(format!("Host: {}", rewrite_host));
+                }
+                "connection" => {
+                    has_connection = true;
+                    rebuilt.push("Connection: close".to_string());
+                }
+                "proxy-connection" => {}
+                "content-length" => {
+                    content_length = value.parse::<usize>().ok();
+                    rebuilt.push(format!("{}: {}", name.trim(), value));
+                }
+                "transfer-encoding" => {
+                    if value.to_ascii_lowercase().contains("chunked") {
+                        chunked = true;
+                    }
+                    rebuilt.push(format!("{}: {}", name.trim(), value));
+                }
+                _ => rebuilt.push(format!("{}: {}", name.trim(), value)),
+            }
+        }
+    }
+
+    if !has_host {
+        rebuilt.push(format!("Host: {}", rewrite_host));
+    }
+    if !has_connection {
+        rebuilt.push("Connection: close".to_string());
+    }
+    rebuilt.push(String::new());
+    rebuilt.push(String::new());
+
+    Ok((rebuilt.join("\r\n").into_bytes(), content_length, chunked))
+}
+
+fn rewrite_http_response_header(
+    header: &[u8],
+    rewrite_host: &str,
+    local_host: &str,
+    local_port: u16,
+) -> io::Result<Vec<u8>> {
+    let header_text = String::from_utf8_lossy(header);
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines.next().unwrap_or_default().trim_end_matches('\n');
+    if status_line.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing response status line",
+        ));
+    }
+
+    let mut rebuilt = Vec::new();
+    rebuilt.push(status_line.to_string());
+    let mut has_connection = false;
+
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let lower = name.trim().to_ascii_lowercase();
+            let value = value.trim();
+            match lower.as_str() {
+                "location" => rebuilt.push(format!(
+                    "{}: {}",
+                    name.trim(),
+                    rewrite_absolute_url(value, rewrite_host, local_host, local_port)
+                )),
+                "refresh" => rebuilt.push(format!(
+                    "{}: {}",
+                    name.trim(),
+                    rewrite_refresh_header(value, rewrite_host, local_host, local_port)
+                )),
+                "set-cookie" => rebuilt.push(format!(
+                    "{}: {}",
+                    name.trim(),
+                    rewrite_set_cookie_header(value, rewrite_host)
+                )),
+                "connection" => {
+                    has_connection = true;
+                    rebuilt.push("Connection: close".to_string());
+                }
+                _ => rebuilt.push(format!("{}: {}", name.trim(), value)),
+            }
+        }
+    }
+
+    if !has_connection {
+        rebuilt.push("Connection: close".to_string());
+    }
+    rebuilt.push(String::new());
+    rebuilt.push(String::new());
+
+    Ok(rebuilt.join("\r\n").into_bytes())
+}
+
+fn bridge_http_connection_with_host_rewrite(
+    mut incoming: TcpStream,
+    spec: P2PServiceForwarderSpec,
+) -> io::Result<()> {
+    let target_addr = socket_addr(&spec.target_host, spec.target_port);
+    let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
+    let (rewritten_request, content_length, chunked) =
+        rewrite_http_request_header(&request_header, &spec.rewrite_host)?;
+
+    let mut outgoing = TcpStream::connect(&target_addr)?;
+    let _ = incoming.set_nodelay(true);
+    let _ = outgoing.set_nodelay(true);
+    outgoing.write_all(&rewritten_request)?;
+    copy_request_body(
+        request_body_buffer,
+        &mut incoming,
+        &mut outgoing,
+        content_length,
+        chunked,
+    )?;
+    outgoing.flush()?;
+    let _ = outgoing.shutdown(Shutdown::Write);
+
+    let (response_header, response_body_buffer) = read_http_header(&mut outgoing)?;
+    let rewritten_response = rewrite_http_response_header(
+        &response_header,
+        &spec.rewrite_host,
+        &spec.bind_host,
+        spec.listen_port,
+    )?;
+    incoming.write_all(&rewritten_response)?;
+    if !response_body_buffer.is_empty() {
+        incoming.write_all(&response_body_buffer)?;
+    }
+    io::copy(&mut outgoing, &mut incoming)?;
+    let _ = incoming.flush();
+    Ok(())
+}
+
+fn bridge_tcp_connection(mut incoming: TcpStream, spec: P2PServiceForwarderSpec) -> io::Result<()> {
+    if !spec.rewrite_host.trim().is_empty() {
+        return bridge_http_connection_with_host_rewrite(incoming, spec);
+    }
+
+    let target_addr = socket_addr(&spec.target_host, spec.target_port);
     let mut outgoing = TcpStream::connect(&target_addr)?;
     let _ = incoming.set_nodelay(true);
     let _ = outgoing.set_nodelay(true);
@@ -2003,7 +2386,6 @@ fn run_p2p_service_forwarder(
     shutdown_rx: std::sync::mpsc::Receiver<()>,
     spec: P2PServiceForwarderSpec,
 ) {
-    let target_addr = socket_addr(&spec.target_host, spec.target_port);
     loop {
         match shutdown_rx.try_recv() {
             Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
@@ -2012,9 +2394,10 @@ fn run_p2p_service_forwarder(
 
         match listener.accept() {
             Ok((stream, _)) => {
-                let target = target_addr.clone();
+                let forward_spec = spec.clone();
                 thread::spawn(move || {
-                    if let Err(err) = bridge_tcp_connection(stream, target.clone()) {
+                    let target = socket_addr(&forward_spec.target_host, forward_spec.target_port);
+                    if let Err(err) = bridge_tcp_connection(stream, forward_spec) {
                         eprintln!("p2p service forwarder connect {target} failed: {err}");
                     }
                 });

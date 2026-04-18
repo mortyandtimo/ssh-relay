@@ -179,6 +179,21 @@ struct ServiceWorkspaceInput {
     url: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceWorkspaceProbeInput {
+    url: String,
+    host_header: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceWorkspaceProbeOutput {
+    reachable: bool,
+    status: Option<u16>,
+    final_url: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentNodeCapabilities {
@@ -580,6 +595,33 @@ fn open_service_workspace(app: AppHandle, input: ServiceWorkspaceInput) -> Resul
     set_window_icon(&window);
     let _ = window.set_focus();
     Ok(())
+}
+
+#[tauri::command]
+fn probe_service_workspace(
+    input: ServiceWorkspaceProbeInput,
+) -> Result<ServiceWorkspaceProbeOutput, String> {
+    let url = reqwest::Url::parse(input.url.trim()).map_err(|err| err.to_string())?;
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|err| err.to_string())?;
+
+    let mut request = client.get(url);
+    if let Some(host_header) = input.host_header {
+        let trimmed = host_header.trim();
+        if !trimmed.is_empty() {
+            request = request.header(reqwest::header::HOST, trimmed);
+        }
+    }
+
+    let response = request.send().map_err(|err| err.to_string())?;
+    Ok(ServiceWorkspaceProbeOutput {
+        reachable: true,
+        status: Some(response.status().as_u16()),
+        final_url: response.url().to_string(),
+    })
 }
 
 #[tauri::command]
@@ -2181,6 +2223,7 @@ fn main() {
             app_exit,
             open_external,
             open_service_workspace,
+            probe_service_workspace,
             open_additional_window,
             set_auto_start,
             config_dir,

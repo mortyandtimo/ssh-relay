@@ -13,7 +13,9 @@ import {
   loadUserNodeStatus,
   loadDesktopHostPaths,
   openP2PRuntimeLog,
+  openExternal,
   openServiceWorkspace,
+  probeServiceWorkspace,
   readLoginProfiles,
   saveAppConfig,
   saveLoginProfile,
@@ -83,6 +85,16 @@ function optionalUrl(value?: string) {
 function normalizePeerUrl(value?: string) {
   if (typeof value !== "string") return defaultP2PPeerUrl;
   return value.trim();
+}
+
+function hostFromUrl(value?: string) {
+  const trimmed = (value || "").trim();
+  if (!trimmed) return "";
+  try {
+    return new URL(trimmed).host;
+  } catch {
+    return "";
+  }
 }
 
 function mergeConfig(config?: AppConfig | null): AppConfig {
@@ -719,9 +731,40 @@ export default function App() {
       return;
     }
     try {
+      await probeServiceWorkspace(service.p2pUrl);
       await openServiceWorkspace(service.key, `驻阡陌用户端 - ${service.title}`, service.p2pUrl);
     } catch (openError) {
-      setError(openError instanceof Error ? openError.message : "启动服务工作台失败");
+      const publicHost = hostFromUrl(service.publicUrl);
+      if (publicHost) {
+        try {
+          await probeServiceWorkspace(service.p2pUrl, publicHost);
+          setError(`当前 ${service.title} 的 P2P 地址已经可达，但服务本身依赖域名 Host 返回页面。用户端还需要补本地代理改写，直接开窗会变成空白页。`);
+          return;
+        } catch {
+          // keep original error below
+        }
+      }
+      setError(openError instanceof Error ? `启动服务工作台失败：${openError.message}` : "启动服务工作台失败");
+    }
+  }, [p2pStatus?.running]);
+
+  const handleOpenServiceExternal = useCallback(async (service: ServiceBinding | null) => {
+    if (!service?.p2pUrl) {
+      setError("当前服务还没有登记 P2P 入口。");
+      return;
+    }
+    if (!service.p2pAllowed) {
+      setError("当前账号没有这个 P2P 服务入口权限。");
+      return;
+    }
+    if (!p2pStatus?.running) {
+      setError("请先启动 EasyTier，再打开 P2P 服务入口。");
+      return;
+    }
+    try {
+      await openExternal(service.p2pUrl);
+    } catch (openError) {
+      setError(openError instanceof Error ? openError.message : "打开浏览器失败");
     }
   }, [p2pStatus?.running]);
 
@@ -967,6 +1010,9 @@ export default function App() {
                     <button className="primary" type="button" onClick={() => void handleLaunchServiceWorkspace(driveService)} disabled={!driveService?.p2pUrl || !driveService?.p2pAllowed || !p2pStatus?.running}>
                       启动网盘工作台
                     </button>
+                    <button className="secondary" type="button" onClick={() => void handleOpenServiceExternal(driveService)} disabled={!driveService?.p2pUrl || !driveService?.p2pAllowed || !p2pStatus?.running}>
+                      浏览器打开
+                    </button>
                   </div>
                 </div>
                 <div className="service-tile">
@@ -982,6 +1028,9 @@ export default function App() {
                   <div className="action-row wrap">
                     <button className="primary" type="button" onClick={() => void handleLaunchServiceWorkspace(galleryService)} disabled={!galleryService?.p2pUrl || !galleryService?.p2pAllowed || !p2pStatus?.running}>
                       启动图床工作台
+                    </button>
+                    <button className="secondary" type="button" onClick={() => void handleOpenServiceExternal(galleryService)} disabled={!galleryService?.p2pUrl || !galleryService?.p2pAllowed || !p2pStatus?.running}>
+                      浏览器打开
                     </button>
                   </div>
                 </div>
@@ -999,6 +1048,9 @@ export default function App() {
                     <div className="action-row wrap">
                       <button className="primary" type="button" onClick={() => void handleLaunchServiceWorkspace(service)} disabled={!service.p2pUrl || !service.p2pAllowed || !p2pStatus?.running}>
                         启动工作台
+                      </button>
+                      <button className="secondary" type="button" onClick={() => void handleOpenServiceExternal(service)} disabled={!service.p2pUrl || !service.p2pAllowed || !p2pStatus?.running}>
+                        浏览器打开
                       </button>
                     </div>
                   </div>
@@ -1042,6 +1094,14 @@ export default function App() {
                         disabled={!driveService.p2pUrl || !driveService.p2pAllowed || !p2pStatus?.running}
                       >
                         启动网盘工作台
+                      </button>
+                      <button
+                        className="secondary"
+                        type="button"
+                        onClick={() => void handleOpenServiceExternal(driveService)}
+                        disabled={!driveService.p2pUrl || !driveService.p2pAllowed || !p2pStatus?.running}
+                      >
+                        浏览器打开
                       </button>
                       <button
                         className="secondary"
@@ -1116,6 +1176,14 @@ export default function App() {
                         disabled={!galleryService.p2pUrl || !galleryService.p2pAllowed || !p2pStatus?.running}
                       >
                         启动图床工作台
+                      </button>
+                      <button
+                        className="secondary"
+                        type="button"
+                        onClick={() => void handleOpenServiceExternal(galleryService)}
+                        disabled={!galleryService.p2pUrl || !galleryService.p2pAllowed || !p2pStatus?.running}
+                      >
+                        浏览器打开
                       </button>
                       <button
                         className="secondary"

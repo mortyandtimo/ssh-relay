@@ -77,6 +77,12 @@ export type UserNodeIdentity = {
   displayName?: string;
 };
 
+export type ServiceWorkspaceProbeResult = {
+  reachable: boolean;
+  status: number | null;
+  finalUrl: string;
+};
+
 type HostHttpRequestInput = {
   url: string;
   method?: string;
@@ -303,6 +309,22 @@ export async function openServiceWorkspace(key: string, title: string, url: stri
   }
   await invoke("open_service_workspace", {
     input: { key, title, url },
+  });
+}
+
+export async function probeServiceWorkspace(url: string, hostHeader?: string): Promise<ServiceWorkspaceProbeResult> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    return {
+      reachable: true,
+      status: null,
+      finalUrl: url,
+    };
+  }
+  return await invoke<ServiceWorkspaceProbeResult>("probe_service_workspace", {
+    input: {
+      url,
+      hostHeader,
+    },
   });
 }
 

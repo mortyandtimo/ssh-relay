@@ -301,6 +301,18 @@ function extractTunnelServiceFields(metadata?: Record<string, string>): ServiceM
   };
 }
 
+function hostFromServiceUrl(value?: string) {
+  const trimmed = (value || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    return new URL(trimmed).host;
+  } catch {
+    return "";
+  }
+}
+
 function buildTunnelServiceMetadata(baseMetadata: Record<string, string> | undefined, form: ServiceMetadataDraft) {
   const next = { ...(baseMetadata || {}) };
   for (const key of serviceMetadataKeys) {
@@ -392,7 +404,7 @@ function buildServiceTemplate(template: ServiceTemplateKey, targetPort: string):
 function buildDesiredP2PServiceForwarders(tunnels: TunnelSpec[]): P2PServiceForwarderRuleInput[] {
   return tunnels
     .filter((tunnel) => tunnel.status === "active" && (tunnel.type === "http" || tunnel.type === "https"))
-    .map((tunnel) => {
+    .map<P2PServiceForwarderRuleInput | null>((tunnel) => {
       const service = extractTunnelServiceFields(tunnel.metadata);
       if (!service.serviceKey.trim() || service.serviceP2PAccess === "disabled") {
         return null;
@@ -409,9 +421,10 @@ function buildDesiredP2PServiceForwarders(tunnels: TunnelSpec[]): P2PServiceForw
         targetHost: tunnel.targetHost || "127.0.0.1",
         targetPort,
         listenPort,
+        rewriteHost: (tunnel.domain || hostFromServiceUrl(service.servicePublicUrl)).trim(),
       } satisfies P2PServiceForwarderRuleInput;
     })
-    .filter((item): item is P2PServiceForwarderRuleInput => Boolean(item));
+    .filter((item): item is P2PServiceForwarderRuleInput => item !== null);
 }
 
 const initialLocalServiceForm = {
