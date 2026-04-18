@@ -2288,66 +2288,98 @@ export default function App() {
 
           <div className="settings-panel">
             <div className="settings-section-label">EasyTier 节点参数</div>
-            <label>
-              <span>网络名</span>
-              <input
-                value={appConfig.p2pNetworkName || ""}
-                onChange={(event) => setAppConfig((current) => ({ ...current, p2pNetworkName: event.target.value }))}
-                placeholder="例如 cloud-relay"
-              />
-            </label>
-            <label>
-              <span>网络密钥</span>
-              <input
-                type="password"
-                value={appConfig.p2pNetworkSecret || ""}
-                onChange={(event) => setAppConfig((current) => ({ ...current, p2pNetworkSecret: event.target.value }))}
-                placeholder="用于同一 EasyTier 网络鉴权"
-              />
-            </label>
-            <label>
-              <span>初始对等节点</span>
-              <textarea
-                rows={3}
-                value={appConfig.p2pPeerUrl || ""}
-                onChange={(event) => setAppConfig((current) => ({ ...current, p2pPeerUrl: event.target.value }))}
-                placeholder={defaultPublisherP2PPeerUrl}
-              />
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-              <input
-                type="checkbox"
-                checked={appConfig.p2pUseDhcp !== false}
-                onChange={(event) => setAppConfig((current) => ({ ...current, p2pUseDhcp: event.target.checked }))}
-              />
-              <span>使用 DHCP 自动分配虚拟 IPv4</span>
-            </label>
-            <label>
-              <span>固定虚拟 IPv4</span>
-              <input
-                value={appConfig.p2pVirtualIpv4 || ""}
-                onChange={(event) => setAppConfig((current) => ({ ...current, p2pVirtualIpv4: event.target.value }))}
-                placeholder="关闭 DHCP 时必填，例如 10.144.144.23"
-                disabled={appConfig.p2pUseDhcp !== false}
-              />
-            </label>
-            <div className="drawer-grid" style={{ marginTop: 0 }}>
-              <label>
-                <span>实例名</span>
-                <input
-                  value={appConfig.p2pInstanceName || ""}
-                  onChange={(event) => setAppConfig((current) => ({ ...current, p2pInstanceName: event.target.value }))}
-                  placeholder="默认 cloud-relay-publisher"
-                />
-              </label>
-              <label>
-                <span>主机名</span>
-                <input
-                  value={appConfig.p2pHostname || ""}
-                  onChange={(event) => setAppConfig((current) => ({ ...current, p2pHostname: event.target.value }))}
-                  placeholder="可选，便于识别服务端节点"
-                />
-              </label>
+            <div className="p2p-config-panel">
+              <div className="p2p-config-header">
+                <div>
+                  <strong>服务端节点配置</strong>
+                  <p>这里配置的是服务端 EasyTier 节点本身，不是云端隧道。保存只会落盘，不会自动重启当前运行中的 EasyTier。</p>
+                </div>
+                <div className="p2p-config-pills">
+                  <span className="p2p-pill">监听 `21110` / TCP</span>
+                  <span className="p2p-pill">监听 `21110` / UDP</span>
+                  <span className="p2p-pill">RPC `127.0.0.1:15888`</span>
+                </div>
+              </div>
+
+              <div className="p2p-config-grid">
+                <label className="p2p-field">
+                  <span>网络名</span>
+                  <input
+                    value={appConfig.p2pNetworkName || ""}
+                    onChange={(event) => setAppConfig((current) => ({ ...current, p2pNetworkName: event.target.value }))}
+                    placeholder="例如 cloud-relay"
+                  />
+                  <small>同一 EasyTier 网络内必须一致。</small>
+                </label>
+
+                <label className="p2p-field">
+                  <span>实例名</span>
+                  <input
+                    value={appConfig.p2pInstanceName || ""}
+                    onChange={(event) => setAppConfig((current) => ({ ...current, p2pInstanceName: event.target.value }))}
+                    placeholder="默认 cloud-relay-publisher"
+                  />
+                  <small>用于区分这台服务端上的 EasyTier 实例。</small>
+                </label>
+
+                <label className="p2p-field p2p-field-wide">
+                  <span>网络密钥</span>
+                  <input
+                    type="password"
+                    value={appConfig.p2pNetworkSecret || ""}
+                    onChange={(event) => setAppConfig((current) => ({ ...current, p2pNetworkSecret: event.target.value }))}
+                    placeholder="用于同一 EasyTier 网络鉴权"
+                  />
+                  <small>这里只做本地保存；打包结果不会把密钥硬编码进软件。</small>
+                </label>
+
+                <label className="p2p-field p2p-field-wide">
+                  <span>初始对等节点</span>
+                  <textarea
+                    rows={4}
+                    value={appConfig.p2pPeerUrl || ""}
+                    onChange={(event) => setAppConfig((current) => ({ ...current, p2pPeerUrl: event.target.value }))}
+                    placeholder={defaultPublisherP2PPeerUrl}
+                  />
+                  <small>支持换行、空格、逗号或分号分隔。默认建议同时填入云端引导节点的 `tcp` 和 `udp`。</small>
+                </label>
+              </div>
+
+              <div className="p2p-config-grid p2p-config-grid-bottom">
+                <label className="p2p-toggle-card">
+                  <div className="p2p-toggle-head">
+                    <span>地址分配方式</span>
+                    <input
+                      type="checkbox"
+                      checked={appConfig.p2pUseDhcp !== false}
+                      onChange={(event) => setAppConfig((current) => ({ ...current, p2pUseDhcp: event.target.checked }))}
+                    />
+                  </div>
+                  <strong>{appConfig.p2pUseDhcp !== false ? "DHCP 自动分配" : "使用固定虚拟 IPv4"}</strong>
+                  <small>默认建议开启 DHCP，只有你需要稳定地址映射时再改成固定 IP。</small>
+                </label>
+
+                <label className="p2p-field">
+                  <span>固定虚拟 IPv4</span>
+                  <input
+                    value={appConfig.p2pVirtualIpv4 || ""}
+                    onChange={(event) => setAppConfig((current) => ({ ...current, p2pVirtualIpv4: event.target.value }))}
+                    placeholder="关闭 DHCP 时必填，例如 10.144.144.23"
+                    disabled={appConfig.p2pUseDhcp !== false}
+                  />
+                  <small>{appConfig.p2pUseDhcp !== false ? "当前已启用 DHCP，此项会保持禁用。" : "关闭 DHCP 后这里必须填写。"} </small>
+                </label>
+
+                <label className="p2p-field">
+                  <span>主机名</span>
+                  <input
+                    value={appConfig.p2pHostname || ""}
+                    onChange={(event) => setAppConfig((current) => ({ ...current, p2pHostname: event.target.value }))}
+                    placeholder="可选，便于识别服务端节点"
+                  />
+                  <small>建议填“服务端”或具体机器名，便于用户端和云端识别。</small>
+                </label>
+              </div>
             </div>
           </div>
         </div>
