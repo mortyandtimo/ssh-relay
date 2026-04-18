@@ -2147,6 +2147,32 @@ fn rewrite_absolute_url(
     trimmed.to_string()
 }
 
+fn rewrite_request_absolute_url(
+    value: &str,
+    local_host: &str,
+    local_port: u16,
+    rewrite_host: &str,
+) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || rewrite_host.trim().is_empty() {
+        return trimmed.to_string();
+    }
+    if let Ok(mut url) = reqwest::Url::parse(trimmed) {
+        let parsed_port = url.port_or_known_default();
+        if url
+            .host_str()
+            .map(|host| host.eq_ignore_ascii_case(local_host))
+            .unwrap_or(false)
+            && parsed_port == Some(local_port)
+        {
+            let _ = url.set_host(Some(rewrite_host));
+            let _ = url.set_port(None);
+            return url.to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 fn rewrite_refresh_header(
     value: &str,
     rewrite_host: &str,
@@ -2192,6 +2218,8 @@ fn rewrite_set_cookie_header(value: &str, rewrite_host: &str) -> String {
 
 fn rewrite_http_request_header(
     header: &[u8],
+    local_host: &str,
+    local_port: u16,
     rewrite_host: &str,
 ) -> io::Result<(Vec<u8>, Option<usize>, bool)> {
     let header_text = String::from_utf8_lossy(header);
@@ -2223,6 +2251,11 @@ fn rewrite_http_request_header(
                     has_host = true;
                     rebuilt.push(format!("Host: {}", rewrite_host));
                 }
+                "origin" | "referer" => rebuilt.push(format!(
+                    "{}: {}",
+                    name.trim(),
+                    rewrite_request_absolute_url(value, local_host, local_port, rewrite_host)
+                )),
                 "connection" => {
                     has_connection = true;
                     rebuilt.push("Connection: close".to_string());
@@ -2322,8 +2355,12 @@ fn bridge_http_connection_with_host_rewrite(
 ) -> io::Result<()> {
     let target_addr = socket_addr(&spec.target_host, spec.target_port);
     let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
-    let (rewritten_request, content_length, chunked) =
-        rewrite_http_request_header(&request_header, &spec.rewrite_host)?;
+    let (rewritten_request, content_length, chunked) = rewrite_http_request_header(
+        &request_header,
+        &spec.bind_host,
+        spec.listen_port,
+        &spec.rewrite_host,
+    )?;
 
     let mut outgoing = TcpStream::connect(&target_addr)?;
     let _ = incoming.set_nodelay(true);
