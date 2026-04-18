@@ -2266,6 +2266,23 @@ fn write_proxy_response_headers(
     incoming.write_all(b"Connection: close\r\n\r\n")
 }
 
+fn write_proxy_error_response(
+    stream: &mut TcpStream,
+    status: u16,
+    message: &str,
+) -> io::Result<()> {
+    let body = format!("{message}\n");
+    stream.write_all(
+        format!(
+            "HTTP/1.1 {status} Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .as_bytes(),
+    )?;
+    stream.flush()
+}
+
 fn rewrite_absolute_url(
     value: &str,
     rewrite_host: &str,
@@ -2507,67 +2524,87 @@ fn bridge_http_connection_with_host_rewrite(
     mut incoming: TcpStream,
     spec: P2PServiceForwarderSpec,
 ) -> io::Result<()> {
-    let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
-    let parsed = parse_proxy_request_header(&request_header)?;
-    let url = build_forwarder_target_url(&spec, &parsed.target)?;
-    let method = parsed
-        .method
-        .parse::<Method>()
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
-    let client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+    let bridge_result = (|| -> io::Result<()> {
+        let (request_header, request_body_buffer) = read_http_header(&mut incoming)?;
+        let parsed = parse_proxy_request_header(&request_header)?;
+        let request_method = parsed.method.clone();
+        let request_target = parsed.target.clone();
+        let url = build_forwarder_target_url(&spec, &parsed.target)?;
+        let method = parsed
+            .method
+            .parse::<Method>()
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|err| io::Error::other(err.to_string()))?;
 
-    let mut request = client
-        .request(method, url)
-        .header(reqwest::header::HOST, spec.rewrite_host.as_str())
-        .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .header(reqwest::header::CONNECTION, "close");
+        let mut request = client
+            .request(method, url)
+            .header(reqwest::header::HOST, spec.rewrite_host.as_str())
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .header(reqwest::header::CONNECTION, "close");
 
-    for (name, value) in parsed.headers {
-        let lower = name.trim().to_ascii_lowercase();
-        if should_skip_proxy_request_header(&lower) {
-            continue;
+        for (name, value) in parsed.headers {
+            let lower = name.trim().to_ascii_lowercase();
+            if should_skip_proxy_request_header(&lower) {
+                continue;
+            }
+            let rewritten_value = match lower.as_str() {
+                "origin" | "referer" => rewrite_request_absolute_url(
+                    &value,
+                    &spec.bind_host,
+                    spec.listen_port,
+                    &spec.rewrite_host,
+                ),
+                _ => value,
+            };
+            let header_name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+            let header_value = HeaderValue::from_str(&rewritten_value)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+            request = request.header(header_name, header_value);
         }
-        let rewritten_value = match lower.as_str() {
-            "origin" | "referer" => rewrite_request_absolute_url(
-                &value,
-                &spec.bind_host,
-                spec.listen_port,
-                &spec.rewrite_host,
-            ),
-            _ => value,
-        };
-        let header_name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
-        let header_value = HeaderValue::from_str(&rewritten_value)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
-        request = request.header(header_name, header_value);
+
+        if let Some(length) = parsed.content_length {
+            let reader = PrefixedReader::new(request_body_buffer, incoming.try_clone()?);
+            request = request.body(Body::sized(reader, length as u64));
+        } else if parsed.chunked {
+            let reader = PrefixedReader::new(request_body_buffer, incoming.try_clone()?);
+            request = request.body(Body::new(reader));
+        }
+
+        let mut response = request.send().map_err(|err| {
+            io::Error::other(format!(
+                "upstream request failed for {} {}: {}",
+                request_method, request_target, err
+            ))
+        })?;
+        let _ = incoming.set_nodelay(true);
+        write_proxy_response_line(&mut incoming, response.status())?;
+        write_proxy_response_headers(
+            &mut incoming,
+            response.headers(),
+            &spec.rewrite_host,
+            &spec.bind_host,
+            spec.listen_port,
+        )?;
+        io::copy(&mut response, &mut incoming).map_err(|err| {
+            io::Error::other(format!(
+                "upstream response copy failed for {} {}: {}",
+                request_method, request_target, err
+            ))
+        })?;
+        let _ = incoming.flush();
+        Ok(())
+    })();
+
+    if let Err(err) = bridge_result {
+        eprintln!("p2p service forwarder failed: {err}");
+        let _ = write_proxy_error_response(&mut incoming, 502, &err.to_string());
+        return Err(err);
     }
 
-    if let Some(length) = parsed.content_length {
-        let reader = PrefixedReader::new(request_body_buffer, incoming.try_clone()?);
-        request = request.body(Body::sized(reader, length as u64));
-    } else if parsed.chunked {
-        let reader = PrefixedReader::new(request_body_buffer, incoming.try_clone()?);
-        request = request.body(Body::new(reader));
-    }
-
-    let mut response = request
-        .send()
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
-    let _ = incoming.set_nodelay(true);
-    write_proxy_response_line(&mut incoming, response.status())?;
-    write_proxy_response_headers(
-        &mut incoming,
-        response.headers(),
-        &spec.rewrite_host,
-        &spec.bind_host,
-        spec.listen_port,
-    )?;
-    io::copy(&mut response, &mut incoming)?;
-    let _ = incoming.flush();
     Ok(())
 }
 
