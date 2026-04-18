@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
@@ -776,9 +776,8 @@ fn copy_http_body(
             copy_exact_bytes(&mut reader, outgoing, chunk_size + 2)?;
         }
     }
-    if !body_buffer.is_empty() {
-        outgoing.write_all(&body_buffer)?;
-    }
+    // Requests without Content-Length / chunked should not forward any already-buffered bytes.
+    // They may belong to a pipelined next request rather than the current request body.
     Ok(())
 }
 
@@ -1042,6 +1041,7 @@ fn bridge_workspace_proxy_connection(
         chunked,
     )?;
     outgoing.flush()?;
+    let _ = outgoing.shutdown(Shutdown::Write);
 
     let (response_header, response_body_buffer) = read_http_header(&mut outgoing)?;
     let rewritten_response = rewrite_proxy_response_header(&response_header, &spec)?;

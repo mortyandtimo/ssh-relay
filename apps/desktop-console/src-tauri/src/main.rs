@@ -2106,9 +2106,8 @@ fn copy_request_body(
             copy_exact_bytes(&mut reader, outgoing, chunk_size + 2)?;
         }
     }
-    if !body_buffer.is_empty() {
-        outgoing.write_all(&body_buffer)?;
-    }
+    // Requests without Content-Length / chunked should not forward any already-buffered bytes.
+    // They may belong to a pipelined next request rather than the current request body.
     Ok(())
 }
 
@@ -2374,6 +2373,7 @@ fn bridge_http_connection_with_host_rewrite(
         chunked,
     )?;
     outgoing.flush()?;
+    let _ = outgoing.shutdown(Shutdown::Write);
 
     let (response_header, response_body_buffer) = read_http_header(&mut outgoing)?;
     let rewritten_response = rewrite_http_response_header(
