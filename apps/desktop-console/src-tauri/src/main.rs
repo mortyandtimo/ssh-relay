@@ -2059,7 +2059,8 @@ fn copy_exact_bytes<R: Read, W: Write>(
 ) -> io::Result<()> {
     let mut buffer = [0_u8; 8192];
     while remaining > 0 {
-        let read = reader.read(&mut buffer[..buffer.len().min(remaining)])?;
+        let chunk_len = buffer.len().min(remaining);
+        let read = reader.read(&mut buffer[..chunk_len])?;
         if read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
