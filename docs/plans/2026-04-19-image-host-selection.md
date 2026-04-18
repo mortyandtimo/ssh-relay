@@ -223,6 +223,147 @@
 - 要改哪些代码
 - 改完后是否能稳定满足“workspace 管理界面不逃公网域名”这条核心要求
 
+## 当前拟提交的改造策略（供云端审核）
+
+### 目标
+
+- 本次先提交改造策略和边界，不直接落实现有平台代码修改。
+- 继续以 `lsky-org/lsky-pro` 作为唯一图床替换基线，不再重新选型。
+- 优先解决的不是“服务能否打开”，而是“workspace 管理界面必须保持当前 origin，不逃回公网域名”。
+
+### 计划修改范围
+
+#### 1. 用户端必改：workspace 本地代理
+
+目标文件：
+
+- `apps/user-console/src-tauri/src/main.rs`
+
+拟改内容：
+
+- 在 `rewrite_proxy_request_header` 一线补齐标准反代请求头：
+  - `X-Forwarded-Proto`
+  - `X-Forwarded-Host`
+  - `X-Forwarded-Port`
+  - `X-Forwarded-For`
+  - 必要时补 `Forwarded`
+- 保持当前已有能力并继续强化：
+  - `Host` 指向上游
+  - `Origin/Referer` 中绝对 URL 回写到上游
+- 在响应侧继续统一处理：
+  - `Location` 回写为当前 workspace origin
+  - `Refresh` 回写为当前 workspace origin
+  - `Set-Cookie` 去掉不兼容的 `Domain`
+  - `Set-Cookie` 去掉会破坏本地 HTTP workspace 的 `Secure`
+- 增加针对重定向、cookie、绝对 URL 命中的诊断日志。
+
+判断：
+
+- 这是本次接入 Lsky Pro 的第一优先级，属于必改项。
+- 如果不改这里，管理界面即使能打开，也极容易在登录、跳转、刷新、上传后回到公网域名。
+
+#### 2. 云端建议同步改：relay-web 反向代理语义
+
+目标文件：
+
+- `apps/relay-web/internal/runtime/runtime.go`
+
+拟改内容：
+
+- 在 `cloneHTTPRequestForRelay` 一线补齐：
+  - `X-Forwarded-Proto`
+  - `X-Forwarded-Host`
+  - `X-Forwarded-Port`
+  - `X-Forwarded-For`
+- 在 `copyHTTPResponse` 一线补齐：
+  - `Location` 响应头重写
+  - 视需要处理 `Refresh`
+  - `Set-Cookie` 中 `Domain/Secure` 的兼容处理
+- 增加入站 Host、转发 Host、Forwarded 头、响应重定向和 cookie 的诊断日志。
+
+判断：
+
+- 若只追求先在 workspace/P2P 场景下跑通，用户端修改优先级更高。
+- 若要把这次结果作为正式基线沉淀，云端也应同步补齐，否则后续其他 Web 服务仍会重复踩同类问题。
+
+#### 3. 本轮暂不计划修改的部分
+
+原则上先不改以下模块，除非三阶段联调明确证明不够用：
+
+- `apps/server-api/internal/api/user_services.go`
+- `apps/desktop-console/src/App.tsx`
+- `apps/admin-web/src/App.tsx`
+- `lsky-org/lsky-pro` 应用业务代码
+
+当前判断依据：
+
+- 平台已经具备 `publicUrl / p2pUrl` 双入口模型。
+- gallery 服务元数据 contract 已基本够用。
+- 这次主要矛盾不在元数据模型，而在代理语义。
+- Lsky Pro 第一轮优先通过配置与平台代理修正适配，不先进入应用层深改。
+
+### Lsky Pro 部署与配置基线
+
+服务侧部署建议：
+
+- 独立目录：`E:\Docker\lsky-pro`
+- 本地监听端口：`8181`
+- 与现有 EasyImage `8180` 并行存在，先不直接覆盖
+
+首轮建议配置：
+
+```env
+APP_URL=https://img.020309.top
+ASSET_URL=
+SESSION_DOMAIN=
+SESSION_SECURE_COOKIE=false
+SANCTUM_STATEFUL_DOMAINS=localhost,127.0.0.1,::1,img.020309.top
+```
+
+配置意图：
+
+- `APP_URL` 继续服务于公网外链和公开访问。
+- `ASSET_URL` 留空，避免静态资源直接写死到公网域名。
+- `SESSION_DOMAIN` 留空，避免 cookie 绑定公网域名后在 workspace origin 下失效。
+- `SESSION_SECURE_COOKIE=false` 先保证本地直连和本地 HTTP workspace 阶段能登录、上传、刷新。
+- `SANCTUM_STATEFUL_DOMAINS` 先覆盖本地与公网 host，后续按实测再增减。
+
+### 三阶段验证口径
+
+#### A. 本地直连
+
+验证：首页、登录、单图上传、多图上传、列表、详情、删除、相册/广场、API 上传。
+
+#### B. 本地代理
+
+通过代理 origin 验证：登录、上传、列表、删除、相册/广场、后台导航、刷新，并重点检查 `Location`、`Refresh`、`Set-Cookie`、静态资源与表单 action 是否把会话带离当前 origin。
+
+#### C. 真实 P2P/workspace
+
+通过现有 gallery 服务目录与工作台入口验证：登录、上传、删除、广场、相册、后台、刷新、导航点击、复制外链。
+
+验收标准：
+
+- 管理界面、上传页、列表页、后台页、相册/广场页必须保持当前 workspace origin。
+- 图片外链、公开展示链接允许继续指向公网域名。
+
+### 当前成本评估
+
+- 用户端代理改造：中改
+- 云端 relay 语义补齐：小到中改
+- 平台元数据/UI：零星小修或不改
+- Lsky 应用代码：首轮不改，优先配置解决
+- 总体评估：中改，值得继续基于它开发
+
+### 提交给云端审核的边界问题
+
+请重点审核以下边界是否接受：
+
+1. 用户端是否允许在 workspace 本地 HTTP origin 下移除 `Set-Cookie: Secure`。
+2. 云端 relay 是否需要在第一批就与用户端 workspace 代理保持等价的 `Location/Refresh/Set-Cookie` 处理语义。
+3. 是否明确将“HTML/JS 响应体内绝对 URL 内容级改写”排除在第一批实现之外，仅在实测证明 header 级修正不足时再追加。
+4. 是否同意首轮不调整 gallery 元数据 schema、不修改 Lsky 业务代码，先通过部署配置与平台代理修正完成联调。
+
 ## 参考资料
 
 - Lsky Pro 开源版 GitHub: <https://github.com/lsky-org/lsky-pro>
