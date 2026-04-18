@@ -253,8 +253,8 @@
 - 在响应侧继续统一处理：
   - `Location` 回写为当前 workspace origin
   - `Refresh` 回写为当前 workspace origin
-  - `Set-Cookie` 去掉不兼容的 `Domain`
-  - `Set-Cookie` 去掉会破坏本地 HTTP workspace 的 `Secure`
+  - `Set-Cookie` 仅在明确与 workspace 本地 origin 冲突时去掉不兼容的 `Domain`
+  - `Set-Cookie` 仅在 `http://127.0.0.1:*` 这类本地 workspace HTTP origin 下按条件去掉 `Secure`
 - 增加针对重定向、cookie、绝对 URL 命中的诊断日志。
 
 判断：
@@ -276,9 +276,9 @@
   - `X-Forwarded-Port`
   - `X-Forwarded-For`
 - 在 `copyHTTPResponse` 一线补齐：
-  - `Location` 响应头重写
-  - 视需要处理 `Refresh`
-  - `Set-Cookie` 中 `Domain/Secure` 的兼容处理
+  - 仅限通用反代语义的 `Location` / `Refresh` 处理
+  - 不在第一批实现里做宽泛 `Set-Cookie Secure` 剥离
+  - 非必要不做宽泛 `Set-Cookie Domain` 改写
 - 增加入站 Host、转发 Host、Forwarded 头、响应重定向和 cookie 的诊断日志。
 
 判断：
@@ -288,19 +288,19 @@
 
 #### 3. 本轮暂不计划修改的部分
 
-原则上先不改以下模块，除非三阶段联调明确证明不够用：
+原则上不先改以下模块，但只要实测证明代理层修正不足，可以直接进入应用层修改，不需要再次等待审批：
 
 - `apps/server-api/internal/api/user_services.go`
 - `apps/desktop-console/src/App.tsx`
 - `apps/admin-web/src/App.tsx`
-- `lsky-org/lsky-pro` 应用业务代码
 
 当前判断依据：
 
 - 平台已经具备 `publicUrl / p2pUrl` 双入口模型。
 - gallery 服务元数据 contract 已基本够用。
 - 这次主要矛盾不在元数据模型，而在代理语义。
-- Lsky Pro 第一轮优先通过配置与平台代理修正适配，不先进入应用层深改。
+- Lsky Pro 第一轮先通过配置与平台代理修正适配。
+- 但只要出现 `TrustHosts`、绝对 URL、登录跳转、表单 `action`、模板 `asset()` 等问题，允许直接修改 Lsky 部署配置和应用代码。
 
 ### Lsky Pro 部署与配置基线
 
@@ -316,7 +316,6 @@
 APP_URL=https://img.020309.top
 ASSET_URL=
 SESSION_DOMAIN=
-SESSION_SECURE_COOKIE=false
 SANCTUM_STATEFUL_DOMAINS=localhost,127.0.0.1,::1,img.020309.top
 ```
 
@@ -325,8 +324,8 @@ SANCTUM_STATEFUL_DOMAINS=localhost,127.0.0.1,::1,img.020309.top
 - `APP_URL` 继续服务于公网外链和公开访问。
 - `ASSET_URL` 留空，避免静态资源直接写死到公网域名。
 - `SESSION_DOMAIN` 留空，避免 cookie 绑定公网域名后在 workspace origin 下失效。
-- `SESSION_SECURE_COOKIE=false` 先保证本地直连和本地 HTTP workspace 阶段能登录、上传、刷新。
-- `SANCTUM_STATEFUL_DOMAINS` 先覆盖本地与公网 host，后续按实测再增减。
+- `SESSION_SECURE_COOKIE` 不作为公网正式环境默认关闭项；仅允许在本地直连或本地 HTTP workspace 调试阶段临时验证是否需要降级。
+- `SANCTUM_STATEFUL_DOMAINS` 只作为候选项，需先确认 Lsky 当前登录链路是否实际依赖该配置。
 
 ### 三阶段验证口径
 
@@ -352,7 +351,7 @@ SANCTUM_STATEFUL_DOMAINS=localhost,127.0.0.1,::1,img.020309.top
 - 用户端代理改造：中改
 - 云端 relay 语义补齐：小到中改
 - 平台元数据/UI：零星小修或不改
-- Lsky 应用代码：首轮不改，优先配置解决
+- Lsky 应用代码：若代理与配置层不足，允许直接进入中改
 - 总体评估：中改，值得继续基于它开发
 
 ### 提交给云端审核的边界问题
@@ -360,9 +359,149 @@ SANCTUM_STATEFUL_DOMAINS=localhost,127.0.0.1,::1,img.020309.top
 请重点审核以下边界是否接受：
 
 1. 用户端是否允许在 workspace 本地 HTTP origin 下移除 `Set-Cookie: Secure`。
-2. 云端 relay 是否需要在第一批就与用户端 workspace 代理保持等价的 `Location/Refresh/Set-Cookie` 处理语义。
+2. 云端 relay 是否只做通用反代语义补齐，而不在第一批与用户端 workspace 代理保持等价的 `Set-Cookie` 降级策略。
 3. 是否明确将“HTML/JS 响应体内绝对 URL 内容级改写”排除在第一批实现之外，仅在实测证明 header 级修正不足时再追加。
-4. 是否同意首轮不调整 gallery 元数据 schema、不修改 Lsky 业务代码，先通过部署配置与平台代理修正完成联调。
+4. 是否同意首轮不调整 gallery 元数据 schema。
+5. 是否同意一旦实测证明代理层不足，直接修改 Lsky 应用代码与部署配置，不再受“首轮不改应用层”限制。
+
+## 云端审核结论与强制边界
+
+以下边界已经确定，服务端按此执行，不再作为开放问题反复讨论。
+
+### 1. cookie 与 `Secure` 边界
+
+- 只允许在用户端 workspace 本地 HTTP 代理里按条件移除 `Set-Cookie: Secure`。
+- 不允许在 `apps/relay-web/internal/runtime/runtime.go` 里全局剥离 `Secure`。
+- 不允许把 `SESSION_SECURE_COOKIE=false` 作为公网正式部署默认配置。
+- 如果必须为了本地 HTTP workspace 调试而临时关闭安全属性，必须明确限定在本地验证场景，并在结论里单独说明。
+
+### 2. `relay-web` 改造边界
+
+- `relay-web` 只允许做通用 HTTP/HTTPS 反向代理语义修正。
+- 可以补齐 `X-Forwarded-*`。
+- 可以在必要时处理通用的 `Location` / `Refresh`。
+- 不能加入只为 gallery / Lsky 成立的定制逻辑。
+- 不能在这里做宽泛 cookie 域或安全属性降级。
+- 任何 `relay-web` 改动都必须附带至少一个非图床 Web 服务回归验证结果。
+
+### 3. Lsky 应用层边界
+
+- 不再把“首轮不改 Lsky 业务代码”当成硬限制。
+- 只要实测出现以下任一问题，就允许直接修改 Lsky 应用层：
+  - `TrustHosts` 导致 workspace host 不被接受
+  - `route()` / `asset()` / 重定向生成绝对 URL
+  - 登录成功后跳回公网域名
+  - 表单 `action`、后台导航、分页链接、上传接口地址逃回公网
+- 允许优先修改的 Lsky 层文件包括但不限于：
+  - `app/Http/Middleware/TrustProxies.php`
+  - `app/Http/Middleware/TrustHosts.php`
+  - `config/app.php`
+  - `config/session.php`
+  - 相关 Blade 模板
+  - 登录/跳转相关控制器
+
+### 4. body 级改写边界
+
+- 不允许把“HTML/JS 响应体内容级绝对 URL 改写”作为第一批默认方案。
+- 必须先完成：
+  - 代理头补齐
+  - `Location` / `Refresh` 处理
+  - cookie 兼容处理
+  - Lsky 配置核查
+  - 必要的 Lsky 应用层调整
+- 只有在拿到明确证据证明以上仍不足时，才允许追加 body 级改写。
+- 即便追加，也应优先局部化在 workspace 代理或 Lsky 专用链路，不能先做全局通杀。
+
+## 开发授权范围
+
+服务端现在可以直接修改以下范围，不需要再次等待授权：
+
+- `apps/user-console/src-tauri/src/main.rs`
+- `apps/relay-web/internal/runtime/runtime.go`
+- Lsky Pro 的部署配置
+- Lsky Pro 的应用代码
+
+其中约束如下：
+
+- `apps/user-console/src-tauri/src/main.rs` 可以直接做 workspace 代理语义修正、日志补充、header/cookie/redirect 处理。
+- `apps/relay-web/internal/runtime/runtime.go` 只能做通用反代语义修正，不能做 gallery 专属 hack。
+- Lsky Pro 允许直接修改，但修改必须围绕“当前 origin 保持不变”这个目标，不能顺手做无关产品化改造。
+- 以下模块原则上仍不动，除非拿出直接阻塞证据：
+  - `apps/server-api/internal/api/user_services.go`
+  - `apps/desktop-console/src/App.tsx`
+  - `apps/admin-web/src/App.tsx`
+  - gallery 元数据 schema / contract
+
+## 已知代码线索
+
+当前代码层已确认以下线索，服务端修改时要利用这些事实，不要重复兜圈：
+
+- 用户端 workspace 代理当前已有请求头重写入口：`apps/user-console/src-tauri/src/main.rs` 中的 `rewrite_proxy_request_header`
+- 用户端 workspace 代理当前已有响应头重写入口：`apps/user-console/src-tauri/src/main.rs` 中的 `rewrite_proxy_response_header`
+- `relay-web` 当前已有请求克隆入口：`apps/relay-web/internal/runtime/runtime.go` 中的 `cloneHTTPRequestForRelay`
+- `relay-web` 当前已有响应复制入口：`apps/relay-web/internal/runtime/runtime.go` 中的 `copyHTTPResponse`
+- Lsky 当前 `TrustProxies` 默认信任 `X-Forwarded-*`
+- 但 Lsky 当前 `TrustHosts` 仍然基于 `APP_URL` 主机模式进行限制，因此应用层本身就可能成为 workspace host 兼容性的阻塞点
+
+## 修改完成后的审核标准
+
+后续开发完成后，必须按以下标准自测并提交证据，再交回主审。
+
+### 1. 三阶段都必须通过
+
+- 本地直连
+- 本地代理
+- 真实 P2P/workspace
+
+### 2. workspace 管理界面必须保持当前 origin
+
+以下操作都必须在 workspace 当前 origin 下完成，不能跳回公网域名：
+
+- 登录
+- 上传
+- 图片列表
+- 图片详情
+- 删除
+- 相册 / 广场
+- 后台
+- 刷新
+- 顶部导航
+- 侧边导航
+
+### 3. DevTools 验收标准
+
+除了用户显式复制外链、显式打开公开链接外，不允许出现以下情况：
+
+- 页面请求自动跳回公网域名
+- 表单请求跳回公网域名
+- XHR / fetch 跳回公网域名
+- 静态资源请求跳回公网域名
+- `Location` / `Refresh` 把当前浏览会话带离 workspace origin
+
+### 4. cookie 与安全语义验收标准
+
+- workspace 本地 HTTP 场景如果确实需要移除 `Secure`，必须给出证据说明原因。
+- 公网 HTTPS 路径上的 cookie 安全语义不能被整体降级。
+- 不能因为通过 workspace 调试而把正式公网访问的 cookie 方案一起改坏。
+
+### 5. `relay-web` 回归标准
+
+- 只要改了 `apps/relay-web/internal/runtime/runtime.go`，就必须额外回归至少一个非图床 Web 服务。
+- 回归结论里必须明确写出：
+  - 测了哪个服务
+  - 测了哪些行为
+  - 没有被这次改动带坏
+
+### 6. 最终交付物要求
+
+服务端回交时必须包含：
+
+- 实际改动文件列表
+- 每个改动的目的
+- 哪些问题靠配置解决
+- 哪些问题靠代码解决
+- 为什么暂时不需要改 `server-api` / desktop UI / admin UI / gallery schema
+- 至少一组请求日志或 DevTools 证据，证明当前 origin 没有逃回公网域名
 
 ## 参考资料
 
