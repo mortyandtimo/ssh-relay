@@ -13,8 +13,8 @@ import {
   loadUserNodeStatus,
   loadDesktopHostPaths,
   openP2PRuntimeLog,
-  openExternal,
   openServiceWorkspace,
+  openServiceWorkspaceExternal,
   probeServiceWorkspace,
   readLoginProfiles,
   saveAppConfig,
@@ -762,9 +762,10 @@ export default function App() {
       return;
     }
     try {
-      await openExternal(service.p2pUrl);
+      await probeServiceWorkspace(service.p2pUrl);
+      await openServiceWorkspaceExternal(service.key, `驻阡陌用户端 - ${service.title}`, service.p2pUrl);
     } catch (openError) {
-      setError(openError instanceof Error ? openError.message : "打开浏览器失败");
+      setError(openError instanceof Error ? `打开浏览器失败：${openError.message}` : "打开浏览器失败");
     }
   }, [p2pStatus?.running]);
 

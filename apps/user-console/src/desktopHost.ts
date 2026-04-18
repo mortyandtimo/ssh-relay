@@ -312,6 +312,19 @@ export async function openServiceWorkspace(key: string, title: string, url: stri
   });
 }
 
+export async function openServiceWorkspaceExternal(key: string, title: string, url: string): Promise<void> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    if (!opened) {
+      throw new Error("打开浏览器失败");
+    }
+    return;
+  }
+  await invoke("open_service_workspace_external", {
+    input: { key, title, url },
+  });
+}
+
 export async function probeServiceWorkspace(url: string, hostHeader?: string): Promise<ServiceWorkspaceProbeResult> {
   if (!("__TAURI_INTERNALS__" in window)) {
     return {

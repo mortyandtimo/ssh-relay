@@ -599,6 +599,21 @@ fn open_external(url: String) -> Result<(), String> {
     Err("unsupported platform".to_string())
 }
 
+#[tauri::command]
+fn open_service_workspace_external(
+    app: AppHandle,
+    input: ServiceWorkspaceInput,
+) -> Result<(), String> {
+    let key = if input.key.trim().is_empty() {
+        "service".to_string()
+    } else {
+        sanitize_node_token(input.key.trim())
+    };
+    let upstream_url = reqwest::Url::parse(input.url.trim()).map_err(|err| err.to_string())?;
+    let local_url = ensure_service_workspace_proxy(&app, &key, &upstream_url)?;
+    open_external(local_url)
+}
+
 fn socket_addr(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]:{port}")
@@ -1411,7 +1426,10 @@ fn probe_service_workspace(
         .build()
         .map_err(|err| err.to_string())?;
 
-    let mut request = client.get(url);
+    let mut request = client
+        .get(url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .header(reqwest::header::CONNECTION, "close");
     if let Some(host_header) = input.host_header {
         let trimmed = host_header.trim();
         if !trimmed.is_empty() {
@@ -3030,6 +3048,7 @@ fn main() {
             app_exit,
             open_external,
             open_service_workspace,
+            open_service_workspace_external,
             probe_service_workspace,
             open_additional_window,
             set_auto_start,
