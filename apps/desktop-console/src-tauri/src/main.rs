@@ -2337,7 +2337,6 @@ fn bridge_http_connection_with_host_rewrite(
         chunked,
     )?;
     outgoing.flush()?;
-    let _ = outgoing.shutdown(Shutdown::Write);
 
     let (response_header, response_body_buffer) = read_http_header(&mut outgoing)?;
     let rewritten_response = rewrite_http_response_header(
