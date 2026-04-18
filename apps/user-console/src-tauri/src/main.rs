@@ -1442,7 +1442,6 @@ fn bridge_workspace_proxy_connection(
             chunked,
         )?;
         outgoing.flush()?;
-        let _ = outgoing.shutdown(std::net::Shutdown::Write);
 
         let (response_header, response_body_buffer) =
             read_http_header(&mut outgoing).map_err(|err| {
