@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/25743/cloud-relay-platform/apps/server-api/internal/store"
@@ -18,6 +19,9 @@ const (
 	serviceMetaSummaryKey       = "serviceSummary"
 	serviceMetaPublicURLKey     = "servicePublicUrl"
 	serviceMetaP2PURLKey        = "serviceP2PUrl"
+	serviceMetaP2PNodeIDKey     = "serviceP2PNodeId"
+	serviceMetaP2PPortKey       = "serviceP2PTargetPort"
+	serviceMetaP2PPathKey       = "serviceP2PPath"
 	serviceMetaCloudAccessKey   = "serviceCloudAccess"
 	serviceMetaP2PAccessKey     = "serviceP2PAccess"
 	serviceMetaPreferredPathKey = "servicePreferredPath"
@@ -61,7 +65,7 @@ func (s *Server) handleUserServices(w http.ResponseWriter, r *http.Request) {
 
 	services := make([]types.UserServiceEntry, 0, len(tunnels))
 	for _, tunnel := range tunnels {
-		entry, ok := userServiceEntryFromTunnel(r, user, tunnel, nodeIndex[tunnel.NodeID])
+		entry, ok := userServiceEntryFromTunnel(r, user, tunnel, nodeIndex)
 		if !ok {
 			continue
 		}
@@ -85,20 +89,21 @@ func userServiceEntryFromTunnel(
 	r *http.Request,
 	user types.UserSummary,
 	tunnel types.TunnelSpec,
-	node types.NodeSummary,
+	nodeIndex map[string]types.NodeSummary,
 ) (types.UserServiceEntry, bool) {
 	key, title, kind, summary, registrationSource, ok := resolveServiceIdentity(tunnel)
 	if !ok {
 		return types.UserServiceEntry{}, false
 	}
 
+	serviceNode := resolveServiceNode(tunnel, nodeIndex)
 	publicURL := strings.TrimSpace(tunnel.Metadata[serviceMetaPublicURLKey])
 	if publicURL == "" {
 		publicURL = deriveServicePublicURL(r, tunnel)
 	}
 	p2pURL := strings.TrimSpace(tunnel.Metadata[serviceMetaP2PURLKey])
 	if p2pURL == "" {
-		p2pURL = deriveServiceP2PURL(tunnel, node)
+		p2pURL = deriveServiceP2PURL(tunnel, serviceNode)
 	}
 
 	cloudAccess := normalizeServiceAccessPolicy(tunnel.Metadata[serviceMetaCloudAccessKey], publicURL != "")
@@ -111,9 +116,9 @@ func userServiceEntryFromTunnel(
 		Kind:               kind,
 		Summary:            summary,
 		RegistrationSource: registrationSource,
-		NodeID:             tunnel.NodeID,
-		NodeName:           node.NodeName,
-		NodeStatus:         node.Status,
+		NodeID:             serviceNode.NodeID,
+		NodeName:           serviceNode.NodeName,
+		NodeStatus:         serviceNode.Status,
 		TunnelID:           tunnel.ID,
 		TunnelName:         tunnel.Name,
 		TunnelType:         tunnel.Type,
@@ -130,6 +135,23 @@ func userServiceEntryFromTunnel(
 		P2PAllowed:         serviceAccessAllowed(p2pAccess, user.Role),
 		PreferredPath:      preferredPath,
 	}, true
+}
+
+func resolveServiceNode(tunnel types.TunnelSpec, nodeIndex map[string]types.NodeSummary) types.NodeSummary {
+	serviceNodeID := strings.TrimSpace(tunnel.Metadata[serviceMetaP2PNodeIDKey])
+	if serviceNodeID == "" {
+		serviceNodeID = strings.TrimSpace(tunnel.NodeID)
+	}
+	if serviceNodeID == "" {
+		return types.NodeSummary{}
+	}
+	if node, ok := nodeIndex[serviceNodeID]; ok {
+		return node
+	}
+	return types.NodeSummary{
+		NodeID: serviceNodeID,
+		Status: "offline",
+	}
 }
 
 type inferredServiceIdentity struct {
@@ -301,7 +323,8 @@ func deriveServicePublicURL(r *http.Request, tunnel types.TunnelSpec) string {
 }
 
 func deriveServiceP2PURL(tunnel types.TunnelSpec, node types.NodeSummary) string {
-	if tunnel.TargetPort <= 0 {
+	port := serviceP2PTargetPort(tunnel)
+	if port <= 0 {
 		return ""
 	}
 	ipv4 := strings.TrimSpace(node.LatestMetrics["p2p:ipv4"])
@@ -310,10 +333,35 @@ func deriveServiceP2PURL(tunnel types.TunnelSpec, node types.NodeSummary) string
 	}
 	switch tunnel.Type {
 	case "http", "https":
-		return fmt.Sprintf("http://%s:%d", urlHost(ipv4), tunnel.TargetPort)
+		baseURL := fmt.Sprintf("http://%s:%d", urlHost(ipv4), port)
+		path := normalizeServiceURLPath(tunnel.Metadata[serviceMetaP2PPathKey])
+		if path == "" {
+			return baseURL
+		}
+		return baseURL + path
 	default:
 		return ""
 	}
+}
+
+func serviceP2PTargetPort(tunnel types.TunnelSpec) int {
+	if raw := strings.TrimSpace(tunnel.Metadata[serviceMetaP2PPortKey]); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return tunnel.TargetPort
+}
+
+func normalizeServiceURLPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if !strings.HasPrefix(value, "/") {
+		return "/" + value
+	}
+	return value
 }
 
 func urlHost(host string) string {

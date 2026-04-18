@@ -2151,6 +2151,116 @@ func TestUserServiceCatalogDerivesP2PURLFromNodeMetrics(t *testing.T) {
 	}
 }
 
+func TestUserServiceCatalogDerivesP2PURLFromDedicatedServiceNode(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerNode := func(body types.NodeRegisterRequest) types.NodeRegisterResponse {
+		raw, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(raw))
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("expected register 200, got %d", res.Code)
+		}
+		var out types.NodeRegisterResponse
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	relayNode := registerNode(types.NodeRegisterRequest{
+		NodeName:     "relay-node-d",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true},
+	})
+	serviceNode := registerNode(types.NodeRegisterRequest{
+		NodeName:     "service-node-d",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true, P2PAssist: true},
+	})
+
+	heartbeatBody, _ := json.Marshal(types.NodeHeartbeatRequest{
+		NodeID:        serviceNode.NodeID,
+		ObservedAt:    time.Now().UTC(),
+		ActiveTunnels: 0,
+		Metrics: map[string]string{
+			"p2p:running":    "true",
+			"p2p:runtime":    "easytier",
+			"p2p:ipv4":       "10.88.0.21",
+			"p2p:peer_count": "3",
+		},
+	})
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/agent/heartbeat", bytes.NewReader(heartbeatBody))
+	heartbeatRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(heartbeatRes, heartbeatReq)
+	if heartbeatRes.Code != http.StatusOK {
+		t.Fatalf("expected heartbeat 200, got %d", heartbeatRes.Code)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"nodeId":     relayNode.NodeID,
+		"name":       "drive-service-dedicated",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 5212,
+		"publicPort": 0,
+		"domain":     "drive.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKey":           "drive",
+			"serviceTitle":         "网盘服务",
+			"serviceKind":          "drive",
+			"serviceSummary":       "公网入口继续保留在云端，P2P 工作台直接落到真实服务端节点。",
+			"serviceP2PNodeId":     serviceNode.NodeID,
+			"serviceP2PTargetPort": "9527",
+			"serviceP2PPath":       "/workspace/",
+			"serviceCloudAccess":   "admin_only",
+			"serviceP2PAccess":     "all_users",
+			"servicePreferredPath": "dual",
+		},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create tunnel 201, got %d: %s", createRes.Code, createRes.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/user/services", nil)
+	req.Host = "manage.020309.top"
+	applyCookies(req, adminCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected user services 200, got %d", res.Code)
+	}
+
+	var out types.UserServiceCatalogResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Items) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(out.Items))
+	}
+	if out.Items[0].NodeID != serviceNode.NodeID {
+		t.Fatalf("expected service node id %q, got %q", serviceNode.NodeID, out.Items[0].NodeID)
+	}
+	if out.Items[0].NodeName != "service-node-d" {
+		t.Fatalf("expected service node name service-node-d, got %q", out.Items[0].NodeName)
+	}
+	if out.Items[0].P2PURL != "http://10.88.0.21:9527/workspace/" {
+		t.Fatalf("expected dedicated service-node p2p url, got %q", out.Items[0].P2PURL)
+	}
+	if out.Items[0].PublicURL != "https://drive.020309.top" {
+		t.Fatalf("expected public url https://drive.020309.top, got %q", out.Items[0].PublicURL)
+	}
+}
+
 func TestUserServiceCatalogInfersBuiltInServicesFromTunnelShape(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"

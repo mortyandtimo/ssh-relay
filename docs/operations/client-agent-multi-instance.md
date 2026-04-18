@@ -95,3 +95,4 @@ journalctl -u cloud-relay-easytier@<node-id>.service -n 100 --no-pager
 - For multi-node long-running deployment, prefer the template unit and per-node env files.
 - The agent now reports `deploymentMode`, `serviceUnit`, and `instanceProfile` through node metadata so the admin console can show whether a node is managed by a persistent systemd unit.
 - When `CLIENT_P2P_ASSIST=true`, the agent now queries `easytier-cli` and reports EasyTier runtime metrics such as virtual IPv4, instance ID, peer count, and runtime errors.
+- For the three-side contract that binds cloud tunnel metadata, service-side EasyTier nodes, and user-side workspaces together, see `docs/operations/p2p-service-triad.md`.

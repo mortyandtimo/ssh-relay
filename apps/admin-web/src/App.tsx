@@ -222,6 +222,9 @@ type TunnelForm = {
   serviceSummary: string;
   servicePublicUrl: string;
   serviceP2PUrl: string;
+  serviceP2PNodeId: string;
+  serviceP2PTargetPort: string;
+  serviceP2PPath: string;
   serviceCloudAccess: "all_users" | "admin_only" | "disabled";
   serviceP2PAccess: "all_users" | "admin_only" | "disabled";
   servicePreferredPath: "dual" | "cloud" | "p2p";
@@ -246,6 +249,9 @@ type TunnelEditForm = {
   serviceSummary: string;
   servicePublicUrl: string;
   serviceP2PUrl: string;
+  serviceP2PNodeId: string;
+  serviceP2PTargetPort: string;
+  serviceP2PPath: string;
   serviceCloudAccess: "all_users" | "admin_only" | "disabled";
   serviceP2PAccess: "all_users" | "admin_only" | "disabled";
   servicePreferredPath: "dual" | "cloud" | "p2p";
@@ -322,6 +328,9 @@ const initialTunnelForm: TunnelForm = {
   serviceSummary: "",
   servicePublicUrl: "",
   serviceP2PUrl: "",
+  serviceP2PNodeId: "",
+  serviceP2PTargetPort: "",
+  serviceP2PPath: "",
   serviceCloudAccess: "all_users",
   serviceP2PAccess: "all_users",
   servicePreferredPath: "dual",
@@ -361,6 +370,9 @@ const serviceMetadataKeys = [
   "serviceSummary",
   "servicePublicUrl",
   "serviceP2PUrl",
+  "serviceP2PNodeId",
+  "serviceP2PTargetPort",
+  "serviceP2PPath",
   "serviceCloudAccess",
   "serviceP2PAccess",
   "servicePreferredPath",
@@ -394,6 +406,9 @@ function extractTunnelServiceFields(metadata?: Record<string, string>) {
     serviceSummary: metadata?.serviceSummary || "",
     servicePublicUrl: metadata?.servicePublicUrl || "",
     serviceP2PUrl: metadata?.serviceP2PUrl || "",
+    serviceP2PNodeId: metadata?.serviceP2PNodeId || "",
+    serviceP2PTargetPort: metadata?.serviceP2PTargetPort || "",
+    serviceP2PPath: metadata?.serviceP2PPath || "",
     serviceCloudAccess: (metadata?.serviceCloudAccess || "all_users") as "all_users" | "admin_only" | "disabled",
     serviceP2PAccess: (metadata?.serviceP2PAccess || "all_users") as "all_users" | "admin_only" | "disabled",
     servicePreferredPath: (metadata?.servicePreferredPath || "dual") as "dual" | "cloud" | "p2p",
@@ -410,6 +425,9 @@ function buildTunnelServiceMetadata(
     "serviceSummary" |
     "servicePublicUrl" |
     "serviceP2PUrl" |
+    "serviceP2PNodeId" |
+    "serviceP2PTargetPort" |
+    "serviceP2PPath" |
     "serviceCloudAccess" |
     "serviceP2PAccess" |
     "servicePreferredPath"
@@ -428,6 +446,9 @@ function buildTunnelServiceMetadata(
   if (form.serviceSummary.trim()) next.serviceSummary = form.serviceSummary.trim();
   if (form.servicePublicUrl.trim()) next.servicePublicUrl = form.servicePublicUrl.trim();
   if (form.serviceP2PUrl.trim()) next.serviceP2PUrl = form.serviceP2PUrl.trim();
+  if (form.serviceP2PNodeId.trim()) next.serviceP2PNodeId = form.serviceP2PNodeId.trim();
+  if (form.serviceP2PTargetPort.trim()) next.serviceP2PTargetPort = form.serviceP2PTargetPort.trim();
+  if (form.serviceP2PPath.trim()) next.serviceP2PPath = form.serviceP2PPath.trim();
   next.serviceCloudAccess = form.serviceCloudAccess;
   next.serviceP2PAccess = form.serviceP2PAccess;
   next.servicePreferredPath = form.servicePreferredPath;
@@ -2251,6 +2272,9 @@ function buildAuditQuery(filter: AuditFilterState) {
                             {selectedTunnel.metadata?.serviceKey ? <FactRow label="serviceKey" value={<code>{selectedTunnel.metadata.serviceKey}</code>} /> : null}
                             {selectedTunnel.metadata?.servicePublicUrl ? <FactRow label="servicePublicUrl" value={<code>{selectedTunnel.metadata.servicePublicUrl}</code>} /> : null}
                             {selectedTunnel.metadata?.serviceP2PUrl ? <FactRow label="serviceP2PUrl" value={<code>{selectedTunnel.metadata.serviceP2PUrl}</code>} /> : null}
+                            {selectedTunnel.metadata?.serviceP2PNodeId ? <FactRow label="serviceP2PNodeId" value={<code>{selectedTunnel.metadata.serviceP2PNodeId}</code>} /> : null}
+                            {selectedTunnel.metadata?.serviceP2PTargetPort ? <FactRow label="serviceP2PTargetPort" value={<code>{selectedTunnel.metadata.serviceP2PTargetPort}</code>} /> : null}
+                            {selectedTunnel.metadata?.serviceP2PPath ? <FactRow label="serviceP2PPath" value={<code>{selectedTunnel.metadata.serviceP2PPath}</code>} /> : null}
                             {(selectedTunnel.type === "http" || selectedTunnel.type === "https") ? <FactRow label="probePath" value={<code>{selectedTunnel.probePath || "/"}</code>} /> : null}
                             {selectedTunnel.type === "https" ? <FactRow label="publicPort" value={<span><code>{selectedTunnel.publicPort}</code> 仅作内部保留字段</span>} /> : null}
                           </div>
@@ -2369,9 +2393,13 @@ function buildAuditQuery(filter: AuditFilterState) {
                         <label><span>服务摘要</span><input value={tunnelEditForm.serviceSummary} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceSummary: event.target.value } : current)} placeholder="用户端里显示的说明文案" /></label>
                         <label><span>云端入口 URL</span><input value={tunnelEditForm.servicePublicUrl} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, servicePublicUrl: event.target.value } : current)} placeholder="留空则按当前 tunnel 入口推导" /></label>
                         <label><span>P2P 入口 URL</span><input value={tunnelEditForm.serviceP2PUrl} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PUrl: event.target.value } : current)} placeholder="留空则按节点 EasyTier IPv4 + targetPort 自动推导" /></label>
+                        <label><span>P2P 节点 ID</span><input value={tunnelEditForm.serviceP2PNodeId} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PNodeId: event.target.value } : current)} placeholder="留空则默认使用当前 tunnel 所在节点" /></label>
+                        <label><span>P2P 目标端口</span><input value={tunnelEditForm.serviceP2PTargetPort} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PTargetPort: event.target.value } : current)} inputMode="numeric" placeholder="留空则复用 targetPort" /></label>
+                        <label><span>P2P 路径</span><input value={tunnelEditForm.serviceP2PPath} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PPath: event.target.value } : current)} placeholder="例如 / 或 /workspace/" /></label>
                         <label><span>云端入口权限</span><select value={tunnelEditForm.serviceCloudAccess} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceCloudAccess: event.target.value as "all_users" | "admin_only" | "disabled" } : current)}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
                         <label><span>P2P 入口权限</span><select value={tunnelEditForm.serviceP2PAccess} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PAccess: event.target.value as "all_users" | "admin_only" | "disabled" } : current)}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
                         <label><span>用户端首选路径</span><select value={tunnelEditForm.servicePreferredPath} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, servicePreferredPath: event.target.value as "dual" | "cloud" | "p2p" } : current)}><option value="dual">dual</option><option value="cloud">cloud</option><option value="p2p">p2p</option></select></label>
+                        <div className="form-note">如果公网反代挂在云端节点、但真实业务服务跑在另一台服务端，就填入 P2P 节点 ID 和可选端口/路径；用户端目录会按服务端节点去启动工作台。</div>
                         <div className="detail-grid readonly-grid">
                           <DetailItem label="nodeId" value={tunnelEditForm.nodeId} />
                           <DetailItem label="status" value={tunnelEditForm.status} />
@@ -2438,9 +2466,13 @@ function buildAuditQuery(filter: AuditFilterState) {
                         <label><span>服务摘要</span><input value={tunnelForm.serviceSummary} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceSummary: event.target.value }))} placeholder="用户端里显示的说明文案" /></label>
                         <label><span>云端入口 URL</span><input value={tunnelForm.servicePublicUrl} onChange={(event) => setTunnelForm((current) => ({ ...current, servicePublicUrl: event.target.value }))} placeholder="留空则按当前 tunnel 入口推导" /></label>
                         <label><span>P2P 入口 URL</span><input value={tunnelForm.serviceP2PUrl} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PUrl: event.target.value }))} placeholder="留空则按节点 EasyTier IPv4 + targetPort 自动推导" /></label>
+                        <label><span>P2P 节点 ID</span><input value={tunnelForm.serviceP2PNodeId} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PNodeId: event.target.value }))} placeholder="留空则默认使用当前 tunnel 所在节点" /></label>
+                        <label><span>P2P 目标端口</span><input value={tunnelForm.serviceP2PTargetPort} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PTargetPort: event.target.value }))} inputMode="numeric" placeholder="留空则复用 targetPort" /></label>
+                        <label><span>P2P 路径</span><input value={tunnelForm.serviceP2PPath} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PPath: event.target.value }))} placeholder="例如 / 或 /workspace/" /></label>
                         <label><span>云端入口权限</span><select value={tunnelForm.serviceCloudAccess} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceCloudAccess: event.target.value as "all_users" | "admin_only" | "disabled" }))}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
                         <label><span>P2P 入口权限</span><select value={tunnelForm.serviceP2PAccess} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PAccess: event.target.value as "all_users" | "admin_only" | "disabled" }))}><option value="all_users">all_users</option><option value="admin_only">admin_only</option><option value="disabled">disabled</option></select></label>
                         <label><span>用户端首选路径</span><select value={tunnelForm.servicePreferredPath} onChange={(event) => setTunnelForm((current) => ({ ...current, servicePreferredPath: event.target.value as "dual" | "cloud" | "p2p" }))}><option value="dual">dual</option><option value="cloud">cloud</option><option value="p2p">p2p</option></select></label>
+                        <div className="form-note">如果这个服务的公网入口和 P2P 实际服务不在同一台节点上，就在这里指定 P2P 节点 ID 和可选端口/路径，用户端目录会按服务端节点去启动工作台。</div>
                         <button type="submit" disabled={busyAction === "create-tunnel"}>{busyAction === "create-tunnel" ? "创建中..." : "创建隧道"}</button>
                       </form>
                     )}
@@ -3322,6 +3354,9 @@ function toTunnelEditForm(tunnel: TunnelSpec): TunnelEditForm {
     serviceSummary: service.serviceSummary,
     servicePublicUrl: service.servicePublicUrl,
     serviceP2PUrl: service.serviceP2PUrl,
+    serviceP2PNodeId: service.serviceP2PNodeId,
+    serviceP2PTargetPort: service.serviceP2PTargetPort,
+    serviceP2PPath: service.serviceP2PPath,
     serviceCloudAccess: service.serviceCloudAccess,
     serviceP2PAccess: service.serviceP2PAccess,
     servicePreferredPath: service.servicePreferredPath,
