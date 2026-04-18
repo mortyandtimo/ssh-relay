@@ -2022,6 +2022,90 @@ impl<R: Read> Read for PrefixedReader<R> {
     }
 }
 
+struct ChunkedBodyReader<R> {
+    inner: R,
+    remaining_in_chunk: usize,
+    finished: bool,
+}
+
+impl<R> ChunkedBodyReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            remaining_in_chunk: 0,
+            finished: false,
+        }
+    }
+}
+
+impl<R: BufRead> ChunkedBodyReader<R> {
+    fn read_next_chunk_size(&mut self) -> io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        let size_line = read_line_crlf(&mut self.inner)?;
+        let line = String::from_utf8_lossy(&size_line);
+        let size_token = line.split(';').next().unwrap_or_default().trim();
+        let chunk_size = usize::from_str_radix(size_token, 16)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size"))?;
+        if chunk_size == 0 {
+            loop {
+                let trailer_line = read_line_crlf(&mut self.inner)?;
+                if trailer_line == b"\r\n" {
+                    self.finished = true;
+                    return Ok(());
+                }
+            }
+        }
+        self.remaining_in_chunk = chunk_size;
+        Ok(())
+    }
+
+    fn consume_chunk_suffix(&mut self) -> io::Result<()> {
+        let mut suffix = [0_u8; 2];
+        self.inner.read_exact(&mut suffix)?;
+        if suffix != *b"\r\n" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid chunk suffix",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<R: BufRead> Read for ChunkedBodyReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.finished {
+                return Ok(0);
+            }
+            if self.remaining_in_chunk == 0 {
+                self.read_next_chunk_size()?;
+                if self.finished {
+                    return Ok(0);
+                }
+            }
+            let limit = buf.len().min(self.remaining_in_chunk);
+            let read = self.inner.read(&mut buf[..limit])?;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected eof while reading chunk body",
+                ));
+            }
+            self.remaining_in_chunk -= read;
+            if self.remaining_in_chunk == 0 {
+                self.consume_chunk_suffix()?;
+            }
+            return Ok(read);
+        }
+    }
+}
+
 fn read_http_header(stream: &mut TcpStream) -> io::Result<(Vec<u8>, Vec<u8>)> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -2571,7 +2655,8 @@ fn bridge_http_connection_with_host_rewrite(
             request = request.body(Body::sized(reader, length as u64));
         } else if parsed.chunked {
             let reader = PrefixedReader::new(request_body_buffer, incoming.try_clone()?);
-            request = request.body(Body::new(reader));
+            let chunked_reader = ChunkedBodyReader::new(BufReader::new(reader));
+            request = request.body(Body::new(chunked_reader));
         }
 
         let mut response = request.send().map_err(|err| {
