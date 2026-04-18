@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::{Local, LocalResult, TimeZone};
-use reqwest::blocking::{Body, Client};
+use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
@@ -2543,6 +2543,7 @@ fn rewrite_http_request_header(
     local_host: &str,
     local_port: u16,
     rewrite_host: &str,
+    rewrite_scheme: &str,
 ) -> io::Result<(Vec<u8>, Option<usize>, bool)> {
     let header_text = String::from_utf8_lossy(header);
     let mut lines = header_text.split("\r\n");
@@ -2581,7 +2582,7 @@ fn rewrite_http_request_header(
                         local_host,
                         local_port,
                         rewrite_host,
-                        "http",
+                        rewrite_scheme,
                     )
                 )),
                 "connection" => {
@@ -2716,88 +2717,69 @@ fn bridge_http_connection_with_host_rewrite(
                 request_body_buffer.len()
             ),
         );
-        let method = parsed
-            .method
-            .parse::<Method>()
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
-        let client = Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|err| io::Error::other(err.to_string()))?;
-
-        let mut request = client
-            .request(method, url)
-            .header(reqwest::header::HOST, spec.rewrite_host.as_str())
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .header(reqwest::header::CONNECTION, "close");
-
-        for (name, value) in parsed.headers {
-            let lower = name.trim().to_ascii_lowercase();
-            if should_skip_proxy_request_header(&lower) {
-                continue;
-            }
-            let rewritten_value = match lower.as_str() {
-                "origin" | "referer" => rewrite_request_absolute_url(
-                    &value,
-                    &spec.bind_host,
-                    spec.listen_port,
-                    &spec.rewrite_host,
-                    &spec.rewrite_scheme,
-                ),
-                _ => value,
-            };
-            let header_name = HeaderName::from_bytes(name.as_bytes())
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
-            let header_value = HeaderValue::from_str(&rewritten_value)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
-            request = request.header(header_name, header_value);
-        }
-
-        if let Some(length) = parsed.content_length {
-            let reader = PrefixedReader::new(request_body_buffer, incoming.try_clone()?);
-            request = request.body(Body::sized(reader, length as u64));
-        } else if parsed.chunked {
-            let reader = PrefixedReader::new(request_body_buffer, incoming.try_clone()?);
-            let chunked_reader = ChunkedBodyReader::new(BufReader::new(reader));
-            request = request.body(Body::new(chunked_reader));
-        }
-
-        let mut response = request.send().map_err(|err| {
+        let target_addr = socket_addr(&spec.target_host, spec.target_port);
+        let mut outgoing = TcpStream::connect(&target_addr).map_err(|err| {
             io::Error::other(format!(
-                "upstream request failed for {} {}: {}",
-                request_method, request_target, err
+                "upstream connect failed for {} {} -> {}: {}",
+                request_method, request_target, target_addr, err
             ))
         })?;
+        let _ = outgoing.set_nonblocking(false);
+        let _ = incoming.set_nodelay(true);
+        let _ = outgoing.set_nodelay(true);
+
+        let (rewritten_request_header, content_length, chunked) = rewrite_http_request_header(
+            &request_header,
+            &spec.bind_host,
+            spec.listen_port,
+            &spec.rewrite_host,
+            &spec.rewrite_scheme,
+        )?;
+        outgoing.write_all(&rewritten_request_header)?;
+        copy_request_body(
+            request_body_buffer,
+            &mut incoming,
+            &mut outgoing,
+            content_length,
+            chunked,
+        )?;
+        outgoing.flush()?;
+        let _ = outgoing.shutdown(Shutdown::Write);
+
+        let (response_header, response_body_buffer) =
+            read_http_header(&mut outgoing).map_err(|err| {
+                io::Error::other(format!(
+                    "upstream response header failed for {} {}: {}",
+                    request_method, request_target, err
+                ))
+            })?;
+        let rewritten_response_header = rewrite_http_response_header(
+            &response_header,
+            &spec.rewrite_host,
+            &spec.bind_host,
+            spec.listen_port,
+        )?;
+        let response_status = String::from_utf8_lossy(&response_header)
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or_default()
+            .to_string();
         append_proxy_log_line(
             &spec.log_path,
             "forwarder-response",
             trace_id,
             &format!(
-                "status={} final_url={} location={} set_cookie_count={}",
-                response.status().as_u16(),
-                response.url(),
-                response
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or_default(),
-                response
-                    .headers()
-                    .get_all(reqwest::header::SET_COOKIE)
-                    .iter()
-                    .count()
+                "status={} buffered_body_bytes={}",
+                response_status,
+                response_body_buffer.len()
             ),
         );
-        let _ = incoming.set_nodelay(true);
-        write_proxy_response_line(&mut incoming, response.status())?;
-        write_proxy_response_headers(
-            &mut incoming,
-            response.headers(),
-            &spec.rewrite_host,
-            &spec.bind_host,
-            spec.listen_port,
-        )?;
-        io::copy(&mut response, &mut incoming).map_err(|err| {
+        incoming.write_all(&rewritten_response_header)?;
+        if !response_body_buffer.is_empty() {
+            incoming.write_all(&response_body_buffer)?;
+        }
+        io::copy(&mut outgoing, &mut incoming).map_err(|err| {
             io::Error::other(format!(
                 "upstream response copy failed for {} {}: {}",
                 request_method, request_target, err
