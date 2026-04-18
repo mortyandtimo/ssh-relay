@@ -19,6 +19,27 @@ export type RuntimeStatus = {
   lastError: string;
 };
 
+export type P2PRuntimeStatus = {
+  available: boolean;
+  configured: boolean;
+  running: boolean;
+  pid: number | null;
+  startedAt: number | null;
+  executablePath: string;
+  workDir: string;
+  stdoutLogPath: string;
+  stderrLogPath: string;
+  argsSummary: string;
+  lastError: string;
+  machineId: string;
+  rpcPortal: string;
+  nodeHostname: string;
+  virtualIpv4: string;
+  instanceId: string;
+  peerCount: number;
+  connectedPeers: string[];
+};
+
 type RuntimeStartInput = {
   apiBaseUrl: string;
   nodeId: string;
@@ -144,6 +165,45 @@ export async function loadDesktopHostPaths() {
   } catch {
     return { configDir: "未接入 Tauri 宿主", logDir: "未接入 Tauri 宿主", available: false };
   }
+}
+
+export async function loadP2PRuntimeStatus(): Promise<P2PRuntimeStatus> {
+  try {
+    return await invoke<P2PRuntimeStatus>("p2p_runtime_status");
+  } catch {
+    return {
+      available: false,
+      configured: false,
+      running: false,
+      pid: null,
+      startedAt: null,
+      executablePath: "",
+      workDir: "",
+      stdoutLogPath: "",
+      stderrLogPath: "",
+      argsSummary: "",
+      lastError: "未接入 Tauri 宿主",
+      machineId: "",
+      rpcPortal: "",
+      nodeHostname: "",
+      virtualIpv4: "",
+      instanceId: "",
+      peerCount: 0,
+      connectedPeers: [],
+    };
+  }
+}
+
+export async function startP2PRuntime(): Promise<P2PRuntimeStatus> {
+  return await invoke<P2PRuntimeStatus>("p2p_runtime_start");
+}
+
+export async function stopP2PRuntime(): Promise<P2PRuntimeStatus> {
+  return await invoke<P2PRuntimeStatus>("p2p_runtime_stop");
+}
+
+export async function openP2PRuntimeLog(kind: "stdout" | "stderr"): Promise<void> {
+  await invoke("open_p2p_runtime_log", { kind });
 }
 
 export async function loadDesktopAppUsage(): Promise<DesktopAppUsage> {
@@ -323,6 +383,14 @@ export type AppConfig = {
   closeAction?: "ask" | "tray" | "exit";
   silentStart?: boolean;
   autoStart?: boolean;
+  p2pAutoStart?: boolean;
+  p2pNetworkName?: string;
+  p2pNetworkSecret?: string;
+  p2pPeerUrl?: string;
+  p2pVirtualIpv4?: string;
+  p2pUseDhcp?: boolean;
+  p2pInstanceName?: string;
+  p2pHostname?: string;
 };
 
 export async function readLoginProfiles(): Promise<LoginProfilesFile | null> {

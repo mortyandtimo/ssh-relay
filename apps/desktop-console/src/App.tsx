@@ -24,7 +24,6 @@ import {
   deriveCloudEntry,
   evaluateRuleState,
   normalizeProbePath,
-  protocolCapabilitySummary,
   protocolEntryHint,
   type CloudEntry,
   type DiagnosticItem,
@@ -33,7 +32,7 @@ import {
   type PublishRuleForm,
 } from "./app-services/publisherModel";
 import { ControlResultBlock } from "./controlResultBlock";
-import { createTauriDesktopTransport, ensureRuntimeStarted, loadAgentTraffic, loadAutoStartEnabled, loadDesktopAppUsage, loadDesktopHostPaths, loadRuntimeStatus, openDesktopExternal, openRuntimeLog, stopRuntime, windowMinimize, windowRequestClose, windowStartDrag, windowToggleMaximize, type AgentTrafficSnapshot, type DesktopAppUsage, type RuntimeStatus, type LoginProfilesFile, type AppConfig, type TrafficHistoryDayEntry, type TrafficHistorySnapshot, readLoginProfiles, saveLoginProfile, deleteLoginProfile, decryptLoginPassword, saveAppConfig, loadAppConfig, appExit, setAutoStart, loadTrafficHistory, recordTrafficDelta } from "./desktopHost";
+import { appExit, createTauriDesktopTransport, decryptLoginPassword, deleteLoginProfile, ensureRuntimeStarted, loadAgentTraffic, loadAppConfig, loadAutoStartEnabled, loadDesktopAppUsage, loadDesktopHostPaths, loadP2PRuntimeStatus, loadRuntimeStatus, loadTrafficHistory, openDesktopExternal, openP2PRuntimeLog, openRuntimeLog, readLoginProfiles, recordTrafficDelta, saveAppConfig, saveLoginProfile, setAutoStart, startP2PRuntime, stopP2PRuntime, stopRuntime, windowMinimize, windowRequestClose, windowStartDrag, windowToggleMaximize, type AgentTrafficSnapshot, type AppConfig, type DesktopAppUsage, type LoginProfilesFile, type P2PRuntimeStatus, type RuntimeStatus, type TrafficHistoryDayEntry, type TrafficHistorySnapshot } from "./desktopHost";
 
 type DesktopWindowEnv = {
   apiBaseUrl?: string;
@@ -66,7 +65,7 @@ type RelayEndpointPreset = {
 
 type RouteMeta = {
   path: string;
-  key: "dashboard" | "services" | "publish" | "diagnostics" | "settings";
+  key: "dashboard" | "services" | "publish" | "diagnostics" | "p2p" | "settings";
   label: string;
   icon: string;
 };
@@ -81,12 +80,66 @@ type DrawerState =
 const desktopPublisherApiBaseUrl = "https://publisher.manage.020309.top";
 const desktopPublisherHost = "publisher.manage.020309.top";
 const desktopManagePortalHost = "manage.020309.top";
+const defaultPublisherP2PPeerUrl = "tcp://easytier.manage.020309.top:11010\nudp://easytier.manage.020309.top:11010";
 const emptyTrafficHistory: TrafficHistorySnapshot = {
   nodeId: "",
   currentMonth: "",
   days: [],
   months: [],
 };
+
+const emptyP2PRuntimeStatus: P2PRuntimeStatus = {
+  available: false,
+  configured: false,
+  running: false,
+  pid: null,
+  startedAt: null,
+  executablePath: "",
+  workDir: "",
+  stdoutLogPath: "",
+  stderrLogPath: "",
+  argsSummary: "",
+  lastError: "",
+  machineId: "",
+  rpcPortal: "",
+  nodeHostname: "",
+  virtualIpv4: "",
+  instanceId: "",
+  peerCount: 0,
+  connectedPeers: [],
+};
+
+function normalizePublisherAppConfig(config?: AppConfig | null): AppConfig {
+  return {
+    closeAction: (config?.closeAction || "ask") as "ask" | "tray" | "exit",
+    silentStart: Boolean(config?.silentStart),
+    autoStart: Boolean(config?.autoStart),
+    p2pAutoStart: Boolean(config?.p2pAutoStart),
+    p2pNetworkName: (config?.p2pNetworkName || "").trim() || "cloud-relay",
+    p2pNetworkSecret: (config?.p2pNetworkSecret || "").trim(),
+    p2pPeerUrl: typeof config?.p2pPeerUrl === "string" && config.p2pPeerUrl.trim()
+      ? config.p2pPeerUrl.trim()
+      : defaultPublisherP2PPeerUrl,
+    p2pVirtualIpv4: (config?.p2pVirtualIpv4 || "").trim(),
+    p2pUseDhcp: config?.p2pUseDhcp !== false,
+    p2pInstanceName: (config?.p2pInstanceName || "").trim() || "cloud-relay-publisher",
+    p2pHostname: (config?.p2pHostname || "").trim(),
+  };
+}
+
+function formatStartedAt(timestamp?: number | null) {
+  if (!timestamp) return "未启动";
+  return new Date(timestamp).toLocaleString();
+}
+
+function p2pRuntimeLabel(status?: P2PRuntimeStatus | null) {
+  if (!status) return "读取中";
+  if (status.running && status.peerCount > 0) return `已联网 (${status.peerCount})`;
+  if (status.running) return "运行中";
+  if (!status.available) return "未打包 easytier-core";
+  if (!status.configured) return "待配置";
+  return "已停止";
+}
 
 function normalizeDesktopApiBaseUrl(value?: string) {
   const trimmed = (value || "").trim();
@@ -150,6 +203,7 @@ const publisherRoutes: RouteMeta[] = [
   { path: "/services", key: "services", label: "本地服务", icon: "fas fa-network-wired" },
   { path: "/publish", key: "publish", label: "发布管理", icon: "fas fa-sitemap" },
   { path: "/diagnostics", key: "diagnostics", label: "诊断中心", icon: "fas fa-bug" },
+  { path: "/p2p", key: "p2p", label: "P2P 网络", icon: "fas fa-project-diagram" },
   { path: "/settings", key: "settings", label: "设置", icon: "fas fa-cog" },
 ];
 
@@ -311,6 +365,7 @@ export default function App() {
   const [lastRefreshAt, setLastRefreshAt] = useState("");
   const [desktopHostPaths, setDesktopHostPaths] = useState({ configDir: "读取中...", logDir: "读取中...", available: false });
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>(emptyRuntimeStatus);
+  const [p2pStatus, setP2PStatus] = useState<P2PRuntimeStatus>(emptyP2PRuntimeStatus);
   const [appUsage, setAppUsage] = useState<DesktopAppUsage>(emptyUsage);
   const [trafficRate, setTrafficRate] = useState({ downRate: 0, upRate: 0 });
   const [agentTraffic, setAgentTraffic] = useState<AgentTrafficSnapshot | null>(null);
@@ -321,13 +376,15 @@ export default function App() {
   const agentTrafficPrevRef = useRef<{ sampledAt: number; downTotal: number; upTotal: number; tunnels: Map<string, { downBytes: number; upBytes: number }> } | null>(null);
   const refreshInFlightRef = useRef(false);
   const runtimePollInFlightRef = useRef(false);
+  const p2pPollInFlightRef = useRef(false);
   const usagePollInFlightRef = useRef(false);
   const trafficPollInFlightRef = useRef(false);
   const appUsageSampleRef = useRef<DesktopAppUsage | null>(null);
   const [loginProfiles, setLoginProfiles] = useState<LoginProfilesFile | null>(null);
   const [savePassword, setSavePassword] = useState(false);
   const [autoLogin, setAutoLogin] = useState(false);
-  const [appConfig, setAppConfig] = useState<AppConfig>({ closeAction: "ask", silentStart: false });
+  const [appConfig, setAppConfig] = useState<AppConfig>(normalizePublisherAppConfig(null));
+  const [p2pBusy, setP2PBusy] = useState(false);
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
   const [profileListOpen, setProfileListOpen] = useState(false);
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<string | null>(null);
@@ -408,12 +465,11 @@ export default function App() {
       if (profiles) setLoginProfiles(profiles);
       if (config) {
         setAppConfig({
-          closeAction: config.closeAction || "ask",
-          silentStart: config.silentStart || false,
-          autoStart: desktopTransport ? autoStartEnabled : config.autoStart || false,
+          ...normalizePublisherAppConfig(config),
+          autoStart: desktopTransport ? autoStartEnabled : Boolean(config.autoStart),
         });
       } else if (desktopTransport) {
-        setAppConfig((current) => ({ ...current, autoStart: autoStartEnabled }));
+        setAppConfig((current) => ({ ...normalizePublisherAppConfig(current), autoStart: autoStartEnabled }));
       }
       // Window bounds are restored by Rust setup before first paint
       // Pre-fill last used email and check if it has a saved password
@@ -599,6 +655,43 @@ export default function App() {
     void loadRuntime();
     const timer = window.setInterval(() => {
       void loadRuntime();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadP2P() {
+      if (p2pPollInFlightRef.current) return;
+      p2pPollInFlightRef.current = true;
+      try {
+        const payload = await loadP2PRuntimeStatus();
+        if (!cancelled) {
+          setP2PStatus((prev) => {
+            if (
+              prev.available === payload.available &&
+              prev.configured === payload.configured &&
+              prev.running === payload.running &&
+              prev.pid === payload.pid &&
+              prev.peerCount === payload.peerCount &&
+              prev.virtualIpv4 === payload.virtualIpv4 &&
+              prev.lastError === payload.lastError
+            ) {
+              return prev;
+            }
+            return payload;
+          });
+        }
+      } finally {
+        p2pPollInFlightRef.current = false;
+      }
+    }
+    void loadP2P();
+    const timer = window.setInterval(() => {
+      void loadP2P();
     }, 5000);
     return () => {
       cancelled = true;
@@ -854,11 +947,19 @@ export default function App() {
     }
     return null;
   }, [nodes, runtimeNodeId]);
+  const p2pCloudMetrics = useMemo<Record<string, string>>(
+    () => runtimeBoundDevice?.latestMetrics || currentDevice?.latestMetrics || {},
+    [currentDevice?.latestMetrics, runtimeBoundDevice?.latestMetrics],
+  );
 
   const publishableTunnels = useMemo(() => {
     if (!runtimeBoundDevice) return [];
     return tunnels.filter((tunnel) => tunnel.nodeId === runtimeBoundDevice.nodeId);
   }, [runtimeBoundDevice, tunnels]);
+  const p2pCandidateRules = useMemo(
+    () => publishableTunnels.filter((item) => item.transportPolicy === "p2p_preferred"),
+    [publishableTunnels],
+  );
 
   const diagnosticsItems = useMemo(() => buildDiagnosticsItems(publishableTunnels), [publishableTunnels]);
   const activeRulesCount = useMemo(() => publishableTunnels.filter((item) => item.status === "active").length, [publishableTunnels]);
@@ -1574,6 +1675,71 @@ export default function App() {
     }
   }
 
+  async function saveP2PSettings() {
+    setP2PBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const merged = normalizePublisherAppConfig(appConfig);
+      setAppConfig(merged);
+      await saveAppConfig(merged);
+      const status = await loadP2PRuntimeStatus();
+      setP2PStatus(status);
+      setMessage(runtimeRunning
+        ? "P2P 设置已保存。当前发布 Runtime 已经带上 EasyTier telemetry；若需要立即应用新的 EasyTier 参数，请停止后重新启动 EasyTier。"
+        : "P2P 设置已保存。");
+    } catch (configError) {
+      setError(configError instanceof Error ? configError.message : "保存 P2P 设置失败");
+    } finally {
+      setP2PBusy(false);
+    }
+  }
+
+  async function handleP2PRuntimeStart() {
+    if (p2pStatus.running) {
+      setMessage("EasyTier 已在运行，本次不会重复拉起。");
+      return;
+    }
+    setP2PBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const merged = normalizePublisherAppConfig(appConfig);
+      setAppConfig(merged);
+      await saveAppConfig(merged);
+      const status = await startP2PRuntime();
+      setP2PStatus(status);
+      setMessage(status.peerCount > 0 ? `EasyTier 已启动并接入 ${status.peerCount} 个对等节点。` : "EasyTier 已启动。");
+    } catch (startError) {
+      setError(startError instanceof Error ? startError.message : "启动 EasyTier 失败");
+    } finally {
+      setP2PBusy(false);
+    }
+  }
+
+  async function handleP2PRuntimeStop() {
+    setP2PBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const status = await stopP2PRuntime();
+      setP2PStatus(status);
+      setMessage("EasyTier 已停止。");
+    } catch (stopError) {
+      setError(stopError instanceof Error ? stopError.message : "停止 EasyTier 失败");
+    } finally {
+      setP2PBusy(false);
+    }
+  }
+
+  async function handleOpenP2PLog(kind: "stdout" | "stderr") {
+    try {
+      await openP2PRuntimeLog(kind);
+    } catch (logError) {
+      setError(logError instanceof Error ? logError.message : "打开 EasyTier 日志失败");
+    }
+  }
+
   function renderDrawer(): ReactNode {
     if (!drawerState) return null;
     if (drawerState.kind === "service") {
@@ -2021,6 +2187,199 @@ export default function App() {
     );
   }
 
+  function renderP2PPage() {
+    const cloudP2PRunning = p2pCloudMetrics["p2p:running"] === "true";
+    const cloudPeerCount = p2pCloudMetrics["p2p:peer_count"] || String(p2pStatus.peerCount || 0);
+    const cloudIpv4 = p2pCloudMetrics["p2p:ipv4"] || p2pStatus.virtualIpv4 || "未分配";
+    const cloudHostname = p2pCloudMetrics["p2p:hostname"] || p2pStatus.nodeHostname || currentDevice?.nodeName || "待上报";
+    const cloudInstanceId = p2pCloudMetrics["p2p:instance_id"] || p2pStatus.instanceId || "未上报";
+    const cloudRpcPortal = p2pCloudMetrics["p2p:rpc_portal"] || p2pStatus.rpcPortal || "127.0.0.1:15888";
+
+    return (
+      <div className="page-panel active">
+        <div className="page-header">
+          <h1>P2P 网络</h1>
+          <div className="settings-actions" style={{ marginTop: 0 }}>
+            <button className="btn" type="button" onClick={() => void loadP2PRuntimeStatus().then(setP2PStatus)} disabled={p2pBusy}>
+              <i className="fas fa-rotate" /> 刷新状态
+            </button>
+            <button className="btn" type="button" onClick={() => void startEmbeddedRuntime(cloudEndpointLabel, true)} disabled={!connectionReady}>
+              <i className="fas fa-plug" /> 重启发布 Runtime
+            </button>
+          </div>
+        </div>
+        <div className="surface-banner info">
+          EasyTier 是节点级覆盖网络，不是单条隧道。这里管理的是服务端节点本身，以及当前设备上哪些服务发布规则准备接入 P2P 数据面。
+        </div>
+
+        <div className="drawer-grid" style={{ marginTop: 20 }}>
+          <div className="settings-panel">
+            <div className="settings-section-label">本地策略</div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", padding: "10px 0" }}>
+              <input
+                type="checkbox"
+                checked={Boolean(appConfig.p2pAutoStart)}
+                onChange={(event) => setAppConfig((current) => ({ ...current, p2pAutoStart: event.target.checked }))}
+              />
+              <span>随驻阡陌启动 EasyTier</span>
+            </label>
+            <div className="settings-row"><span>当前设备</span><span>{currentDevice?.nodeName || "未绑定"}</span></div>
+            <div className="settings-row"><span>当前 P2P 候选规则</span><span>{String(p2pCandidateRules.length)}</span></div>
+            <div className="settings-row"><span>本地监听</span><span>`21110` / tcp+udp</span></div>
+            <div className="settings-row"><span>固定 RPC</span><span>127.0.0.1:15888</span></div>
+            <div className="surface-banner info">
+              服务端这里会固定使用 `21110` 的 `tcp/udp` 监听，主动避开云端引导节点使用的 `11010`，减少 Windows 端口冲突。
+            </div>
+            <div className="settings-actions">
+              <button className="btn btn-primary" type="button" onClick={() => void saveP2PSettings()} disabled={p2pBusy}>
+                <i className="fas fa-save" /> {p2pBusy ? "保存中..." : "保存 P2P 设置"}
+              </button>
+            </div>
+          </div>
+
+          <div className="settings-panel">
+            <div className="settings-section-label">EasyTier 运行态</div>
+            <div className="settings-row"><span>当前状态</span><span>{p2pRuntimeLabel(p2pStatus)}</span></div>
+            <div className="settings-row"><span>进程 PID</span><span>{p2pStatus.pid ?? "未运行"}</span></div>
+            <div className="settings-row"><span>最近启动</span><span>{formatStartedAt(p2pStatus.startedAt)}</span></div>
+            <div className="settings-row"><span>参数状态</span><span>{p2pStatus.configured ? "已配置" : "未配置"}</span></div>
+            <div className="settings-row"><span>本机主机名</span><span>{p2pStatus.nodeHostname || "待上报"}</span></div>
+            <div className="settings-row"><span>虚拟 IPv4</span><span>{p2pStatus.virtualIpv4 || "未分配"}</span></div>
+            <div className="settings-row"><span>对等节点数</span><span>{p2pStatus.peerCount}</span></div>
+            <div className="settings-row"><span>machine-id</span><span>{p2pStatus.machineId || "未生成"}</span></div>
+            <div className="settings-row"><span>RPC 端口</span><span>{p2pStatus.rpcPortal || "未配置"}</span></div>
+            <div className="surface-banner info">当前发行包会把 `easytier-core.exe` 和 `easytier-cli.exe` 一并放入 `runtime/`，这里会直接读取实际打包结果。</div>
+            <div className="command-box"><code>{p2pStatus.executablePath || "当前安装包尚未带入 easytier-core.exe"}</code></div>
+            <div className="command-box"><code>{p2pStatus.argsSummary || "当前尚未生成启动参数。先填写下方 EasyTier 节点参数。"}</code></div>
+            <div className="command-box"><code>{p2pStatus.connectedPeers.length ? p2pStatus.connectedPeers.join("\n") : "当前尚未接入任何对等节点。"}</code></div>
+            {p2pStatus.lastError ? <div className="surface-banner danger">{p2pStatus.lastError}</div> : null}
+            <div className="settings-actions">
+              <button className="btn btn-primary" type="button" onClick={() => void handleP2PRuntimeStart()} disabled={p2pBusy || !p2pStatus.available || p2pStatus.running}>
+                <i className="fas fa-play" /> {p2pBusy ? "处理中..." : p2pStatus.running ? "EasyTier 运行中" : "启动 EasyTier"}
+              </button>
+              <button className="btn" type="button" onClick={() => void handleP2PRuntimeStop()} disabled={p2pBusy || !p2pStatus.running}>
+                <i className="fas fa-stop" /> 停止 EasyTier
+              </button>
+              <button className="btn" type="button" onClick={() => void handleOpenP2PLog("stdout")}>
+                <i className="fas fa-file-lines" /> stdout 日志
+              </button>
+              <button className="btn" type="button" onClick={() => void handleOpenP2PLog("stderr")}>
+                <i className="fas fa-file-waveform" /> stderr 日志
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="drawer-grid" style={{ marginTop: 20 }}>
+          <div className="settings-panel">
+            <div className="settings-section-label">节点上云状态</div>
+            <div className="settings-row"><span>云端节点</span><span>{runtimeBoundDevice ? `${runtimeBoundDevice.nodeName} (${runtimeBoundDevice.nodeId})` : "待注册"}</span></div>
+            <div className="settings-row"><span>P2P Assist 能力</span><span>{runtimeBoundDevice?.capabilities.p2pAssist ? "已上报" : "未上报"}</span></div>
+            <div className="settings-row"><span>云端看到的运行态</span><span>{cloudP2PRunning ? "running" : "stopped"}</span></div>
+            <div className="settings-row"><span>云端看到的主机名</span><span>{cloudHostname}</span></div>
+            <div className="settings-row"><span>云端看到的虚拟 IPv4</span><span>{cloudIpv4}</span></div>
+            <div className="settings-row"><span>云端看到的对等节点数</span><span>{cloudPeerCount}</span></div>
+            <div className="settings-row"><span>云端看到的实例 ID</span><span>{cloudInstanceId}</span></div>
+            <div className="settings-row"><span>云端看到的 RPC</span><span>{cloudRpcPortal}</span></div>
+            <div className="surface-banner info">
+              `client-agent.exe` 已经会带上 EasyTier telemetry 环境变量。只要当前发布 Runtime 在线，云端节点页就会逐步看到 `p2p:ipv4`、`p2p:peer_count` 等指标。
+            </div>
+          </div>
+
+          <div className="settings-panel">
+            <div className="settings-section-label">EasyTier 节点参数</div>
+            <label>
+              <span>网络名</span>
+              <input
+                value={appConfig.p2pNetworkName || ""}
+                onChange={(event) => setAppConfig((current) => ({ ...current, p2pNetworkName: event.target.value }))}
+                placeholder="例如 cloud-relay"
+              />
+            </label>
+            <label>
+              <span>网络密钥</span>
+              <input
+                type="password"
+                value={appConfig.p2pNetworkSecret || ""}
+                onChange={(event) => setAppConfig((current) => ({ ...current, p2pNetworkSecret: event.target.value }))}
+                placeholder="用于同一 EasyTier 网络鉴权"
+              />
+            </label>
+            <label>
+              <span>初始对等节点</span>
+              <textarea
+                rows={3}
+                value={appConfig.p2pPeerUrl || ""}
+                onChange={(event) => setAppConfig((current) => ({ ...current, p2pPeerUrl: event.target.value }))}
+                placeholder={defaultPublisherP2PPeerUrl}
+              />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={appConfig.p2pUseDhcp !== false}
+                onChange={(event) => setAppConfig((current) => ({ ...current, p2pUseDhcp: event.target.checked }))}
+              />
+              <span>使用 DHCP 自动分配虚拟 IPv4</span>
+            </label>
+            <label>
+              <span>固定虚拟 IPv4</span>
+              <input
+                value={appConfig.p2pVirtualIpv4 || ""}
+                onChange={(event) => setAppConfig((current) => ({ ...current, p2pVirtualIpv4: event.target.value }))}
+                placeholder="关闭 DHCP 时必填，例如 10.144.144.23"
+                disabled={appConfig.p2pUseDhcp !== false}
+              />
+            </label>
+            <div className="drawer-grid" style={{ marginTop: 0 }}>
+              <label>
+                <span>实例名</span>
+                <input
+                  value={appConfig.p2pInstanceName || ""}
+                  onChange={(event) => setAppConfig((current) => ({ ...current, p2pInstanceName: event.target.value }))}
+                  placeholder="默认 cloud-relay-publisher"
+                />
+              </label>
+              <label>
+                <span>主机名</span>
+                <input
+                  value={appConfig.p2pHostname || ""}
+                  onChange={(event) => setAppConfig((current) => ({ ...current, p2pHostname: event.target.value }))}
+                  placeholder="可选，便于识别服务端节点"
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 20 }}>
+          <div className="section-title" style={{ marginBottom: 8 }}><i className="fas fa-project-diagram" /> 当前设备的 P2P 服务候选</div>
+          <div className="surface-banner info" style={{ marginTop: 0 }}>
+            这里先把 `transportPolicy=p2p_preferred` 的规则单独拎出来。下一阶段会继续把服务级元数据、独立服务工作台和统计页接上。
+          </div>
+          <div className="table-wrapper" style={{ marginTop: 12 }}>
+            <table>
+              <thead><tr><th>规则名称</th><th>目标服务</th><th>传输策略</th><th>运行路径</th><th>运行状态</th></tr></thead>
+              <tbody>
+                {p2pCandidateRules.length === 0 ? (
+                  <tr><td colSpan={5}>当前还没有 `p2p_preferred` 的发布规则</td></tr>
+                ) : p2pCandidateRules.map((item) => (
+                  <tr key={item.id}>
+                    <td>{item.name}</td>
+                    <td>{item.targetHost}:{item.targetPort}</td>
+                    <td>{item.transportPolicy}</td>
+                    <td>{item.runtimePath || "未上报"}</td>
+                    <td>{item.runtimeState || "未上报"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   function renderSettingsPage() {
     return (
       <div className="page-panel active">
@@ -2193,6 +2552,8 @@ export default function App() {
         return renderPublishPage();
       case "diagnostics":
         return renderDiagnosticsPage();
+      case "p2p":
+        return renderP2PPage();
       case "settings":
         return renderSettingsPage();
       default:
