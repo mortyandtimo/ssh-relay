@@ -38,6 +38,34 @@ func TestCloneHTTPRequestForRelayAddsForwardedHeaders(t *testing.T) {
 	}
 }
 
+func TestCloneHTTPRequestForRelayAppendsOnlyNewPeerToForwardedFor(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "https://img.020309.top/admin/images?page=2", nil)
+	req.RemoteAddr = "10.20.30.40:54321"
+	req.Host = "img.020309.top"
+	req.Header.Set("X-Forwarded-For", "198.51.100.10, 203.0.113.8")
+
+	route := types.TunnelSpec{TargetHost: "127.0.0.1", TargetPort: 8181}
+	upstream := cloneHTTPRequestForRelay(req, route)
+
+	if got := upstream.Header.Get("X-Forwarded-For"); got != "198.51.100.10, 203.0.113.8, 10.20.30.40" {
+		t.Fatalf("expected forwarded chain with appended peer ip, got %q", got)
+	}
+}
+
+func TestCloneHTTPRequestForRelayDoesNotDuplicateExistingPeerInForwardedFor(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "https://img.020309.top/admin/images?page=2", nil)
+	req.RemoteAddr = "10.20.30.40:54321"
+	req.Host = "img.020309.top"
+	req.Header.Set("X-Forwarded-For", "198.51.100.10, 10.20.30.40")
+
+	route := types.TunnelSpec{TargetHost: "127.0.0.1", TargetPort: 8181}
+	upstream := cloneHTTPRequestForRelay(req, route)
+
+	if got := upstream.Header.Get("X-Forwarded-For"); got != "198.51.100.10, 10.20.30.40" {
+		t.Fatalf("expected forwarded chain without duplicate peer ip, got %q", got)
+	}
+}
+
 func TestCopyHTTPResponseRewritesLocationAndRefreshOnly(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "https://img.020309.top/admin/settings", nil)
 	req.Host = "img.020309.top"

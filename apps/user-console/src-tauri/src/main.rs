@@ -1329,18 +1329,41 @@ fn rewrite_workspace_refresh_header(
     trimmed.to_string()
 }
 
-fn should_strip_workspace_cookie_domain(attr_value: &str, upstream_host: &str) -> bool {
-    let normalized = attr_value.trim().trim_start_matches('.');
-    normalized.eq_ignore_ascii_case(upstream_host)
+fn normalize_workspace_host(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('.')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase()
+}
+
+fn is_local_workspace_loopback(bind_host: &str, listen_port: u16) -> bool {
+    if listen_port == 0 {
+        return false;
+    }
+    matches!(
+        normalize_workspace_host(bind_host).as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
+fn should_strip_workspace_cookie_domain(attr_value: &str, bind_host: &str, listen_port: u16) -> bool {
+    if !is_local_workspace_loopback(bind_host, listen_port) {
+        return false;
+    }
+    let normalized_domain = normalize_workspace_host(attr_value);
+    let normalized_bind_host = normalize_workspace_host(bind_host);
+    !normalized_domain.is_empty() && normalized_domain != normalized_bind_host
 }
 
 fn should_strip_workspace_cookie_secure(bind_host: &str, listen_port: u16) -> bool {
-    bind_host.eq_ignore_ascii_case("127.0.0.1") && listen_port > 0
+    is_local_workspace_loopback(bind_host, listen_port)
 }
 
 fn rewrite_workspace_set_cookie_header(
     value: &str,
-    upstream_host: &str,
+    _upstream_host: &str,
     bind_host: &str,
     listen_port: u16,
 ) -> String {
@@ -1358,7 +1381,7 @@ fn rewrite_workspace_set_cookie_header(
         }
         if let Some((name, attr_value)) = trimmed.split_once('=') {
             if name.trim().eq_ignore_ascii_case("domain")
-                && should_strip_workspace_cookie_domain(attr_value, upstream_host)
+                && should_strip_workspace_cookie_domain(attr_value, bind_host, listen_port)
             {
                 continue;
             }
@@ -3261,6 +3284,53 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_workspace_cookie_header_strips_public_domain_for_local_workspace() {
+        let rewritten = rewrite_workspace_set_cookie_header(
+            "laravel_session=test; Path=/; Domain=img.020309.top; Secure; HttpOnly",
+            "img.020309.top",
+            "127.0.0.1",
+            39091,
+        );
+
+        assert_eq!(rewritten, "laravel_session=test; Path=/; HttpOnly");
+    }
+
+    #[test]
+    fn rewrite_workspace_cookie_header_keeps_matching_local_domain() {
+        let rewritten = rewrite_workspace_set_cookie_header(
+            "laravel_session=test; Path=/; Domain=127.0.0.1; HttpOnly",
+            "img.020309.top",
+            "127.0.0.1",
+            39091,
+        );
+
+        assert_eq!(
+            rewritten,
+            "laravel_session=test; Path=/; Domain=127.0.0.1; HttpOnly"
+        );
+    }
+
+    #[test]
+    fn rewrite_workspace_cookie_header_keeps_public_domain_outside_local_workspace() {
+        let rewritten = rewrite_workspace_set_cookie_header(
+            "laravel_session=test; Path=/; Domain=img.020309.top; Secure; HttpOnly",
+            "img.020309.top",
+            "10.126.126.2",
+            8181,
+        );
+
+        assert_eq!(
+            rewritten,
+            "laravel_session=test; Path=/; Domain=img.020309.top; Secure; HttpOnly"
+        );
+    }
 }
 
 fn main() {

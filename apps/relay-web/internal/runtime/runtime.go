@@ -34,8 +34,8 @@ type standbyConn struct {
 	registeredAt time.Time
 }
 
-func (s standbyConn) age() time.Duration     { return time.Since(s.registeredAt) }
-func (s standbyConn) expired() bool          { return s.age() > standbyConnMaxAge }
+func (s standbyConn) age() time.Duration { return time.Since(s.registeredAt) }
+func (s standbyConn) expired() bool      { return s.age() > standbyConnMaxAge }
 
 func (s standbyConn) prepareForStart() error {
 	buf := make([]byte, 1)
@@ -553,25 +553,51 @@ func setForwardedHeaders(header http.Header, r *http.Request) {
 	proto := requestScheme(r)
 	host := canonicalForwardedHost(r.Host)
 	port := forwardedPort(proto, r.Host)
-	clientIP := clientIPFromRequest(r)
+	peerIP := peerIPFromRequest(r)
 
-	appendForwardedHeaderValues(header, clientIP)
+	appendForwardedHeaderValues(header, peerIP)
 	header.Set("X-Forwarded-Proto", proto)
 	header.Set("X-Forwarded-Host", host)
 	header.Set("X-Forwarded-Port", port)
-	header.Set("Forwarded", buildForwardedHeader(clientIP, proto, host))
+	header.Set("Forwarded", buildForwardedHeader(peerIP, proto, host))
 }
 
-func appendForwardedHeaderValues(header http.Header, clientIP string) {
+func appendForwardedHeaderValues(header http.Header, peerIP string) {
 	existing := strings.TrimSpace(header.Get("X-Forwarded-For"))
-	switch {
-	case existing == "":
-		header.Set("X-Forwarded-For", clientIP)
-	case clientIP == "":
-		header.Set("X-Forwarded-For", existing)
-	default:
-		header.Set("X-Forwarded-For", existing+", "+clientIP)
+	if existing == "" {
+		if peerIP != "" {
+			header.Set("X-Forwarded-For", peerIP)
+		}
+		return
 	}
+	if peerIP == "" {
+		header.Set("X-Forwarded-For", existing)
+		return
+	}
+
+	parts := splitForwardedForValues(existing)
+	if len(parts) == 0 {
+		header.Set("X-Forwarded-For", peerIP)
+		return
+	}
+	if strings.EqualFold(parts[len(parts)-1], peerIP) {
+		header.Set("X-Forwarded-For", strings.Join(parts, ", "))
+		return
+	}
+	parts = append(parts, peerIP)
+	header.Set("X-Forwarded-For", strings.Join(parts, ", "))
+}
+
+func splitForwardedForValues(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 func requestScheme(r *http.Request) string {
@@ -604,13 +630,7 @@ func forwardedPort(proto, host string) string {
 	return "80"
 }
 
-func clientIPFromRequest(r *http.Request) string {
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		parts := strings.Split(forwarded, ",")
-		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
-			return strings.TrimSpace(parts[0])
-		}
-	}
+func peerIPFromRequest(r *http.Request) string {
 	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
 	if err == nil && host != "" {
 		return host
