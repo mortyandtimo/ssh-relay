@@ -3290,12 +3290,171 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 mod tests {
     use super::*;
 
+    fn decode_header(bytes: Vec<u8>) -> String {
+        String::from_utf8(bytes).expect("header should be utf-8")
+    }
+
+    fn sample_proxy_spec(bind_host: &str, listen_port: u16) -> ServiceWorkspaceProxySpec {
+        ServiceWorkspaceProxySpec {
+            key: "gallery".to_string(),
+            bind_host: bind_host.to_string(),
+            listen_port,
+            upstream_scheme: "http".to_string(),
+            upstream_host: "img.020309.top".to_string(),
+            upstream_port: 8181,
+            launch_path_and_query: "/dashboard".to_string(),
+            log_path: PathBuf::new(),
+        }
+    }
+
     #[test]
-    fn rewrite_workspace_cookie_header_strips_public_domain_for_local_workspace() {
+    fn rewrite_proxy_request_header_rewrites_origin_referer_and_forwarded_headers() {
+        let raw = concat!(
+            "POST /login HTTP/1.1\r\n",
+            "Host: 127.0.0.1:39091\r\n",
+            "Origin: http://127.0.0.1:39091\r\n",
+            "Referer: http://127.0.0.1:39091/login\r\n",
+            "Content-Length: 27\r\n",
+            "Connection: keep-alive\r\n",
+            "\r\n"
+        );
+        let (rewritten, content_length, chunked) = rewrite_proxy_request_header(
+            raw.as_bytes(),
+            "127.0.0.1",
+            39091,
+            "10.126.126.2",
+            8181,
+            "10.126.126.2:8181",
+            Some(std::net::SocketAddr::from(([127, 0, 0, 1], 54321))),
+        )
+        .expect("request header should rewrite");
+        let text = decode_header(rewritten);
+
+        assert!(text.starts_with("POST /login HTTP/1.1\r\n"));
+        assert!(text.contains("\r\nHost: 10.126.126.2:8181\r\n"));
+        assert!(text.contains(&format!(
+            "\r\nOrigin: {}\r\n",
+            rewrite_workspace_request_absolute_url(
+                "http://127.0.0.1:39091",
+                "127.0.0.1",
+                39091,
+                "10.126.126.2",
+                8181,
+            )
+        )));
+        assert!(text.contains(&format!(
+            "\r\nReferer: {}\r\n",
+            rewrite_workspace_request_absolute_url(
+                "http://127.0.0.1:39091/login",
+                "127.0.0.1",
+                39091,
+                "10.126.126.2",
+                8181,
+            )
+        )));
+        assert!(text.contains("\r\nConnection: close\r\n"));
+        assert!(text.contains("\r\nX-Forwarded-For: 127.0.0.1\r\n"));
+        assert!(text.contains("\r\nX-Forwarded-Host: 127.0.0.1:39091\r\n"));
+        assert!(text.contains("\r\nX-Forwarded-Proto: http\r\n"));
+        assert!(text.contains("\r\nX-Forwarded-Port: 39091\r\n"));
+        assert!(
+            text.contains("\r\nForwarded: for=\"127.0.0.1\";proto=\"http\";host=\"127.0.0.1:39091\"\r\n")
+        );
+        assert_eq!(content_length, Some(27));
+        assert!(!chunked);
+    }
+
+    #[test]
+    fn rewrite_proxy_request_header_appends_existing_forwarded_chain() {
+        let raw = concat!(
+            "GET /dashboard HTTP/1.1\r\n",
+            "Host: 127.0.0.1:39091\r\n",
+            "X-Forwarded-For: 198.51.100.10, 203.0.113.8\r\n",
+            "X-Forwarded-Host: stale.example\r\n",
+            "X-Forwarded-Proto: https\r\n",
+            "X-Forwarded-Port: 443\r\n",
+            "Forwarded: for=\"198.51.100.10\";proto=\"https\";host=\"stale.example\"\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "\r\n"
+        );
+        let (rewritten, content_length, chunked) = rewrite_proxy_request_header(
+            raw.as_bytes(),
+            "127.0.0.1",
+            39091,
+            "10.126.126.2",
+            8181,
+            "10.126.126.2:8181",
+            Some(std::net::SocketAddr::from(([127, 0, 0, 1], 54321))),
+        )
+        .expect("request header should rewrite");
+        let text = decode_header(rewritten);
+
+        assert!(
+            text.contains("\r\nX-Forwarded-For: 198.51.100.10, 203.0.113.8, 127.0.0.1\r\n")
+        );
+        assert!(text.contains("\r\nX-Forwarded-Host: 127.0.0.1:39091\r\n"));
+        assert!(text.contains("\r\nX-Forwarded-Proto: http\r\n"));
+        assert!(text.contains("\r\nX-Forwarded-Port: 39091\r\n"));
+        assert!(
+            text.contains("\r\nForwarded: for=\"127.0.0.1\";proto=\"http\";host=\"127.0.0.1:39091\"\r\n")
+        );
+        assert_eq!(content_length, None);
+        assert!(chunked);
+    }
+
+    #[test]
+    fn rewrite_proxy_response_header_rewrites_location_refresh_and_cookie() {
+        let raw = concat!(
+            "HTTP/1.1 302 Found\r\n",
+            "Location: http://img.020309.top:8181/dashboard\r\n",
+            "Refresh: 0;url=http://img.020309.top:8181/login\r\n",
+            "Set-Cookie: lsky_pro_session=test; Path=/; Domain=img.020309.top; Secure; HttpOnly\r\n",
+            "\r\n"
+        );
+        let rewritten = rewrite_proxy_response_header(raw.as_bytes(), &sample_proxy_spec("127.0.0.1", 39091))
+            .expect("response header should rewrite");
+        let text = decode_header(rewritten);
+
+        assert!(text.starts_with("HTTP/1.1 302 Found\r\n"));
+        assert!(text.contains("\r\nLocation: http://127.0.0.1:39091/dashboard\r\n"));
+        assert!(text.contains("\r\nRefresh: 0;url=http://127.0.0.1:39091/login\r\n"));
+        assert!(
+            text.contains("\r\nSet-Cookie: lsky_pro_session=test; Path=/; HttpOnly\r\n"),
+            "unexpected response header: {text}"
+        );
+        assert!(text.contains("\r\nConnection: close\r\n"));
+    }
+
+    #[test]
+    fn rewrite_workspace_cookie_header_strips_public_domain_for_127_loopback() {
         let rewritten = rewrite_workspace_set_cookie_header(
             "laravel_session=test; Path=/; Domain=img.020309.top; Secure; HttpOnly",
             "img.020309.top",
             "127.0.0.1",
+            39091,
+        );
+
+        assert_eq!(rewritten, "laravel_session=test; Path=/; HttpOnly");
+    }
+
+    #[test]
+    fn rewrite_workspace_cookie_header_strips_public_domain_for_localhost_loopback() {
+        let rewritten = rewrite_workspace_set_cookie_header(
+            "laravel_session=test; Path=/; Domain=img.020309.top; Secure; HttpOnly",
+            "img.020309.top",
+            "localhost",
+            39091,
+        );
+
+        assert_eq!(rewritten, "laravel_session=test; Path=/; HttpOnly");
+    }
+
+    #[test]
+    fn rewrite_workspace_cookie_header_strips_public_domain_for_ipv6_loopback() {
+        let rewritten = rewrite_workspace_set_cookie_header(
+            "laravel_session=test; Path=/; Domain=img.020309.top; Secure; HttpOnly",
+            "img.020309.top",
+            "::1",
             39091,
         );
 
