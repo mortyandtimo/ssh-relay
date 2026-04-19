@@ -366,6 +366,7 @@ func (s *Service) HandleProxyRequest(w http.ResponseWriter, r *http.Request) {
 	defer standby.conn.Close()
 
 	upstreamReq := cloneHTTPRequestForRelay(r, route)
+	log.Printf("web request %d forwarding host=%s proto=%s port=%s xff=%q target=%s:%d", reqID, strings.TrimSpace(upstreamReq.Header.Get("X-Forwarded-Host")), strings.TrimSpace(upstreamReq.Header.Get("X-Forwarded-Proto")), strings.TrimSpace(upstreamReq.Header.Get("X-Forwarded-Port")), strings.TrimSpace(upstreamReq.Header.Get("X-Forwarded-For")), route.TargetHost, route.TargetPort)
 	if err := upstreamReq.Write(standby.conn); err != nil {
 		log.Printf("web request %d write upstream request failed for tunnel %s: %v", reqID, route.ID, err)
 		http.Error(w, "web relay write failed", http.StatusBadGateway)
@@ -378,7 +379,10 @@ func (s *Service) HandleProxyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	copyHTTPResponse(w, resp)
+	rewriteReport := copyHTTPResponse(w, r, route, resp)
+	if rewriteReport.LocationOriginal != "" || rewriteReport.RefreshOriginal != "" {
+		log.Printf("web request %d response rewrite location=%q -> %q refresh=%q -> %q", reqID, rewriteReport.LocationOriginal, rewriteReport.LocationRewritten, rewriteReport.RefreshOriginal, rewriteReport.RefreshRewritten)
+	}
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		log.Printf("web request %d copy response body failed for tunnel %s: %v", reqID, route.ID, err)
 		return
@@ -498,19 +502,195 @@ func cloneHTTPRequestForRelay(r *http.Request, route types.TunnelSpec) *http.Req
 	out.RequestURI = ""
 	out.Host = fmt.Sprintf("%s:%d", route.TargetHost, route.TargetPort)
 	out.Close = true
+	out.Header = cloneHeader(r.Header)
+	out.Header.Set("Host", out.Host)
+	out.Header.Set("Connection", "close")
+	out.Header.Del("Proxy-Connection")
+	out.Header.Del("Upgrade")
+	setForwardedHeaders(out.Header, r)
 	return out
 }
 
-func copyHTTPResponse(w http.ResponseWriter, resp *http.Response) {
+type responseRewriteReport struct {
+	LocationOriginal  string
+	LocationRewritten string
+	RefreshOriginal   string
+	RefreshRewritten  string
+}
+
+func copyHTTPResponse(w http.ResponseWriter, originalReq *http.Request, route types.TunnelSpec, resp *http.Response) responseRewriteReport {
+	report := responseRewriteReport{}
 	for key, values := range resp.Header {
 		if isHopByHopHeader(key) {
 			continue
 		}
 		for _, value := range values {
-			w.Header().Add(key, value)
+			rewritten := rewriteResponseHeaderValue(key, value, originalReq, route)
+			if strings.EqualFold(key, "Location") && value != rewritten {
+				report.LocationOriginal = value
+				report.LocationRewritten = rewritten
+			}
+			if strings.EqualFold(key, "Refresh") && value != rewritten {
+				report.RefreshOriginal = value
+				report.RefreshRewritten = rewritten
+			}
+			w.Header().Add(key, rewritten)
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
+	return report
+}
+
+func cloneHeader(header http.Header) http.Header {
+	cloned := make(http.Header, len(header))
+	for key, values := range header {
+		cloned[key] = append([]string(nil), values...)
+	}
+	return cloned
+}
+
+func setForwardedHeaders(header http.Header, r *http.Request) {
+	proto := requestScheme(r)
+	host := canonicalForwardedHost(r.Host)
+	port := forwardedPort(proto, r.Host)
+	clientIP := clientIPFromRequest(r)
+
+	appendForwardedHeaderValues(header, clientIP)
+	header.Set("X-Forwarded-Proto", proto)
+	header.Set("X-Forwarded-Host", host)
+	header.Set("X-Forwarded-Port", port)
+	header.Set("Forwarded", buildForwardedHeader(clientIP, proto, host))
+}
+
+func appendForwardedHeaderValues(header http.Header, clientIP string) {
+	existing := strings.TrimSpace(header.Get("X-Forwarded-For"))
+	switch {
+	case existing == "":
+		header.Set("X-Forwarded-For", clientIP)
+	case clientIP == "":
+		header.Set("X-Forwarded-For", existing)
+	default:
+		header.Set("X-Forwarded-For", existing+", "+clientIP)
+	}
+}
+
+func requestScheme(r *http.Request) string {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") || r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func canonicalForwardedHost(host string) string {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" {
+		return ""
+	}
+	if parsed, err := url.Parse("http://" + trimmed); err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	return trimmed
+}
+
+func forwardedPort(proto, host string) string {
+	if parsed, err := url.Parse("http://" + strings.TrimSpace(host)); err == nil {
+		if port := parsed.Port(); port != "" {
+			return port
+		}
+	}
+	if proto == "https" {
+		return "443"
+	}
+	return "80"
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+			return strings.TrimSpace(parts[0])
+		}
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func buildForwardedHeader(clientIP, proto, host string) string {
+	parts := make([]string, 0, 3)
+	if clientIP != "" {
+		parts = append(parts, fmt.Sprintf("for=%q", clientIP))
+	}
+	if proto != "" {
+		parts = append(parts, fmt.Sprintf("proto=%q", proto))
+	}
+	if host != "" {
+		parts = append(parts, fmt.Sprintf("host=%q", host))
+	}
+	return strings.Join(parts, ";")
+}
+
+func rewriteResponseHeaderValue(name, value string, originalReq *http.Request, route types.TunnelSpec) string {
+	trimmed := strings.TrimSpace(value)
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "location":
+		return rewriteAbsoluteURLToOriginalOrigin(trimmed, originalReq, route)
+	case "refresh":
+		return rewriteRefreshHeader(trimmed, originalReq, route)
+	default:
+		return value
+	}
+}
+
+func rewriteAbsoluteURLToOriginalOrigin(value string, originalReq *http.Request, route types.TunnelSpec) string {
+	if value == "" {
+		return value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || !parsed.IsAbs() {
+		return value
+	}
+	if !sameUpstreamAuthority(parsed, route) {
+		return value
+	}
+	rewritten := *parsed
+	rewritten.Scheme = requestScheme(originalReq)
+	rewritten.Host = originalReq.Host
+	return rewritten.String()
+}
+
+func rewriteRefreshHeader(value string, originalReq *http.Request, route types.TunnelSpec) string {
+	if value == "" {
+		return value
+	}
+	lower := strings.ToLower(value)
+	idx := strings.Index(lower, "url=")
+	if idx < 0 {
+		return value
+	}
+	prefix := value[:idx+4]
+	target := strings.TrimSpace(value[idx+4:])
+	return prefix + rewriteAbsoluteURLToOriginalOrigin(target, originalReq, route)
+}
+
+func sameUpstreamAuthority(parsed *url.URL, route types.TunnelSpec) bool {
+	if parsed == nil {
+		return false
+	}
+	if !strings.EqualFold(parsed.Hostname(), strings.TrimSpace(route.TargetHost)) {
+		return false
+	}
+	parsedPort := parsed.Port()
+	if parsedPort == "" {
+		if strings.EqualFold(parsed.Scheme, "https") {
+			parsedPort = "443"
+		} else {
+			parsedPort = "80"
+		}
+	}
+	return parsedPort == fmt.Sprintf("%d", route.TargetPort)
 }
 
 func isHopByHopHeader(key string) bool {

@@ -1089,7 +1089,7 @@ fn write_workspace_response_headers(
             "set-cookie" => format!(
                 "{}: {}\r\n",
                 name.as_str(),
-                rewrite_workspace_set_cookie_header(value_str, &spec.upstream_host)
+                rewrite_workspace_set_cookie_header(value_str, &spec.upstream_host, &spec.bind_host, spec.listen_port)
             ),
             _ => format!("{}: {}\r\n", name.as_str(), value_str),
         };
@@ -1122,6 +1122,7 @@ fn rewrite_proxy_request_header(
     upstream_host: &str,
     upstream_port: u16,
     upstream_authority: &str,
+    client_addr: Option<std::net::SocketAddr>,
 ) -> io::Result<(Vec<u8>, Option<usize>, bool)> {
     let header_text = String::from_utf8_lossy(header);
     let mut lines = header_text.split("\r\n");
@@ -1137,8 +1138,16 @@ fn rewrite_proxy_request_header(
     rebuilt.push(request_line.to_string());
     let mut has_host = false;
     let mut has_connection = false;
+    let mut has_forwarded_for = false;
+    let mut has_forwarded_host = false;
+    let mut has_forwarded_proto = false;
+    let mut has_forwarded_port = false;
+    let mut has_forwarded = false;
     let mut content_length = None;
     let mut chunked = false;
+    let client_ip = client_addr
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
 
     for line in lines {
         if line.is_empty() {
@@ -1167,6 +1176,34 @@ fn rewrite_proxy_request_header(
                     has_connection = true;
                     rebuilt.push("Connection: close".to_string());
                 }
+                "x-forwarded-for" => {
+                    has_forwarded_for = true;
+                    let merged = if value.is_empty() {
+                        client_ip.clone()
+                    } else {
+                        format!("{}, {}", value, client_ip)
+                    };
+                    rebuilt.push(format!("X-Forwarded-For: {}", merged));
+                }
+                "x-forwarded-host" => {
+                    has_forwarded_host = true;
+                    rebuilt.push(format!("X-Forwarded-Host: {}:{}", local_host, local_port));
+                }
+                "x-forwarded-proto" => {
+                    has_forwarded_proto = true;
+                    rebuilt.push("X-Forwarded-Proto: http".to_string());
+                }
+                "x-forwarded-port" => {
+                    has_forwarded_port = true;
+                    rebuilt.push(format!("X-Forwarded-Port: {}", local_port));
+                }
+                "forwarded" => {
+                    has_forwarded = true;
+                    rebuilt.push(format!(
+                        "Forwarded: for=\"{}\";proto=\"http\";host=\"{}:{}\"",
+                        client_ip, local_host, local_port
+                    ));
+                }
                 "proxy-connection" => {}
                 "content-length" => {
                     content_length = value.parse::<usize>().ok();
@@ -1188,6 +1225,24 @@ fn rewrite_proxy_request_header(
     }
     if !has_connection {
         rebuilt.push("Connection: close".to_string());
+    }
+    if !has_forwarded_for {
+        rebuilt.push(format!("X-Forwarded-For: {}", client_ip));
+    }
+    if !has_forwarded_host {
+        rebuilt.push(format!("X-Forwarded-Host: {}:{}", local_host, local_port));
+    }
+    if !has_forwarded_proto {
+        rebuilt.push("X-Forwarded-Proto: http".to_string());
+    }
+    if !has_forwarded_port {
+        rebuilt.push(format!("X-Forwarded-Port: {}", local_port));
+    }
+    if !has_forwarded {
+        rebuilt.push(format!(
+            "Forwarded: for=\"{}\";proto=\"http\";host=\"{}:{}\"",
+            client_ip, local_host, local_port
+        ));
     }
     rebuilt.push(String::new());
     rebuilt.push(String::new());
@@ -1274,7 +1329,21 @@ fn rewrite_workspace_refresh_header(
     trimmed.to_string()
 }
 
-fn rewrite_workspace_set_cookie_header(value: &str, upstream_host: &str) -> String {
+fn should_strip_workspace_cookie_domain(attr_value: &str, upstream_host: &str) -> bool {
+    let normalized = attr_value.trim().trim_start_matches('.');
+    normalized.eq_ignore_ascii_case(upstream_host)
+}
+
+fn should_strip_workspace_cookie_secure(bind_host: &str, listen_port: u16) -> bool {
+    bind_host.eq_ignore_ascii_case("127.0.0.1") && listen_port > 0
+}
+
+fn rewrite_workspace_set_cookie_header(
+    value: &str,
+    upstream_host: &str,
+    bind_host: &str,
+    listen_port: u16,
+) -> String {
     let mut parts = value.split(';');
     let mut rebuilt = Vec::new();
     if let Some(first) = parts.next() {
@@ -1282,15 +1351,14 @@ fn rewrite_workspace_set_cookie_header(value: &str, upstream_host: &str) -> Stri
     }
     for part in parts {
         let trimmed = part.trim();
-        if trimmed.eq_ignore_ascii_case("secure") {
+        if trimmed.eq_ignore_ascii_case("secure")
+            && should_strip_workspace_cookie_secure(bind_host, listen_port)
+        {
             continue;
         }
         if let Some((name, attr_value)) = trimmed.split_once('=') {
             if name.trim().eq_ignore_ascii_case("domain")
-                && attr_value
-                    .trim()
-                    .trim_start_matches('.')
-                    .eq_ignore_ascii_case(upstream_host)
+                && should_strip_workspace_cookie_domain(attr_value, upstream_host)
             {
                 continue;
             }
@@ -1351,7 +1419,7 @@ fn rewrite_proxy_response_header(
                 "set-cookie" => rebuilt.push(format!(
                     "{}: {}",
                     name.trim(),
-                    rewrite_workspace_set_cookie_header(value, &spec.upstream_host)
+                    rewrite_workspace_set_cookie_header(value, &spec.upstream_host, &spec.bind_host, spec.listen_port)
                 )),
                 "connection" => {
                     has_connection = true;
@@ -1425,6 +1493,7 @@ fn bridge_workspace_proxy_connection(
         let _ = incoming.set_nodelay(true);
         let _ = outgoing.set_nodelay(true);
 
+        let client_addr = incoming.peer_addr().ok();
         let (rewritten_request_header, content_length, chunked) = rewrite_proxy_request_header(
             &request_header,
             &spec.bind_host,
@@ -1432,6 +1501,7 @@ fn bridge_workspace_proxy_connection(
             &spec.upstream_host,
             spec.upstream_port,
             &upstream_authority,
+            client_addr,
         )?;
         outgoing.write_all(&rewritten_request_header)?;
         copy_http_body(
