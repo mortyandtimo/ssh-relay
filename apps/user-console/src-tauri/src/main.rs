@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -42,6 +42,9 @@ const USER_NODE_HEARTBEAT_SEC: u64 = 30;
 const WORKSPACE_PROXY_BIND_HOST: &str = "127.0.0.1";
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const WORKSPACE_PROXY_LOG_FILE: &str = "workspace-proxy.log";
+const WORKSPACE_PROXY_PORT_MAP_FILE: &str = "workspace-proxy-ports.json";
+const WORKSPACE_PROXY_PORT_BASE: u16 = 36000;
+const WORKSPACE_PROXY_PORT_SPAN: u16 = 4096;
 
 static WORKSPACE_PROXY_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -150,6 +153,12 @@ struct ServiceWorkspaceProxyHandle {
     spec: ServiceWorkspaceProxySpec,
     shutdown: Sender<()>,
     join: Option<JoinHandle<()>>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct WorkspaceProxyPortMapFile {
+    #[serde(default)]
+    ports: HashMap<String, u16>,
 }
 
 struct ParsedWorkspaceRequest {
@@ -709,6 +718,76 @@ fn workspace_proxy_spec_from_url(
     })
 }
 
+fn stable_workspace_port_seed(key: &str) -> u16 {
+    let mut hash = 2166136261_u32;
+    for byte in key.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    (hash % WORKSPACE_PROXY_PORT_SPAN as u32) as u16
+}
+
+fn workspace_proxy_candidate_port(seed: u16, step: u16) -> u16 {
+    WORKSPACE_PROXY_PORT_BASE
+        + ((seed as u32 + step as u32) % WORKSPACE_PROXY_PORT_SPAN as u32) as u16
+}
+
+fn can_bind_workspace_proxy_port(bind_host: &str, port: u16) -> bool {
+    if port == 0 {
+        return false;
+    }
+    TcpListener::bind(socket_addr(bind_host, port)).is_ok()
+}
+
+fn allocate_workspace_proxy_port(
+    app: &AppHandle,
+    key: &str,
+    bind_host: &str,
+) -> Result<u16, String> {
+    let mut data = read_workspace_proxy_port_map_file(app)?;
+
+    if let Some(existing_port) = data.ports.get(key).copied() {
+        let range_end = WORKSPACE_PROXY_PORT_BASE.saturating_add(WORKSPACE_PROXY_PORT_SPAN);
+        if existing_port >= WORKSPACE_PROXY_PORT_BASE
+            && existing_port < range_end
+            && can_bind_workspace_proxy_port(bind_host, existing_port)
+        {
+            return Ok(existing_port);
+        }
+    }
+
+    let reserved_ports = data
+        .ports
+        .iter()
+        .filter(|(mapped_key, _)| mapped_key.as_str() != key)
+        .map(|(_, port)| *port)
+        .collect::<HashSet<_>>();
+    let seed = stable_workspace_port_seed(key);
+
+    for step in 0..WORKSPACE_PROXY_PORT_SPAN {
+        let candidate = workspace_proxy_candidate_port(seed, step);
+        if reserved_ports.contains(&candidate) {
+            continue;
+        }
+        if can_bind_workspace_proxy_port(bind_host, candidate) {
+            data.ports.insert(key.to_string(), candidate);
+            write_workspace_proxy_port_map_file(app, &data)?;
+            return Ok(candidate);
+        }
+    }
+
+    for step in 0..WORKSPACE_PROXY_PORT_SPAN {
+        let candidate = workspace_proxy_candidate_port(seed, step);
+        if can_bind_workspace_proxy_port(bind_host, candidate) {
+            data.ports.insert(key.to_string(), candidate);
+            write_workspace_proxy_port_map_file(app, &data)?;
+            return Ok(candidate);
+        }
+    }
+
+    Err("本地工作台代理没有可用固定端口".to_string())
+}
+
 fn stop_service_workspace_proxy(handle: ServiceWorkspaceProxyHandle) {
     let _ = handle.shutdown.send(());
     if let Some(join) = handle.join {
@@ -1089,7 +1168,12 @@ fn write_workspace_response_headers(
             "set-cookie" => format!(
                 "{}: {}\r\n",
                 name.as_str(),
-                rewrite_workspace_set_cookie_header(value_str, &spec.upstream_host, &spec.bind_host, spec.listen_port)
+                rewrite_workspace_set_cookie_header(
+                    value_str,
+                    &spec.upstream_host,
+                    &spec.bind_host,
+                    spec.listen_port
+                )
             ),
             _ => format!("{}: {}\r\n", name.as_str(), value_str),
         };
@@ -1348,7 +1432,11 @@ fn is_local_workspace_loopback(bind_host: &str, listen_port: u16) -> bool {
     )
 }
 
-fn should_strip_workspace_cookie_domain(attr_value: &str, bind_host: &str, listen_port: u16) -> bool {
+fn should_strip_workspace_cookie_domain(
+    attr_value: &str,
+    bind_host: &str,
+    listen_port: u16,
+) -> bool {
     if !is_local_workspace_loopback(bind_host, listen_port) {
         return false;
     }
@@ -1442,7 +1530,12 @@ fn rewrite_proxy_response_header(
                 "set-cookie" => rebuilt.push(format!(
                     "{}: {}",
                     name.trim(),
-                    rewrite_workspace_set_cookie_header(value, &spec.upstream_host, &spec.bind_host, spec.listen_port)
+                    rewrite_workspace_set_cookie_header(
+                        value,
+                        &spec.upstream_host,
+                        &spec.bind_host,
+                        spec.listen_port
+                    )
                 )),
                 "connection" => {
                     has_connection = true;
@@ -1622,7 +1715,7 @@ fn run_service_workspace_proxy(
 fn start_service_workspace_proxy(
     mut spec: ServiceWorkspaceProxySpec,
 ) -> Result<ServiceWorkspaceProxyHandle, String> {
-    let bind_addr = socket_addr(&spec.bind_host, 0);
+    let bind_addr = socket_addr(&spec.bind_host, spec.listen_port);
     let listener = TcpListener::bind(&bind_addr)
         .map_err(|err| format!("本地工作台代理监听失败 {bind_addr}: {err}"))?;
     listener
@@ -1657,9 +1750,9 @@ fn ensure_service_workspace_proxy(
         .map_err(|_| "工作台代理锁不可用".to_string())?;
 
     if let Some(existing) = handles.get(key) {
-        let mut expected = desired.clone();
-        expected.listen_port = existing.spec.listen_port;
-        if existing.spec == expected {
+        desired.listen_port = existing.spec.listen_port;
+        remember_workspace_proxy_port(app, key, desired.listen_port)?;
+        if existing.spec == desired {
             return Ok(format!(
                 "http://{}:{}{}",
                 existing.spec.bind_host,
@@ -1667,6 +1760,8 @@ fn ensure_service_workspace_proxy(
                 existing.spec.launch_path_and_query
             ));
         }
+    } else {
+        desired.listen_port = allocate_workspace_proxy_port(app, key, &desired.bind_host)?;
     }
 
     let old = handles.remove(key);
@@ -1986,6 +2081,14 @@ fn login_profiles_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("login-profiles.json"))
 }
 
+fn workspace_proxy_port_map_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|err| err.to_string())?
+        .join(WORKSPACE_PROXY_PORT_MAP_FILE))
+}
+
 fn ensure_config_dir(app: &AppHandle) -> Result<(), String> {
     let dir = app.path().app_config_dir().map_err(|err| err.to_string())?;
     fs::create_dir_all(dir).map_err(|err| err.to_string())
@@ -2004,6 +2107,35 @@ fn write_login_profiles_file(app: &AppHandle, data: &LoginProfilesFile) -> Resul
     let path = login_profiles_path(app)?;
     let content = serde_json::to_string_pretty(data).map_err(|err| err.to_string())?;
     fs::write(&path, content).map_err(|err| err.to_string())
+}
+
+fn read_workspace_proxy_port_map_file(
+    app: &AppHandle,
+) -> Result<WorkspaceProxyPortMapFile, String> {
+    let path = workspace_proxy_port_map_path(app)?;
+    if !path.exists() {
+        return Ok(WorkspaceProxyPortMapFile::default());
+    }
+    let content = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    serde_json::from_str(&content).map_err(|err| err.to_string())
+}
+
+fn write_workspace_proxy_port_map_file(
+    app: &AppHandle,
+    data: &WorkspaceProxyPortMapFile,
+) -> Result<(), String> {
+    let path = workspace_proxy_port_map_path(app)?;
+    let content = serde_json::to_string_pretty(data).map_err(|err| err.to_string())?;
+    fs::write(&path, content).map_err(|err| err.to_string())
+}
+
+fn remember_workspace_proxy_port(app: &AppHandle, key: &str, port: u16) -> Result<(), String> {
+    let mut data = read_workspace_proxy_port_map_file(app)?;
+    if data.ports.get(key).copied() == Some(port) {
+        return Ok(());
+    }
+    data.ports.insert(key.to_string(), port);
+    write_workspace_proxy_port_map_file(app, &data)
 }
 
 fn user_node_id_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -3289,6 +3421,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn decode_header(bytes: Vec<u8>) -> String {
         String::from_utf8(bytes).expect("header should be utf-8")
@@ -3357,9 +3490,9 @@ mod tests {
         assert!(text.contains("\r\nX-Forwarded-Host: 127.0.0.1:39091\r\n"));
         assert!(text.contains("\r\nX-Forwarded-Proto: http\r\n"));
         assert!(text.contains("\r\nX-Forwarded-Port: 39091\r\n"));
-        assert!(
-            text.contains("\r\nForwarded: for=\"127.0.0.1\";proto=\"http\";host=\"127.0.0.1:39091\"\r\n")
-        );
+        assert!(text.contains(
+            "\r\nForwarded: for=\"127.0.0.1\";proto=\"http\";host=\"127.0.0.1:39091\"\r\n"
+        ));
         assert_eq!(content_length, Some(27));
         assert!(!chunked);
     }
@@ -3389,15 +3522,13 @@ mod tests {
         .expect("request header should rewrite");
         let text = decode_header(rewritten);
 
-        assert!(
-            text.contains("\r\nX-Forwarded-For: 198.51.100.10, 203.0.113.8, 127.0.0.1\r\n")
-        );
+        assert!(text.contains("\r\nX-Forwarded-For: 198.51.100.10, 203.0.113.8, 127.0.0.1\r\n"));
         assert!(text.contains("\r\nX-Forwarded-Host: 127.0.0.1:39091\r\n"));
         assert!(text.contains("\r\nX-Forwarded-Proto: http\r\n"));
         assert!(text.contains("\r\nX-Forwarded-Port: 39091\r\n"));
-        assert!(
-            text.contains("\r\nForwarded: for=\"127.0.0.1\";proto=\"http\";host=\"127.0.0.1:39091\"\r\n")
-        );
+        assert!(text.contains(
+            "\r\nForwarded: for=\"127.0.0.1\";proto=\"http\";host=\"127.0.0.1:39091\"\r\n"
+        ));
         assert_eq!(content_length, None);
         assert!(chunked);
     }
@@ -3411,8 +3542,9 @@ mod tests {
             "Set-Cookie: lsky_pro_session=test; Path=/; Domain=img.020309.top; Secure; HttpOnly\r\n",
             "\r\n"
         );
-        let rewritten = rewrite_proxy_response_header(raw.as_bytes(), &sample_proxy_spec("127.0.0.1", 39091))
-            .expect("response header should rewrite");
+        let rewritten =
+            rewrite_proxy_response_header(raw.as_bytes(), &sample_proxy_spec("127.0.0.1", 39091))
+                .expect("response header should rewrite");
         let text = decode_header(rewritten);
 
         assert!(text.starts_with("HTTP/1.1 302 Found\r\n"));
@@ -3489,6 +3621,31 @@ mod tests {
             rewritten,
             "laravel_session=test; Path=/; Domain=img.020309.top; Secure; HttpOnly"
         );
+    }
+
+    #[test]
+    fn workspace_proxy_port_seed_is_stable_for_same_key() {
+        let seed = stable_workspace_port_seed("gallery");
+        let port = workspace_proxy_candidate_port(seed, 0);
+
+        assert_eq!(seed, stable_workspace_port_seed("gallery"));
+        assert!(port >= WORKSPACE_PROXY_PORT_BASE);
+        assert!(port < WORKSPACE_PROXY_PORT_BASE + WORKSPACE_PROXY_PORT_SPAN);
+    }
+
+    #[test]
+    fn workspace_proxy_candidate_port_skips_reserved_port() {
+        let seed = stable_workspace_port_seed("gallery");
+        let first = workspace_proxy_candidate_port(seed, 0);
+        let reserved = HashSet::from([first]);
+        let next = (0..WORKSPACE_PROXY_PORT_SPAN)
+            .map(|step| workspace_proxy_candidate_port(seed, step))
+            .find(|port| !reserved.contains(port))
+            .expect("should find non-reserved candidate");
+
+        assert_ne!(first, next);
+        assert!(next >= WORKSPACE_PROXY_PORT_BASE);
+        assert!(next < WORKSPACE_PROXY_PORT_BASE + WORKSPACE_PROXY_PORT_SPAN);
     }
 }
 
