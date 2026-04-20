@@ -30,6 +30,23 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) requireCertificateAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authorizeCertificateSync(r) {
+			ctx := context.WithValue(r.Context(), certSyncContextKey, true)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+		user, err := s.authenticate(r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, err.Error())
+			return
+		}
+		ctx := context.WithValue(r.Context(), authUserKey, user)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 func (s *Server) authenticate(r *http.Request) (store.User, error) {
 	claims, err := s.readAccessClaims(r)
 	if err != nil {
@@ -45,9 +62,22 @@ func (s *Server) authenticate(r *http.Request) (store.User, error) {
 	return user, nil
 }
 
+func (s *Server) authorizeCertificateSync(r *http.Request) bool {
+	if s.certSyncSecret == "" {
+		return false
+	}
+	secret := strings.TrimSpace(r.Header.Get("X-Cert-Sync-Secret"))
+	return secret != "" && secret == s.certSyncSecret
+}
+
 func userFromContext(ctx context.Context) (store.User, bool) {
 	u, ok := ctx.Value(authUserKey).(store.User)
 	return u, ok
+}
+
+func certSyncFromContext(ctx context.Context) bool {
+	value, ok := ctx.Value(certSyncContextKey).(bool)
+	return ok && value
 }
 
 // ─── Session / Cookie management ───

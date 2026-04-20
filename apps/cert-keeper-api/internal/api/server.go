@@ -25,6 +25,7 @@ const (
 type contextKey string
 
 const authUserKey contextKey = "auth-user"
+const certSyncContextKey contextKey = "cert-sync"
 
 type authClaims struct {
 	UserID string
@@ -46,6 +47,7 @@ type Config struct {
 	AllowedOrigins  string
 	CookiesSecure   bool
 	BootstrapSecret string
+	CertSyncSecret  string
 	DomainBackends  string
 	SkipDomains     string
 }
@@ -63,6 +65,7 @@ type Server struct {
 	accessTTL       time.Duration
 	refreshTTL      time.Duration
 	bootstrapSecret string
+	certSyncSecret  string
 	allowedOrigins  map[string]struct{}
 	cookiesSecure   bool
 	renewCheckEvery time.Duration
@@ -90,6 +93,7 @@ func NewServer(cfg Config) (*Server, error) {
 		accessTTL:       15 * time.Minute,
 		refreshTTL:      7 * 24 * time.Hour,
 		bootstrapSecret: strings.TrimSpace(cfg.BootstrapSecret),
+		certSyncSecret:  strings.TrimSpace(cfg.CertSyncSecret),
 		allowedOrigins:  parseOrigins(cfg.AllowedOrigins),
 		cookiesSecure:   cfg.CookiesSecure,
 		renewCheckEvery: 6 * time.Hour,
@@ -130,10 +134,10 @@ func (s *Server) routes() {
 	s.mux.Handle("/api/auth/me", s.requireAuth(http.HandlerFunc(s.handleAuthMe)))
 
 	// Certificates
-	s.mux.Handle("/api/certificates", s.requireAuth(http.HandlerFunc(s.handleCertificates)))
+	s.mux.Handle("/api/certificates", s.requireCertificateAccess(http.HandlerFunc(s.handleCertificates)))
 	s.mux.Handle("/api/certificates/auto-issue", s.requireAuth(http.HandlerFunc(s.handleAutoIssue)))
 	s.mux.Handle("/api/certificates/dns-check", s.requireAuth(http.HandlerFunc(s.handleDNSCheck)))
-	s.mux.Handle("/api/certificates/", s.requireAuth(http.HandlerFunc(s.handleCertificateByID)))
+	s.mux.Handle("/api/certificates/", s.requireCertificateAccess(http.HandlerFunc(s.handleCertificateByID)))
 }
 
 func (s *Server) startRenewWorker() {

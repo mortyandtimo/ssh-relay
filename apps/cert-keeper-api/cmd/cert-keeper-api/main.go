@@ -27,6 +27,7 @@ func main() {
 	adminWebDir := envOr("CERT_KEEPER_ADMIN_WEB_DIR", "")
 	allowedOrigins := envOr("CERT_KEEPER_ALLOWED_ORIGINS", "")
 	bootstrapSecret := envOr("CERT_KEEPER_BOOTSTRAP_SECRET", "")
+	certSyncSecret := envOr("CERT_KEEPER_CERT_SYNC_SECRET", "")
 	cookiesSecure := envOrBool("CERT_KEEPER_COOKIES_SECURE", false)
 	domainBackends := envOr("CERT_KEEPER_DOMAIN_BACKENDS", "")
 	skipDomains := envOr("CERT_KEEPER_SKIP_DOMAINS", "")
@@ -44,6 +45,7 @@ func main() {
 		AllowedOrigins:  allowedOrigins,
 		CookiesSecure:   cookiesSecure,
 		BootstrapSecret: bootstrapSecret,
+		CertSyncSecret:  certSyncSecret,
 		DomainBackends:  domainBackends,
 		SkipDomains:     skipDomains,
 	})

@@ -20,10 +20,19 @@ import (
 // ─── Certificate handlers ───
 
 func (s *Server) handleCertificates(w http.ResponseWriter, r *http.Request) {
+	syncAccess := certSyncFromContext(r.Context())
 	user, _ := userFromContext(r.Context())
 	switch r.Method {
 	case http.MethodGet:
-		items, err := s.store.ListCertificates(r.Context(), user.ID)
+		var (
+			items []store.Certificate
+			err   error
+		)
+		if syncAccess {
+			items, err = s.store.ListAllCertificates(r.Context())
+		} else {
+			items, err = s.store.ListCertificates(r.Context(), user.ID)
+		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -33,6 +42,10 @@ func (s *Server) handleCertificates(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	case http.MethodPost:
+		if syncAccess {
+			writeError(w, http.StatusForbidden, "certificate sync secret cannot create new certificates")
+			return
+		}
 		var cert store.Certificate
 		if err := json.NewDecoder(r.Body).Decode(&cert); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid payload")
@@ -84,6 +97,7 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "certificate id is required")
 		return
 	}
+	syncAccess := certSyncFromContext(r.Context())
 	user, _ := userFromContext(r.Context())
 
 	switch r.Method {
@@ -97,7 +111,7 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
-		if cert.UserID != user.ID {
+		if !syncAccess && cert.UserID != user.ID {
 			writeError(w, http.StatusForbidden, "not your certificate")
 			return
 		}
@@ -118,7 +132,7 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
-		if existing.UserID != user.ID {
+		if !syncAccess && existing.UserID != user.ID {
 			writeError(w, http.StatusForbidden, "not your certificate")
 			return
 		}
@@ -128,7 +142,7 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cert.ID = id
-		cert.UserID = user.ID
+		cert.UserID = existing.UserID
 		cert.Domain = existing.Domain
 		if cert.CertPEM == "" || cert.KeyPEM == "" {
 			writeError(w, http.StatusBadRequest, "certPem and keyPem are required")
@@ -171,7 +185,7 @@ func (s *Server) handleCertificateByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
-		if cert.UserID != user.ID {
+		if !syncAccess && cert.UserID != user.ID {
 			writeError(w, http.StatusForbidden, "not your certificate")
 			return
 		}

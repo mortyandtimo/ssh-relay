@@ -255,20 +255,22 @@ bootstrap_admin() {
   done
 
   local RESULT
-  RESULT=$(curl -s -X POST "http://127.0.0.1:${API_PORT}/api/bootstrap" \
+  RESULT=$(curl -s -X POST "http://127.0.0.1:${API_PORT}/api/auth/bootstrap" \
     -H "Content-Type: application/json" \
     -H "X-Bootstrap-Secret: ${BOOTSTRAP_SECRET}" \
     -d "{\"email\":\"${ADMIN_EMAIL}\",\"displayName\":\"${ADMIN_DISPLAY_NAME}\",\"password\":\"${ADMIN_PASSWORD}\"}" 2>/dev/null || echo "FAILED")
 
   if [[ "$RESULT" == *"FAILED"* || "$RESULT" == *"error"* ]]; then
     warn "管理员创建可能失败，可稍后手动执行:"
-    echo "  curl -X POST http://127.0.0.1:${API_PORT}/api/bootstrap \\"
+    echo "  curl -X POST http://127.0.0.1:${API_PORT}/api/auth/bootstrap \\"
     echo "    -H 'Content-Type: application/json' \\"
     echo "    -H 'X-Bootstrap-Secret: ${BOOTSTRAP_SECRET}' \\"
     echo "    -d '{\"email\":\"${ADMIN_EMAIL}\",\"displayName\":\"${ADMIN_DISPLAY_NAME}\",\"password\":\"YOUR_PASSWORD\"}'"
   else
     info "管理员账号创建成功: ${ADMIN_EMAIL}"
   fi
+
+  unset ADMIN_PASSWORD
 }
 
 # ─── systemd 服务 ───
