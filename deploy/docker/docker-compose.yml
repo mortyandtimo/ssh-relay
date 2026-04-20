@@ -2,9 +2,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: cloud_relay
-      POSTGRES_USER: relay
-      POSTGRES_PASSWORD: relay
+      POSTGRES_DB: ${CLOUD_RELAY_POSTGRES_DB:-cloud_relay}
+      POSTGRES_USER: ${CLOUD_RELAY_POSTGRES_USER:-relay}
+      POSTGRES_PASSWORD: ${CLOUD_RELAY_POSTGRES_PASSWORD:?set CLOUD_RELAY_POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
@@ -17,7 +17,7 @@ services:
       dockerfile: apps/server-api/Dockerfile
     environment:
       SERVER_API_ADDR: ":8080"
-      DATABASE_URL: postgres://relay:relay@postgres:5432/cloud_relay?sslmode=disable
+      DATABASE_URL: ${CLOUD_RELAY_DATABASE_URL:?set CLOUD_RELAY_DATABASE_URL}
     ports:
       - "8080:8080"
     depends_on:
