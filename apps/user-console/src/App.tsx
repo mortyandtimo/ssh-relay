@@ -1,4 +1,4 @@
-import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
@@ -350,6 +350,7 @@ export default function App() {
   const [registerConfirmPassword, setRegisterConfirmPassword] = useState("");
   const [savePassword, setSavePassword] = useState(false);
   const [autoLogin, setAutoLogin] = useState(false);
+  const bootstrapStartedRef = useRef(false);
 
   const transport = useMemo(() => createTauriDesktopTransport(), []);
   const api = useMemo(() => createDesktopApi(apiUrl, transport || undefined), [apiUrl, transport]);
@@ -479,6 +480,8 @@ export default function App() {
   }, [api, refreshAdminData, refreshUserServices, syncUserNodePresence]);
 
   useEffect(() => {
+    if (bootstrapStartedRef.current) return;
+    bootstrapStartedRef.current = true;
     let cancelled = false;
     void (async () => {
       try {
@@ -507,21 +510,20 @@ export default function App() {
           setLoginProfiles(profiles);
           setDesktopHostPaths(hostPaths);
           setLoginEmail(lastEmail);
-          setPage("login");
         });
-        setInitializing(false);
         void refreshP2PStatus();
         void refreshUserNodeStatus();
 
         const sessionApi = createDesktopApi(nextApiUrl, transport || undefined);
+        let nextPage: Page = "login";
         const authed = await sessionApi.loadCurrentUser()
           .then((response) => {
             if (cancelled) return true;
             startTransition(() => {
               setUser(response.user);
-              setPage("home");
               setError("");
             });
+            nextPage = "home";
             void refreshUserServices(sessionApi);
             void refreshAdminData(sessionApi, response.user);
             void syncUserNodePresence({
@@ -551,9 +553,9 @@ export default function App() {
             if (!cancelled) {
               startTransition(() => {
                 setUser(response.user);
-                setPage("home");
                 setError("");
               });
+              nextPage = "home";
               void refreshUserServices(sessionApi);
               void refreshAdminData(sessionApi, response.user);
               void syncUserNodePresence({
@@ -565,10 +567,15 @@ export default function App() {
           } catch {
             if (!cancelled) {
               startTransition(() => {
-                setPage("login");
+                setUser(null);
               });
             }
           }
+        }
+        if (!cancelled) {
+          startTransition(() => {
+            setPage(nextPage);
+          });
         }
       } finally {
         if (!cancelled) {
