@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -108,10 +109,21 @@ func TestCopyHTTPResponseRewritesLocationAndRefreshOnly(t *testing.T) {
 
 func TestStandbyPoolEnqueueUsesMaxCapacity(t *testing.T) {
 	pool := newStandbyPool("node:tunnel", 2, 4)
-	base := time.Unix(1_700_000_000, 0).UTC()
+	base := time.Now().UTC()
+	var peers []net.Conn
+	defer func() {
+		for _, peer := range peers {
+			_ = peer.Close()
+		}
+	}()
 
 	for i := 0; i < 4; i++ {
-		poolSize, evicted, err := pool.enqueue(standbyConn{registeredAt: base.Add(time.Duration(i) * time.Second)})
+		itemConn, itemPeer := net.Pipe()
+		peers = append(peers, itemPeer)
+		poolSize, evicted, err := pool.enqueue(standbyConn{
+			conn:         itemConn,
+			registeredAt: base.Add(time.Duration(i) * time.Second),
+		})
 		if err != nil {
 			t.Fatalf("enqueue %d failed: %v", i, err)
 		}
@@ -123,7 +135,9 @@ func TestStandbyPoolEnqueueUsesMaxCapacity(t *testing.T) {
 		}
 	}
 
-	poolSize, evicted, err := pool.enqueue(standbyConn{registeredAt: base.Add(5 * time.Second)})
+	itemConn, itemPeer := net.Pipe()
+	peers = append(peers, itemPeer)
+	poolSize, evicted, err := pool.enqueue(standbyConn{conn: itemConn, registeredAt: base.Add(5 * time.Second)})
 	if err != nil {
 		t.Fatalf("enqueue overflow failed: %v", err)
 	}
@@ -135,5 +149,122 @@ func TestStandbyPoolEnqueueUsesMaxCapacity(t *testing.T) {
 	}
 	if !evicted[0].registeredAt.Equal(base) {
 		t.Fatalf("overflow evicted wrong item: got %s want %s", evicted[0].registeredAt, base)
+	}
+}
+
+func TestStandbyPoolEnqueuePrunesExpiredAndClosedItems(t *testing.T) {
+	closedConn, closedPeer := net.Pipe()
+	_ = closedPeer.Close()
+	defer closedConn.Close()
+
+	liveConn, livePeer := net.Pipe()
+	defer liveConn.Close()
+	defer livePeer.Close()
+
+	newConn, newPeer := net.Pipe()
+	defer newConn.Close()
+	defer newPeer.Close()
+
+	pool := newStandbyPool("node:tunnel", 2, 4)
+	pool.items = []standbyConn{
+		{registeredAt: time.Now().Add(-standbyConnMaxAge - time.Second)},
+		{conn: closedConn, registeredAt: time.Now().UTC()},
+		{conn: liveConn, registeredAt: time.Now().UTC()},
+	}
+
+	poolSize, evicted, err := pool.enqueue(standbyConn{conn: newConn, registeredAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+	if poolSize != 2 {
+		t.Fatalf("pool size = %d, want 2", poolSize)
+	}
+	if len(evicted) != 2 {
+		t.Fatalf("evicted %d items, want 2", len(evicted))
+	}
+	if len(pool.items) != 2 {
+		t.Fatalf("pool retained %d items, want 2", len(pool.items))
+	}
+}
+
+func TestStandbyConnDrainBufferedKeepalivesDrainsLateByte(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	item := standbyConn{conn: serverConn, registeredAt: time.Now().UTC()}
+	writeDone := make(chan error, 1)
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		_, err := clientConn.Write([]byte{types.AgentRelayKeepaliveByte})
+		writeDone <- err
+	}()
+
+	drained, err := item.drainBufferedKeepalives(20 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("drainBufferedKeepalives returned error: %v", err)
+	}
+	if drained != 1 {
+		t.Fatalf("drained %d keepalive bytes, want 1", drained)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("keepalive write failed: %v", err)
+	}
+}
+
+func TestStandbyConnDrainBufferedKeepalivesRejectsUnexpectedByte(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	item := standbyConn{conn: serverConn, registeredAt: time.Now().UTC()}
+	writeDone := make(chan error, 1)
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		_, err := clientConn.Write([]byte{'H'})
+		writeDone <- err
+	}()
+
+	if _, err := item.drainBufferedKeepalives(20 * time.Millisecond); err == nil {
+		t.Fatal("expected drainBufferedKeepalives to reject unexpected byte")
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("unexpected byte write failed: %v", err)
+	}
+}
+
+func TestReadHTTPResponseSkippingKeepalivesSkipsLeadingNoise(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "https://music.020309.top/rest/ping", nil)
+	writeDone := make(chan error, 1)
+	go func() {
+		payload := "\x00\x00HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+		_, err := io.WriteString(clientConn, payload)
+		writeDone <- err
+	}()
+
+	resp, skipped, err := readHTTPResponseSkippingKeepalives(serverConn, req)
+	if err != nil {
+		t.Fatalf("readHTTPResponseSkippingKeepalives returned error: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if skipped != 2 {
+		t.Fatalf("skipped %d keepalive bytes, want 2", skipped)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if string(body) != "OK" {
+		t.Fatalf("body = %q, want OK", string(body))
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write response: %v", err)
 	}
 }

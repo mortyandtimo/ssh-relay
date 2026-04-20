@@ -87,7 +87,6 @@ func TestServeSOCKS5RejectsNonConnect(t *testing.T) {
 	}
 }
 
-
 func TestServeUDPRelayRoundTrip(t *testing.T) {
 	udpTarget, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -118,5 +117,45 @@ func TestServeUDPRelayRoundTrip(t *testing.T) {
 	}
 	if string(frame.Payload) != "ping" {
 		t.Fatalf("expected udp echo payload ping, got %q", string(frame.Payload))
+	}
+}
+
+func TestWaitForStartWithKeepaliveStopsAfterStart(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- waitForStartWithKeepalive(ctx, serverConn, 10*time.Millisecond)
+	}()
+
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(clientConn, buf); err != nil {
+		t.Fatalf("read keepalive: %v", err)
+	}
+	if buf[0] != types.AgentRelayKeepaliveByte {
+		t.Fatalf("expected keepalive byte %d, got %d", types.AgentRelayKeepaliveByte, buf[0])
+	}
+
+	if _, err := clientConn.Write([]byte{types.AgentRelayStartByte}); err != nil {
+		t.Fatalf("write start byte: %v", err)
+	}
+	if err := <-waitDone; err != nil {
+		t.Fatalf("waitForStartWithKeepalive returned error: %v", err)
+	}
+
+	if err := clientConn.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	_, err := clientConn.Read(buf)
+	if err == nil {
+		t.Fatal("expected no extra keepalive bytes after start")
+	}
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("expected timeout after start, got %v", err)
 	}
 }

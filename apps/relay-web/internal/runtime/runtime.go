@@ -25,6 +25,7 @@ const (
 	defaultStandbyPoolMaxSize          = 128
 	defaultGlobalMaxStandby      int64 = 16384
 	standbyConnMaxAge                  = 60 * time.Second
+	standbyKeepaliveDrainWindow        = 10 * time.Millisecond
 	defaultAcquireTimeout              = 10 * time.Second
 )
 
@@ -37,26 +38,40 @@ type standbyConn struct {
 func (s standbyConn) age() time.Duration { return time.Since(s.registeredAt) }
 func (s standbyConn) expired() bool      { return s.age() > standbyConnMaxAge }
 
-func (s standbyConn) prepareForStart() error {
+func (s standbyConn) drainBufferedKeepalives(wait time.Duration) (int, error) {
 	buf := make([]byte, 1)
+	drained := 0
 	for {
-		if err := s.conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond)); err != nil {
-			return err
+		deadline := time.Now()
+		if wait > 0 {
+			deadline = deadline.Add(wait)
+		}
+		if err := s.conn.SetReadDeadline(deadline); err != nil {
+			return drained, err
 		}
 		_, err := io.ReadFull(s.conn, buf)
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			_ = s.conn.SetReadDeadline(time.Time{})
-			return nil
+			return drained, nil
 		}
 		if err != nil {
 			_ = s.conn.SetReadDeadline(time.Time{})
-			return err
+			return drained, err
 		}
 		if buf[0] != types.AgentRelayKeepaliveByte {
 			_ = s.conn.SetReadDeadline(time.Time{})
-			return fmt.Errorf("unexpected pre-start byte %d", buf[0])
+			return drained, fmt.Errorf("unexpected keepalive byte %d", buf[0])
 		}
+		drained++
+		// After the first observed keepalive, switch to non-blocking drain so we
+		// consume only already-buffered bytes.
+		wait = 0
 	}
+}
+
+func (s standbyConn) prepareForStart() error {
+	_, err := s.drainBufferedKeepalives(standbyKeepaliveDrainWindow)
+	return err
 }
 
 // ─── standby pool ───
@@ -86,7 +101,7 @@ func (p *standbyPool) enqueue(item standbyConn) (int, []standbyConn, error) {
 	if p.closed {
 		return len(p.items), nil, errors.New("pool closed")
 	}
-	var evicted []standbyConn
+	evicted := p.pruneInvalidLocked()
 	for len(p.items) >= p.max {
 		idx := p.oldestIndexLocked()
 		evicted = append(evicted, p.items[idx])
@@ -129,6 +144,27 @@ func (p *standbyPool) closeAndDrain() []standbyConn {
 	drained := append([]standbyConn(nil), p.items...)
 	p.items = nil
 	return drained
+}
+
+func (p *standbyPool) pruneInvalidLocked() []standbyConn {
+	if len(p.items) == 0 {
+		return nil
+	}
+	kept := p.items[:0]
+	var evicted []standbyConn
+	for _, item := range p.items {
+		if item.expired() {
+			evicted = append(evicted, item)
+			continue
+		}
+		if _, err := item.drainBufferedKeepalives(0); err != nil {
+			evicted = append(evicted, item)
+			continue
+		}
+		kept = append(kept, item)
+	}
+	p.items = kept
+	return evicted
 }
 
 func (p *standbyPool) oldestIndexLocked() int {
@@ -383,6 +419,12 @@ func (s *Service) HandleProxyRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "web relay start failed", http.StatusBadGateway)
 		return
 	}
+	if _, err := standby.drainBufferedKeepalives(standbyKeepaliveDrainWindow); err != nil {
+		log.Printf("web request %d discarded standby with late keepalive noise for tunnel %s: %v", reqID, route.ID, err)
+		_ = standby.conn.Close()
+		http.Error(w, "web relay standby noisy", http.StatusBadGateway)
+		return
+	}
 	defer standby.conn.Close()
 
 	upstreamReq := cloneHTTPRequestForRelay(r, route)
@@ -392,13 +434,16 @@ func (s *Service) HandleProxyRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "web relay write failed", http.StatusBadGateway)
 		return
 	}
-	resp, err := http.ReadResponse(bufio.NewReader(standby.conn), upstreamReq)
+	resp, skippedKeepalives, err := readHTTPResponseSkippingKeepalives(standby.conn, upstreamReq)
 	if err != nil {
 		log.Printf("web request %d read upstream response failed for tunnel %s: %v", reqID, route.ID, err)
 		http.Error(w, "web relay response failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	if skippedKeepalives > 0 {
+		log.Printf("web request %d skipped %d leading keepalive bytes before upstream response for tunnel %s", reqID, skippedKeepalives, route.ID)
+	}
 	rewriteReport := copyHTTPResponse(w, r, route, resp)
 	if rewriteReport.LocationOriginal != "" || rewriteReport.RefreshOriginal != "" {
 		log.Printf("web request %d response rewrite location=%q -> %q refresh=%q -> %q", reqID, rewriteReport.LocationOriginal, rewriteReport.LocationRewritten, rewriteReport.RefreshOriginal, rewriteReport.RefreshRewritten)
@@ -408,6 +453,27 @@ func (s *Service) HandleProxyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("web request %d completed with status=%d after %s", reqID, resp.StatusCode, time.Since(startedAt))
+}
+
+func readHTTPResponseSkippingKeepalives(conn net.Conn, req *http.Request) (*http.Response, int, error) {
+	reader := bufio.NewReader(conn)
+	skipped := 0
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return nil, skipped, err
+		}
+		if b == types.AgentRelayKeepaliveByte {
+			skipped++
+			continue
+		}
+		if err := reader.UnreadByte(); err != nil {
+			return nil, skipped, err
+		}
+		break
+	}
+	resp, err := http.ReadResponse(reader, req)
+	return resp, skipped, err
 }
 
 // ─── standby pool management ───

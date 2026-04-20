@@ -31,6 +31,7 @@ const (
 	defaultReversePoolSize    = 16
 	defaultWebReversePoolSize = 32
 	defaultRelayTimeout       = 10 * time.Second
+	relayKeepaliveInterval    = 2 * time.Second
 )
 
 type reverseManager struct {
@@ -500,13 +501,10 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 	enableTCPKeepalive(conn)
 	stopRelayCancel := closeConnOnCancel(ctx, conn)
 	defer stopRelayCancel()
-	stopKeepalive := startRelayKeepalive(ctx, conn)
-	defer stopKeepalive()
 
 	if err := waitForStart(ctx, conn); err != nil {
 		return err
 	}
-	stopKeepalive()
 	if tunnel.Type == "udp" {
 		log.Printf("udp reverse session ready: tunnel=%s publicPort=%d", tunnel.ID, tunnel.PublicPort)
 		defer log.Printf("udp reverse session closed: tunnel=%s publicPort=%d", tunnel.ID, tunnel.PublicPort)
@@ -589,18 +587,46 @@ func dialRelayUpgrade(ctx context.Context, relayURL string, hello any) (net.Conn
 }
 
 func waitForStart(ctx context.Context, conn net.Conn) error {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetReadDeadline(deadline)
+	return waitForStartWithKeepalive(ctx, conn, relayKeepaliveInterval)
+}
+
+func waitForStartWithKeepalive(ctx context.Context, conn net.Conn, interval time.Duration) error {
+	if interval <= 0 {
+		interval = relayKeepaliveInterval
 	}
-	defer conn.SetReadDeadline(time.Time{})
 	buf := make([]byte, 1)
-	if _, err := io.ReadFull(conn, buf); err != nil {
-		return err
+	for {
+		deadline := time.Now().Add(interval)
+		if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+			deadline = ctxDeadline
+		}
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			return err
+		}
+		_, err := io.ReadFull(conn, buf)
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			if ctx.Err() != nil {
+				_ = conn.SetReadDeadline(time.Time{})
+				return ctx.Err()
+			}
+			if _, writeErr := conn.Write([]byte{types.AgentRelayKeepaliveByte}); writeErr != nil {
+				_ = conn.SetReadDeadline(time.Time{})
+				return writeErr
+			}
+			continue
+		}
+		_ = conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		if buf[0] != types.AgentRelayStartByte {
+			return fmt.Errorf("unexpected reverse start byte %d", buf[0])
+		}
+		return nil
 	}
-	if buf[0] != types.AgentRelayStartByte {
-		return fmt.Errorf("unexpected reverse start byte %d", buf[0])
-	}
-	return nil
 }
 
 func proxyReverseConnection(relayConn net.Conn, targetConn net.Conn, tunnelID string, manager *reverseManager) {
@@ -760,32 +786,6 @@ func closeConnOnCancel(ctx context.Context, conn net.Conn) func() {
 	}()
 	return func() {
 		close(stop)
-	}
-}
-
-func startRelayKeepalive(ctx context.Context, conn net.Conn) func() {
-	stop := make(chan struct{})
-	var once sync.Once
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-stop:
-				return
-			case <-ticker.C:
-				if _, err := conn.Write([]byte{types.AgentRelayKeepaliveByte}); err != nil {
-					return
-				}
-			}
-		}
-	}()
-	return func() {
-		once.Do(func() {
-			close(stop)
-		})
 	}
 }
 
