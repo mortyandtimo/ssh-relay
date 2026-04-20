@@ -1907,8 +1907,8 @@ func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 	applyCookies(managerUsersReq, managerCookies)
 	managerUsersRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(managerUsersRes, managerUsersReq)
-	if managerUsersRes.Code != http.StatusForbidden {
-		t.Fatalf("expected manager users status 403, got %d", managerUsersRes.Code)
+	if managerUsersRes.Code != http.StatusOK {
+		t.Fatalf("expected manager users status 200, got %d", managerUsersRes.Code)
 	}
 
 	meReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
@@ -1936,6 +1936,458 @@ func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 	server.Handler().ServeHTTP(logoutRes, logoutReq)
 	if logoutRes.Code != http.StatusOK {
 		t.Fatalf("expected logout status 200, got %d", logoutRes.Code)
+	}
+}
+
+func TestPublicRegisterRequiresBootstrapCompleted(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+
+	body, _ := json.Marshal(types.AuthRegisterRequest{
+		Email:       "user@example.com",
+		DisplayName: "普通用户",
+		Password:    "UserPass#2026",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewReader(body))
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusConflict {
+		t.Fatalf("expected register status 409 before bootstrap, got %d", res.Code)
+	}
+}
+
+func TestPublicRegisterCreatesUserAndSession(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	bootstrapAdminAndCollectCookies(t, server)
+
+	body, _ := json.Marshal(types.AuthRegisterRequest{
+		Email:       "user@example.com",
+		DisplayName: "普通用户",
+		Password:    "UserPass#2026",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewReader(body))
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("expected register status 201, got %d: %s", res.Code, res.Body.String())
+	}
+
+	var out types.AuthUserResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.User.Role != types.UserRoleUser {
+		t.Fatalf("expected registered role user, got %q", out.User.Role)
+	}
+	if out.User.Email != "user@example.com" {
+		t.Fatalf("expected registered email user@example.com, got %q", out.User.Email)
+	}
+
+	cookies := res.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected auth cookies after public register")
+	}
+
+	meReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	applyCookies(meReq, cookies)
+	meRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(meRes, meReq)
+	if meRes.Code != http.StatusOK {
+		t.Fatalf("expected me status 200 after register, got %d", meRes.Code)
+	}
+
+	dupReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewReader(body))
+	dupRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(dupRes, dupReq)
+	if dupRes.Code != http.StatusConflict {
+		t.Fatalf("expected duplicate register 409, got %d", dupRes.Code)
+	}
+}
+
+func TestAdminAuthSettingsCanDisablePublicRegistration(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/admin/auth-settings", nil)
+	applyCookies(getReq, adminCookies)
+	getRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(getRes, getReq)
+	if getRes.Code != http.StatusOK {
+		t.Fatalf("expected auth settings status 200, got %d", getRes.Code)
+	}
+	var current types.AuthSettings
+	if err := json.NewDecoder(getRes.Body).Decode(&current); err != nil {
+		t.Fatal(err)
+	}
+	if !current.PublicRegistrationEnabled {
+		t.Fatal("expected public registration enabled by default")
+	}
+
+	body, _ := json.Marshal(types.UpdateAuthSettingsRequest{PublicRegistrationEnabled: false})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/admin/auth-settings", bytes.NewReader(body))
+	applyCookies(updateReq, adminCookies)
+	updateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(updateRes, updateReq)
+	if updateRes.Code != http.StatusOK {
+		t.Fatalf("expected auth settings update 200, got %d: %s", updateRes.Code, updateRes.Body.String())
+	}
+
+	registerBody, _ := json.Marshal(types.AuthRegisterRequest{
+		Email:       "user@example.com",
+		DisplayName: "普通用户",
+		Password:    "UserPass#2026",
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusForbidden {
+		t.Fatalf("expected register 403 when public registration is disabled, got %d", registerRes.Code)
+	}
+}
+
+func TestDisabledUserCannotLoginOrUseExistingSession(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	created, err := server.store.CreateUser(context.Background(), store.CreateUserParams{
+		Email:       "user@example.com",
+		DisplayName: "普通用户",
+		Password:    "UserPass#2026",
+		Role:        types.UserRoleUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	userCookies := loginAndCollectCookies(t, server, "user@example.com", "UserPass#2026")
+
+	disabled := true
+	updateBody, _ := json.Marshal(types.UpdateUserRequest{Disabled: &disabled})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/users/"+created.ID, bytes.NewReader(updateBody))
+	applyCookies(updateReq, adminCookies)
+	updateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(updateRes, updateReq)
+	if updateRes.Code != http.StatusOK {
+		t.Fatalf("expected disable user 200, got %d: %s", updateRes.Code, updateRes.Body.String())
+	}
+
+	meReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	applyCookies(meReq, userCookies)
+	meRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(meRes, meReq)
+	if meRes.Code != http.StatusForbidden {
+		t.Fatalf("expected disabled user me 403, got %d", meRes.Code)
+	}
+
+	loginBody, _ := json.Marshal(types.AuthLoginRequest{Email: "user@example.com", Password: "UserPass#2026"})
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBody))
+	loginRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(loginRes, loginReq)
+	if loginRes.Code != http.StatusForbidden {
+		t.Fatalf("expected disabled user login 403, got %d", loginRes.Code)
+	}
+}
+
+func TestCurrentAccountRequiresEmailVerificationForPasswordChange(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	users, err := server.store.ListUsers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("expected 1 bootstrap admin, got %d", len(users))
+	}
+	adminUser := users[0]
+
+	updateBody, _ := json.Marshal(types.UpdateUserRequest{Password: "AdminPass#2027"})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/users/"+adminUser.ID, bytes.NewReader(updateBody))
+	applyCookies(updateReq, adminCookies)
+	updateRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(updateRes, updateReq)
+	if updateRes.Code != http.StatusConflict {
+		t.Fatalf("expected direct self password change 409, got %d", updateRes.Code)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/users/"+adminUser.ID, nil)
+	applyCookies(deleteReq, adminCookies)
+	deleteRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deleteRes, deleteReq)
+	if deleteRes.Code != http.StatusConflict {
+		t.Fatalf("expected current account delete 409, got %d", deleteRes.Code)
+	}
+
+	roleBody, _ := json.Marshal(types.UpdateUserRequest{Role: types.UserRoleUser})
+	roleReq := httptest.NewRequest(http.MethodPut, "/api/users/"+adminUser.ID, bytes.NewReader(roleBody))
+	applyCookies(roleReq, adminCookies)
+	roleRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(roleRes, roleReq)
+	if roleRes.Code != http.StatusConflict {
+		t.Fatalf("expected current account role change 409, got %d", roleRes.Code)
+	}
+}
+
+func TestManagerCanModerateNormalUsersOnly(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	managerUser, err := server.store.CreateUser(context.Background(), store.CreateUserParams{
+		Email:       "manager@example.com",
+		DisplayName: "普通管理员",
+		Password:    "ManagerPass#2026",
+		Role:        types.UserRoleManager,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalUser, err := server.store.CreateUser(context.Background(), store.CreateUserParams{
+		Email:       "user@example.com",
+		DisplayName: "普通用户",
+		Password:    "UserPass#2026",
+		Role:        types.UserRoleUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	managerCookies := loginAndCollectCookies(t, server, "manager@example.com", "ManagerPass#2026")
+	normalUserCookies := loginAndCollectCookies(t, server, "user@example.com", "UserPass#2026")
+
+	users, err := server.store.ListUsers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminUserID := ""
+	for _, candidate := range users {
+		if candidate.Role == types.UserRoleAdmin {
+			adminUserID = candidate.ID
+			break
+		}
+	}
+	if adminUserID == "" {
+		t.Fatal("expected bootstrap super admin user")
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	applyCookies(listReq, managerCookies)
+	listRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(listRes, listReq)
+	if listRes.Code != http.StatusOK {
+		t.Fatalf("expected manager user list 200, got %d", listRes.Code)
+	}
+
+	disabled := true
+	disableBody, _ := json.Marshal(types.UpdateUserRequest{Disabled: &disabled})
+	disableReq := httptest.NewRequest(http.MethodPut, "/api/users/"+normalUser.ID, bytes.NewReader(disableBody))
+	applyCookies(disableReq, managerCookies)
+	disableRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(disableRes, disableReq)
+	if disableRes.Code != http.StatusOK {
+		t.Fatalf("expected manager disable normal user 200, got %d: %s", disableRes.Code, disableRes.Body.String())
+	}
+
+	meReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	applyCookies(meReq, normalUserCookies)
+	meRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(meRes, meReq)
+	if meRes.Code != http.StatusForbidden {
+		t.Fatalf("expected disabled user me 403 after manager action, got %d", meRes.Code)
+	}
+
+	disableManagerReq := httptest.NewRequest(http.MethodPut, "/api/users/"+managerUser.ID, bytes.NewReader(disableBody))
+	applyCookies(disableManagerReq, managerCookies)
+	disableManagerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(disableManagerRes, disableManagerReq)
+	if disableManagerRes.Code != http.StatusForbidden {
+		t.Fatalf("expected manager disable another manager 403, got %d", disableManagerRes.Code)
+	}
+
+	disableAdminReq := httptest.NewRequest(http.MethodPut, "/api/users/"+adminUserID, bytes.NewReader(disableBody))
+	applyCookies(disableAdminReq, managerCookies)
+	disableAdminRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(disableAdminRes, disableAdminReq)
+	if disableAdminRes.Code != http.StatusForbidden {
+		t.Fatalf("expected manager disable super admin 403, got %d", disableAdminRes.Code)
+	}
+
+	roleBody, _ := json.Marshal(types.UpdateUserRequest{Role: types.UserRoleManager})
+	roleReq := httptest.NewRequest(http.MethodPut, "/api/users/"+normalUser.ID, bytes.NewReader(roleBody))
+	applyCookies(roleReq, managerCookies)
+	roleRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(roleRes, roleReq)
+	if roleRes.Code != http.StatusForbidden {
+		t.Fatalf("expected manager role change 403, got %d", roleRes.Code)
+	}
+
+	createBody, _ := json.Marshal(types.CreateUserRequest{
+		Email:       "created-by-manager@example.com",
+		DisplayName: "新用户",
+		Password:    "CreatedPass#2026",
+		Role:        types.UserRoleUser,
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/users", bytes.NewReader(createBody))
+	applyCookies(createReq, managerCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusForbidden {
+		t.Fatalf("expected manager create user 403, got %d", createRes.Code)
+	}
+
+	authSettingsReq := httptest.NewRequest(http.MethodGet, "/api/admin/auth-settings", nil)
+	applyCookies(authSettingsReq, managerCookies)
+	authSettingsRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(authSettingsRes, authSettingsReq)
+	if authSettingsRes.Code != http.StatusForbidden {
+		t.Fatalf("expected manager auth settings 403, got %d", authSettingsRes.Code)
+	}
+
+	adminListReq := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	applyCookies(adminListReq, adminCookies)
+	adminListRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(adminListRes, adminListReq)
+	if adminListRes.Code != http.StatusOK {
+		t.Fatalf("expected admin user list 200, got %d", adminListRes.Code)
+	}
+}
+
+func TestSuperAdminRoleIsReserved(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	createAdminBody, _ := json.Marshal(types.CreateUserRequest{
+		Email:       "second-admin@example.com",
+		DisplayName: "第二管理员",
+		Password:    "AdminPass#2026",
+		Role:        types.UserRoleAdmin,
+	})
+	createAdminReq := httptest.NewRequest(http.MethodPost, "/api/users", bytes.NewReader(createAdminBody))
+	applyCookies(createAdminReq, adminCookies)
+	createAdminRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createAdminRes, createAdminReq)
+	if createAdminRes.Code != http.StatusConflict {
+		t.Fatalf("expected reserved super admin create 409, got %d", createAdminRes.Code)
+	}
+
+	createdUser, err := server.store.CreateUser(context.Background(), store.CreateUserParams{
+		Email:       "user@example.com",
+		DisplayName: "普通用户",
+		Password:    "UserPass#2026",
+		Role:        types.UserRoleUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assignAdminBody, _ := json.Marshal(types.UpdateUserRequest{Role: types.UserRoleAdmin})
+	assignAdminReq := httptest.NewRequest(http.MethodPut, "/api/users/"+createdUser.ID, bytes.NewReader(assignAdminBody))
+	applyCookies(assignAdminReq, adminCookies)
+	assignAdminRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(assignAdminRes, assignAdminReq)
+	if assignAdminRes.Code != http.StatusConflict {
+		t.Fatalf("expected reserved super admin assign 409, got %d", assignAdminRes.Code)
+	}
+}
+
+func TestSuperAdminCannotUsePasswordChangeEmailVerificationFlow(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	sentCount := 0
+	server.sendPasswordChangeCode = func(to, code string) error {
+		sentCount++
+		return nil
+	}
+
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/auth/password-change/send-code", bytes.NewReader([]byte(`{}`)))
+	applyCookies(sendReq, adminCookies)
+	sendRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(sendRes, sendReq)
+	if sendRes.Code != http.StatusConflict {
+		t.Fatalf("expected super admin send code 409, got %d: %s", sendRes.Code, sendRes.Body.String())
+	}
+	if sentCount != 0 {
+		t.Fatalf("expected no password change mail for super admin, got %d sends", sentCount)
+	}
+
+	confirmBody, _ := json.Marshal(types.ConfirmPasswordChangeRequest{
+		Code:     "123456",
+		Password: "AdminPass#2027",
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/auth/password-change/confirm", bytes.NewReader(confirmBody))
+	applyCookies(confirmReq, adminCookies)
+	confirmRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(confirmRes, confirmReq)
+	if confirmRes.Code != http.StatusConflict {
+		t.Fatalf("expected super admin confirm password change 409, got %d: %s", confirmRes.Code, confirmRes.Body.String())
+	}
+}
+
+func TestPasswordChangeEmailVerificationFlow(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	bootstrapAdminAndCollectCookies(t, server)
+
+	if _, err := server.store.CreateUser(context.Background(), store.CreateUserParams{
+		Email:       "manager@example.com",
+		DisplayName: "普通管理员",
+		Password:    "ManagerPass#2026",
+		Role:        types.UserRoleManager,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	managerCookies := loginAndCollectCookies(t, server, "manager@example.com", "ManagerPass#2026")
+
+	sentCode := ""
+	sentEmail := ""
+	server.sendPasswordChangeCode = func(to, code string) error {
+		sentEmail = to
+		sentCode = code
+		return nil
+	}
+
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/auth/password-change/send-code", bytes.NewReader([]byte(`{}`)))
+	applyCookies(sendReq, managerCookies)
+	sendRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(sendRes, sendReq)
+	if sendRes.Code != http.StatusOK {
+		t.Fatalf("expected send code 200, got %d: %s", sendRes.Code, sendRes.Body.String())
+	}
+	if sentCode == "" {
+		t.Fatal("expected password verification code to be generated")
+	}
+	if sentEmail != "manager@example.com" {
+		t.Fatalf("expected code to be sent to manager email, got %q", sentEmail)
+	}
+
+	confirmBody, _ := json.Marshal(types.ConfirmPasswordChangeRequest{
+		Code:     sentCode,
+		Password: "ManagerPass#2027",
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/auth/password-change/confirm", bytes.NewReader(confirmBody))
+	applyCookies(confirmReq, managerCookies)
+	confirmRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(confirmRes, confirmReq)
+	if confirmRes.Code != http.StatusOK {
+		t.Fatalf("expected confirm password change 200, got %d: %s", confirmRes.Code, confirmRes.Body.String())
+	}
+
+	oldLoginBody, _ := json.Marshal(types.AuthLoginRequest{Email: "manager@example.com", Password: "ManagerPass#2026"})
+	oldLoginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(oldLoginBody))
+	oldLoginRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(oldLoginRes, oldLoginReq)
+	if oldLoginRes.Code != http.StatusUnauthorized {
+		t.Fatalf("expected old password login 401, got %d", oldLoginRes.Code)
+	}
+
+	newCookies := loginAndCollectCookies(t, server, "manager@example.com", "ManagerPass#2027")
+	if len(newCookies) == 0 {
+		t.Fatal("expected new login cookies after password change")
 	}
 }
 
@@ -2148,6 +2600,138 @@ func TestUserServiceCatalogDerivesP2PURLFromNodeMetrics(t *testing.T) {
 	}
 	if !out.Items[0].P2PAllowed {
 		t.Fatal("expected admin p2p access to be allowed")
+	}
+}
+
+func TestUserServiceCatalogAllowsBuiltInP2PForNormalUsers(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	if _, err := server.store.CreateUser(context.Background(), store.CreateUserParams{
+		Email:       "user@example.com",
+		DisplayName: "普通用户",
+		Password:    "UserPass#2026",
+		Role:        types.UserRoleUser,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	userCookies := loginAndCollectCookies(t, server, "user@example.com", "UserPass#2026")
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "service-node-end-user",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true, P2PAssist: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createDriveBody, _ := json.Marshal(map[string]any{
+		"nodeId":     registerOut.NodeID,
+		"name":       "drive-service",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 8080,
+		"publicPort": 0,
+		"domain":     "drive.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKey":         "drive",
+			"serviceTitle":       "网盘服务",
+			"serviceKind":        "drive",
+			"serviceP2PUrl":      "http://10.126.126.20:8080",
+			"serviceCloudAccess": "admin_only",
+			"serviceP2PAccess":   "admin_only",
+		},
+	})
+	createDriveReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createDriveBody))
+	applyCookies(createDriveReq, adminCookies)
+	createDriveRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createDriveRes, createDriveReq)
+	if createDriveRes.Code != http.StatusCreated {
+		t.Fatalf("expected create drive tunnel 201, got %d: %s", createDriveRes.Code, createDriveRes.Body.String())
+	}
+
+	createGalleryBody, _ := json.Marshal(map[string]any{
+		"nodeId":     registerOut.NodeID,
+		"name":       "gallery-service",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 8090,
+		"publicPort": 0,
+		"domain":     "img.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKey":         "gallery",
+			"serviceTitle":       "图床服务",
+			"serviceKind":        "gallery",
+			"serviceP2PUrl":      "http://10.126.126.20:8090",
+			"serviceCloudAccess": "all_users",
+			"serviceP2PAccess":   "admin_only",
+		},
+	})
+	createGalleryReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createGalleryBody))
+	applyCookies(createGalleryReq, adminCookies)
+	createGalleryRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createGalleryRes, createGalleryReq)
+	if createGalleryRes.Code != http.StatusCreated {
+		t.Fatalf("expected create gallery tunnel 201, got %d: %s", createGalleryRes.Code, createGalleryRes.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/user/services", nil)
+	req.Host = "manage.020309.top"
+	applyCookies(req, userCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected user services 200, got %d", res.Code)
+	}
+
+	var out types.UserServiceCatalogResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Items) != 2 {
+		t.Fatalf("expected 2 services, got %d", len(out.Items))
+	}
+	servicesByKey := map[string]types.UserServiceEntry{}
+	for _, item := range out.Items {
+		servicesByKey[item.Key] = item
+	}
+
+	drive, ok := servicesByKey["drive"]
+	if !ok {
+		t.Fatal("expected drive service")
+	}
+	if !drive.P2PAllowed {
+		t.Fatal("expected drive p2p access for normal user")
+	}
+	if drive.P2PAccess != serviceAccessAllUsers {
+		t.Fatalf("expected drive p2pAccess all_users, got %q", drive.P2PAccess)
+	}
+	if drive.CloudAllowed {
+		t.Fatal("expected drive cloud access to remain denied for normal user")
+	}
+
+	gallery, ok := servicesByKey["gallery"]
+	if !ok {
+		t.Fatal("expected gallery service")
+	}
+	if !gallery.P2PAllowed {
+		t.Fatal("expected gallery p2p access for normal user")
+	}
+	if gallery.P2PAccess != serviceAccessAllUsers {
+		t.Fatalf("expected gallery p2pAccess all_users, got %q", gallery.P2PAccess)
 	}
 }
 

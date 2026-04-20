@@ -5,6 +5,7 @@ export type UserSummary = {
   email: string;
   displayName: string;
   role: UserRole;
+  disabled?: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -149,8 +150,16 @@ export type AuthUserResponse = {
   user: UserSummary;
 };
 
+export type AuthSettings = {
+  publicRegistrationEnabled: boolean;
+};
+
 export type BootstrapStatusResponse = {
   required: boolean;
+};
+
+export type ManagedUserListResponse = {
+  items: UserSummary[];
 };
 
 export type TunnelTypeTab = "tcp" | "udp" | "http" | "https" | "socks5";

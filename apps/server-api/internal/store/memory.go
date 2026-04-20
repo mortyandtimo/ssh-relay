@@ -14,14 +14,15 @@ import (
 )
 
 type InMemoryStore struct {
-	mu          sync.RWMutex
-	nodes       map[string]nodeRecord
-	tunnels     map[string]types.TunnelSpec
-	users       map[string]UserRecord
-	userByEM    map[string]string
-	sessions    map[string]WebSession
-	auditLogs   []types.AuditLogEntry
-	nextAuditID int64
+	mu           sync.RWMutex
+	nodes        map[string]nodeRecord
+	tunnels      map[string]types.TunnelSpec
+	users        map[string]UserRecord
+	userByEM     map[string]string
+	sessions     map[string]WebSession
+	auditLogs    []types.AuditLogEntry
+	nextAuditID  int64
+	authSettings types.AuthSettings
 	certificates map[string]types.CertificateSpec
 	certsByUser  map[string][]string
 }
@@ -40,6 +41,7 @@ func NewInMemoryStore() *InMemoryStore {
 		sessions:     make(map[string]WebSession),
 		auditLogs:    make([]types.AuditLogEntry, 0),
 		nextAuditID:  1,
+		authSettings: types.AuthSettings{PublicRegistrationEnabled: true},
 		certificates: make(map[string]types.CertificateSpec),
 		certsByUser:  make(map[string][]string),
 	}
@@ -306,6 +308,19 @@ func (s *InMemoryStore) BootstrapAdmin(ctx context.Context, params CreateUserPar
 	return s.CreateUser(ctx, params)
 }
 
+func (s *InMemoryStore) GetAuthSettings(_ context.Context) (types.AuthSettings, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.authSettings, nil
+}
+
+func (s *InMemoryStore) UpdateAuthSettings(_ context.Context, settings types.AuthSettings) (types.AuthSettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authSettings = settings
+	return s.authSettings, nil
+}
+
 func (s *InMemoryStore) AuthenticateUser(_ context.Context, params AuthenticateUserParams) (types.UserSummary, error) {
 	email := normalizeEmail(params.Email)
 	s.mu.RLock()
@@ -318,6 +333,9 @@ func (s *InMemoryStore) AuthenticateUser(_ context.Context, params AuthenticateU
 	s.mu.RUnlock()
 	if bcrypt.CompareHashAndPassword([]byte(record.PasswordHash), []byte(params.Password)) != nil {
 		return types.UserSummary{}, ErrUnauthorized
+	}
+	if record.Summary.Disabled {
+		return types.UserSummary{}, ErrForbidden
 	}
 	return record.Summary, nil
 }
@@ -378,6 +396,9 @@ func (s *InMemoryStore) UpdateUser(_ context.Context, params UpdateUserParams) (
 	}
 	if params.Role != "" {
 		record.Summary.Role = normalizeUserRole(params.Role)
+	}
+	if params.Disabled != nil {
+		record.Summary.Disabled = *params.Disabled
 	}
 	if params.Password != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)

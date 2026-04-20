@@ -1,6 +1,8 @@
 import type {
+  AuthSettings,
   AuthUserResponse,
   BootstrapStatusResponse,
+  ManagedUserListResponse,
   ControlActionOptionsResponse,
   ControlActionRequest,
   ControlActionResponse,
@@ -50,6 +52,7 @@ export function createDesktopApi(apiBaseUrl = "", transport?: DesktopApiTranspor
       response.status === 401 &&
       allowRefresh &&
       path !== "/api/auth/login" &&
+      path !== "/api/auth/register" &&
       path !== "/api/auth/bootstrap-status" &&
       path !== "/api/auth/refresh"
     ) {
@@ -113,8 +116,54 @@ export function createDesktopApi(apiBaseUrl = "", transport?: DesktopApiTranspor
         false,
       );
     },
+    register(email: string, displayName: string, password: string) {
+      return requestJSON<AuthUserResponse>(
+        "/api/auth/register",
+        {
+          method: "POST",
+          body: JSON.stringify({ email, displayName, password }),
+        },
+        false,
+      );
+    },
     logout() {
       return requestJSON<{ status: string }>("/api/auth/logout", { method: "POST" });
+    },
+    sendPasswordChangeCode() {
+      return requestJSON<{ status: string; expiresInSec: number; email: string }>("/api/auth/password-change/send-code", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+    },
+    confirmPasswordChange(code: string, password: string) {
+      return requestJSON<AuthUserResponse>("/api/auth/password-change/confirm", {
+        method: "POST",
+        body: JSON.stringify({ code, password }),
+      });
+    },
+    loadManagedUsers() {
+      return requestJSON<ManagedUserListResponse>("/api/users");
+    },
+    createManagedUser(payload: { email: string; displayName: string; password: string; role: string }) {
+      return requestJSON<AuthUserResponse["user"]>("/api/users", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    updateManagedUser(id: string, payload: Record<string, unknown>) {
+      return requestJSON<AuthUserResponse["user"]>("/api/users/" + encodeURIComponent(id), {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+    },
+    loadAuthSettings() {
+      return requestJSON<AuthSettings>("/api/admin/auth-settings");
+    },
+    updateAuthSettings(publicRegistrationEnabled: boolean) {
+      return requestJSON<AuthSettings>("/api/admin/auth-settings", {
+        method: "PUT",
+        body: JSON.stringify({ publicRegistrationEnabled }),
+      });
     },
     loadNodes() {
       return requestJSON<NodeListResponse>("/api/nodes?limit=100&offset=0");

@@ -28,11 +28,32 @@ func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, 
 		pool.Close()
 		return nil, err
 	}
+	if err := ensurePostgresSchema(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	return &PostgresStore{pool: pool}, nil
 }
 
 func (s *PostgresStore) Kind() string {
 	return "postgres"
+}
+
+func ensurePostgresSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	statements := []string{
+		`alter table users add column if not exists disabled boolean not null default false`,
+		`create table if not exists system_settings (
+			key text primary key,
+			value text not null,
+			updated_at timestamptz not null default now()
+		)`,
+	}
+	for _, statement := range statements {
+		if _, err := pool.Exec(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *PostgresStore) RegisterNode(ctx context.Context, req types.NodeRegisterRequest) (types.NodeSummary, error) {
@@ -617,27 +638,64 @@ func (s *PostgresStore) BootstrapAdmin(ctx context.Context, params CreateUserPar
 	return s.CreateUser(ctx, params)
 }
 
+func (s *PostgresStore) GetAuthSettings(ctx context.Context) (types.AuthSettings, error) {
+	row := s.pool.QueryRow(ctx, `
+		select value
+		from system_settings
+		where key = 'auth.public_registration_enabled'
+	`)
+	var raw string
+	if err := row.Scan(&raw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return types.AuthSettings{PublicRegistrationEnabled: true}, nil
+		}
+		return types.AuthSettings{}, err
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return types.AuthSettings{}, err
+	}
+	return types.AuthSettings{PublicRegistrationEnabled: enabled}, nil
+}
+
+func (s *PostgresStore) UpdateAuthSettings(ctx context.Context, settings types.AuthSettings) (types.AuthSettings, error) {
+	_, err := s.pool.Exec(ctx, `
+		insert into system_settings (key, value, updated_at)
+		values ('auth.public_registration_enabled', $1, now())
+		on conflict (key) do update set
+			value = excluded.value,
+			updated_at = now()
+	`, strconv.FormatBool(settings.PublicRegistrationEnabled))
+	if err != nil {
+		return types.AuthSettings{}, err
+	}
+	return settings, nil
+}
+
 func (s *PostgresStore) AuthenticateUser(ctx context.Context, params AuthenticateUserParams) (types.UserSummary, error) {
 	email := normalizeEmail(params.Email)
 	row := s.pool.QueryRow(ctx, `
-		select id, email, display_name, role, password_hash, created_at, updated_at
+		select id, email, display_name, role, disabled, password_hash, created_at, updated_at
 		from users
 		where lower(email) = $1
 	`, email)
 	var summary types.UserSummary
 	var passwordHash string
-	if err := row.Scan(&summary.ID, &summary.Email, &summary.DisplayName, &summary.Role, &passwordHash, &summary.CreatedAt, &summary.UpdatedAt); err != nil {
+	if err := row.Scan(&summary.ID, &summary.Email, &summary.DisplayName, &summary.Role, &summary.Disabled, &passwordHash, &summary.CreatedAt, &summary.UpdatedAt); err != nil {
 		return types.UserSummary{}, ErrUnauthorized
 	}
 	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(params.Password)) != nil {
 		return types.UserSummary{}, ErrUnauthorized
+	}
+	if summary.Disabled {
+		return types.UserSummary{}, ErrForbidden
 	}
 	return summary, nil
 }
 
 func (s *PostgresStore) ListUsers(ctx context.Context) ([]types.UserSummary, error) {
 	rows, err := s.pool.Query(ctx, `
-		select id, email, display_name, role, created_at, updated_at
+		select id, email, display_name, role, disabled, created_at, updated_at
 		from users
 		order by email
 	`)
@@ -648,7 +706,7 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]types.UserSummary, err
 	items := make([]types.UserSummary, 0)
 	for rows.Next() {
 		var item types.UserSummary
-		if err := rows.Scan(&item.ID, &item.Email, &item.DisplayName, &item.Role, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Email, &item.DisplayName, &item.Role, &item.Disabled, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -658,12 +716,12 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]types.UserSummary, err
 
 func (s *PostgresStore) GetUser(ctx context.Context, id string) (types.UserSummary, error) {
 	row := s.pool.QueryRow(ctx, `
-		select id, email, display_name, role, created_at, updated_at
+		select id, email, display_name, role, disabled, created_at, updated_at
 		from users
 		where id = $1
 	`, id)
 	var item types.UserSummary
-	if err := row.Scan(&item.ID, &item.Email, &item.DisplayName, &item.Role, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.Email, &item.DisplayName, &item.Role, &item.Disabled, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return types.UserSummary{}, ErrNotFound
 	}
 	return item, nil
@@ -681,12 +739,12 @@ func (s *PostgresStore) CreateUser(ctx context.Context, params CreateUserParams)
 	id := fmt.Sprintf("user-%d", time.Now().UnixNano())
 	role := normalizeUserRole(params.Role)
 	row := s.pool.QueryRow(ctx, `
-		insert into users (id, email, display_name, password_hash, role)
-		values ($1, $2, $3, $4, $5)
-		returning id, email, display_name, role, created_at, updated_at
+		insert into users (id, email, display_name, password_hash, role, disabled)
+		values ($1, $2, $3, $4, $5, false)
+		returning id, email, display_name, role, disabled, created_at, updated_at
 	`, id, email, strings.TrimSpace(params.DisplayName), string(hash), role)
 	var summary types.UserSummary
-	if err := row.Scan(&summary.ID, &summary.Email, &summary.DisplayName, &summary.Role, &summary.CreatedAt, &summary.UpdatedAt); err != nil {
+	if err := row.Scan(&summary.ID, &summary.Email, &summary.DisplayName, &summary.Role, &summary.Disabled, &summary.CreatedAt, &summary.UpdatedAt); err != nil {
 		return types.UserSummary{}, ErrConflict
 	}
 	return summary, nil
@@ -705,32 +763,30 @@ func (s *PostgresStore) UpdateUser(ctx context.Context, params UpdateUserParams)
 	if params.Role != "" {
 		role = normalizeUserRole(params.Role)
 	}
-	passwordHashSQL := "password_hash"
-	passwordArg := any(nil)
+	disabled := current.Disabled
+	if params.Disabled != nil {
+		disabled = *params.Disabled
+	}
 	if params.Password != "" {
 		hash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
 		if err != nil {
 			return types.UserSummary{}, err
 		}
-		passwordHashSQL = "$4"
-		passwordArg = string(hash)
 		_, err = s.pool.Exec(ctx, `
 			update users
-			set display_name = $2, role = $3, password_hash = $4, updated_at = now()
+			set display_name = $2, role = $3, disabled = $4, password_hash = $5, updated_at = now()
 			where id = $1
-		`, params.ID, displayName, role, passwordArg)
+		`, params.ID, displayName, role, disabled, string(hash))
 		if err != nil {
 			return types.UserSummary{}, err
 		}
 		return s.GetUser(ctx, params.ID)
 	}
-	_ = passwordHashSQL
-	_ = passwordArg
 	commandTag, err := s.pool.Exec(ctx, `
 		update users
-		set display_name = $2, role = $3, updated_at = now()
+		set display_name = $2, role = $3, disabled = $4, updated_at = now()
 		where id = $1
-	`, params.ID, displayName, role)
+	`, params.ID, displayName, role, disabled)
 	if err != nil {
 		return types.UserSummary{}, err
 	}

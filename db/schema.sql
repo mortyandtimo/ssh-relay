@@ -4,6 +4,7 @@ create table if not exists users (
     display_name text not null,
     password_hash text not null,
     role text not null default 'admin',
+    disabled boolean not null default false,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -120,3 +121,9 @@ create table if not exists user_certificates (
 );
 
 create unique index if not exists idx_user_certs_user_domain on user_certificates(user_id, domain);
+
+create table if not exists system_settings (
+    key text primary key,
+    value text not null,
+    updated_at timestamptz not null default now()
+);

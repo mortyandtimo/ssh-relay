@@ -2,7 +2,7 @@ import { startTransition, useCallback, useEffect, useMemo, useState } from "reac
 import type { MouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
-import type { UserServiceEntry, UserSummary } from "../../../packages/desktop-core/src/types";
+import type { AuthSettings, UserRole, UserServiceEntry, UserSummary } from "../../../packages/desktop-core/src/types";
 import {
   appExit,
   createTauriDesktopTransport,
@@ -35,7 +35,8 @@ import {
 type CloseAction = "ask" | "tray" | "exit";
 type DriveFallbackPolicy = "admin_only" | "never";
 type ImageBulkUploadMode = "p2p_bulk_https_light" | "https_only";
-type Page = "loading" | "login" | "home" | "drive" | "gallery" | "p2p" | "settings";
+type AuthMode = "login" | "register";
+type Page = "loading" | "login" | "home" | "drive" | "gallery" | "p2p" | "management" | "settings";
 type ReopenDialogChoice = "cancel" | "new-window";
 type ServiceBinding = {
   key: string;
@@ -62,6 +63,9 @@ type ServiceBinding = {
 
 const defaultApiUrl = "https://manage.020309.top";
 const defaultP2PPeerUrl = "tcp://easytier.manage.020309.top:11010";
+const defaultAuthSettings: AuthSettings = {
+  publicRegistrationEnabled: true,
+};
 const defaultConfig: Required<Pick<AppConfig, "closeAction" | "driveFallbackPolicy" | "imageBulkUploadMode" | "p2pUseDhcp">> = {
   closeAction: "ask",
   driveFallbackPolicy: "admin_only",
@@ -148,14 +152,46 @@ function userNodeStatusLabel(status?: UserNodeStatus | null) {
 function roleLabel(role?: string) {
   switch (role) {
     case "admin":
-      return "管理员";
+      return "超级管理员";
     case "manager":
-      return "管理用户";
+      return "普通管理员";
     case "user":
       return "普通用户";
     default:
       return "未登录";
   }
+}
+
+function isSuperAdmin(user?: UserSummary | null) {
+  return user?.role === "admin";
+}
+
+function isOrdinaryAdmin(user?: UserSummary | null) {
+  return user?.role === "manager";
+}
+
+function canToggleUserDisabled(actor?: UserSummary | null, target?: UserSummary | null) {
+  if (!actor || !target || actor.id === target.id) {
+    return false;
+  }
+  if (actor.role === "admin") {
+    return target.role !== "admin";
+  }
+  if (actor.role === "manager") {
+    return target.role === "user";
+  }
+  return false;
+}
+
+function canEditUserRole(actor?: UserSummary | null, target?: UserSummary | null) {
+  if (!actor || !target || actor.id === target.id) {
+    return false;
+  }
+  return actor.role === "admin" && target.role !== "admin";
+}
+
+function userStateLabel(user?: UserSummary | null) {
+  return user?.disabled ? "已封禁" : "正常";
 }
 
 function serviceAccessLabel(access?: string) {
@@ -283,10 +319,29 @@ export default function App() {
   const [userNodeStatus, setUserNodeStatus] = useState<UserNodeStatus | null>(null);
   const [userServices, setUserServices] = useState<UserServiceEntry[]>([]);
   const [serviceLoading, setServiceLoading] = useState(false);
+  const [managedUsers, setManagedUsers] = useState<UserSummary[]>([]);
+  const [authSettings, setAuthSettings] = useState<AuthSettings>(defaultAuthSettings);
+  const [adminBusyAction, setAdminBusyAction] = useState("");
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [managedUserForm, setManagedUserForm] = useState({
+    email: "",
+    displayName: "",
+    password: "",
+    role: "user" as UserRole,
+  });
+  const [userRoleDrafts, setUserRoleDrafts] = useState<Record<string, UserRole>>({});
+  const [passwordChangeForm, setPasswordChangeForm] = useState({
+    code: "",
+    password: "",
+    confirmPassword: "",
+  });
 
   const [apiUrl, setApiUrl] = useState(defaultApiUrl);
+  const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
+  const [registerDisplayName, setRegisterDisplayName] = useState("");
+  const [registerConfirmPassword, setRegisterConfirmPassword] = useState("");
   const [savePassword, setSavePassword] = useState(false);
   const [autoLogin, setAutoLogin] = useState(false);
 
@@ -338,6 +393,38 @@ export default function App() {
     }
   }, [api]);
 
+  const refreshAdminData = useCallback(async (client = api, currentUser = user) => {
+    if (!currentUser || (currentUser.role !== "admin" && currentUser.role !== "manager")) {
+      setManagedUsers([]);
+      setUserRoleDrafts({});
+      setAuthSettings(defaultAuthSettings);
+      return;
+    }
+    setAdminLoading(true);
+    try {
+      const [usersPayload, authSettingsPayload] = await Promise.all([
+        client.loadManagedUsers(),
+        currentUser.role === "admin" ? client.loadAuthSettings() : Promise.resolve(defaultAuthSettings),
+      ]);
+      setManagedUsers(usersPayload.items || []);
+      setAuthSettings(authSettingsPayload);
+      setUserRoleDrafts((current) => {
+        const next: Record<string, UserRole> = {};
+        for (const item of usersPayload.items || []) {
+          next[item.id] = current[item.id] || item.role;
+        }
+        return next;
+      });
+    } catch (adminError) {
+      setManagedUsers([]);
+      setUserRoleDrafts({});
+      setAuthSettings(defaultAuthSettings);
+      setError(adminError instanceof Error ? adminError.message : "加载管理员数据失败");
+    } finally {
+      setAdminLoading(false);
+    }
+  }, [api, user]);
+
   const fillProfileCredentials = useCallback(async (email: string, profiles?: LoginProfilesFile | null) => {
     const activeProfiles = profiles ?? loginProfiles;
     const profile = activeProfiles?.profiles.find((item) => item.email === email);
@@ -368,6 +455,7 @@ export default function App() {
       setPage("home");
       setError("");
       await refreshUserServices(api);
+      await refreshAdminData(api, response.user);
       void syncUserNodePresence({
         email: response.user.email,
         role: response.user.role,
@@ -377,9 +465,12 @@ export default function App() {
     } catch {
       setUser(null);
       setUserServices([]);
+      setManagedUsers([]);
+      setUserRoleDrafts({});
+      setAuthSettings(defaultAuthSettings);
       return false;
     }
-  }, [api, refreshUserServices, syncUserNodePresence]);
+  }, [api, refreshAdminData, refreshUserServices, syncUserNodePresence]);
 
   useEffect(() => {
     let cancelled = false;
@@ -422,6 +513,7 @@ export default function App() {
               setError("");
             });
             void refreshUserServices(sessionApi);
+            void refreshAdminData(sessionApi, response.user);
             void syncUserNodePresence({
               email: response.user.email,
               role: response.user.role,
@@ -453,6 +545,7 @@ export default function App() {
                 setError("");
               });
               void refreshUserServices(sessionApi);
+              void refreshAdminData(sessionApi, response.user);
               void syncUserNodePresence({
                 email: response.user.email,
                 role: response.user.role,
@@ -476,7 +569,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [refreshP2PStatus, refreshUserNodeStatus, refreshUserServices, syncUserNodePresence, transport]);
+  }, [refreshAdminData, refreshP2PStatus, refreshUserNodeStatus, refreshUserServices, syncUserNodePresence, transport]);
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -533,7 +626,9 @@ export default function App() {
       const response = await loginApi.login(loginEmail.trim(), loginPassword);
       setUser(response.user);
       setPage("home");
+      setAuthMode("login");
       await refreshUserServices(loginApi);
+      await refreshAdminData(loginApi, response.user);
       void syncUserNodePresence({
         email: response.user.email,
         role: response.user.role,
@@ -549,7 +644,45 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [apiUrl, appConfig, autoLogin, loginEmail, loginPassword, persistConfig, refreshLoginProfiles, refreshUserServices, savePassword, syncUserNodePresence, transport]);
+  }, [apiUrl, appConfig, autoLogin, loginEmail, loginPassword, persistConfig, refreshAdminData, refreshLoginProfiles, refreshUserServices, savePassword, syncUserNodePresence, transport]);
+
+  const handleRegister = useCallback(async () => {
+    if (!registerDisplayName.trim() || !loginEmail.trim() || !loginPassword.trim()) {
+      setError("请输入昵称、邮箱和密码");
+      return;
+    }
+    if (loginPassword !== registerConfirmPassword) {
+      setError("两次输入的密码不一致");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      await persistConfig({ ...appConfig, apiBaseUrl: apiUrl });
+      const registerApi = createDesktopApi(normalizeApiBaseUrl(apiUrl), transport || undefined);
+      const response = await registerApi.register(loginEmail.trim(), registerDisplayName.trim(), loginPassword);
+      setUser(response.user);
+      setPage("home");
+      setAuthMode("login");
+      await refreshUserServices(registerApi);
+      await refreshAdminData(registerApi, response.user);
+      void syncUserNodePresence({
+        email: response.user.email,
+        role: response.user.role,
+        displayName: response.user.displayName,
+      });
+      if (savePassword) {
+        await saveLoginProfile(loginEmail.trim(), loginPassword, autoLogin);
+        await refreshLoginProfiles();
+      }
+      setNotice("注册成功，已自动登录。");
+    } catch (registerError) {
+      setError(registerError instanceof Error ? registerError.message : "注册失败");
+    } finally {
+      setBusy(false);
+    }
+  }, [apiUrl, appConfig, autoLogin, loginEmail, loginPassword, persistConfig, refreshAdminData, refreshLoginProfiles, refreshUserServices, registerConfirmPassword, registerDisplayName, savePassword, syncUserNodePresence, transport]);
 
   const handleLogout = useCallback(async () => {
     setBusy(true);
@@ -561,10 +694,145 @@ export default function App() {
     } finally {
       setUser(null);
       setUserServices([]);
+      setManagedUsers([]);
+      setUserRoleDrafts({});
+      setAuthSettings(defaultAuthSettings);
       setPage("login");
       setBusy(false);
     }
   }, [api, syncUserNodePresence]);
+
+  const handleCreateManagedUser = useCallback(async () => {
+    if (!user || !isSuperAdmin(user)) {
+      setError("只有超级管理员可以创建用户。");
+      return;
+    }
+    if (!managedUserForm.email.trim() || !managedUserForm.displayName.trim() || !managedUserForm.password.trim()) {
+      setError("请输入新用户的邮箱、昵称和密码");
+      return;
+    }
+    setAdminBusyAction("create-user");
+    setError("");
+    setNotice("");
+    try {
+      await api.createManagedUser(managedUserForm);
+      setManagedUserForm({ email: "", displayName: "", password: "", role: "user" });
+      await refreshAdminData();
+      setNotice("用户已创建。");
+    } catch (adminError) {
+      setError(adminError instanceof Error ? adminError.message : "创建用户失败");
+    } finally {
+      setAdminBusyAction("");
+    }
+  }, [api, managedUserForm, refreshAdminData, user]);
+
+  const handleTogglePublicRegistration = useCallback(async (enabled: boolean) => {
+    if (!user || !isSuperAdmin(user)) {
+      setError("只有超级管理员可以修改公开注册开关。");
+      return;
+    }
+    setAdminBusyAction("toggle-registration");
+    setError("");
+    setNotice("");
+    try {
+      const nextSettings = await api.updateAuthSettings(enabled);
+      setAuthSettings(nextSettings);
+      setNotice(enabled ? "已开启公开注册。" : "已关闭公开注册。");
+    } catch (adminError) {
+      setError(adminError instanceof Error ? adminError.message : "更新注册开关失败");
+    } finally {
+      setAdminBusyAction("");
+    }
+  }, [api, user]);
+
+  const handleSaveManagedUserRole = useCallback(async (target: UserSummary) => {
+    if (!canEditUserRole(user, target)) {
+      setError("只有超级管理员可以调整用户权限。");
+      return;
+    }
+    const nextRole = userRoleDrafts[target.id] || target.role;
+    if (nextRole === target.role) {
+      setNotice("角色未发生变化。");
+      return;
+    }
+    setAdminBusyAction("role:" + target.id);
+    setError("");
+    setNotice("");
+    try {
+      await api.updateManagedUser(target.id, { role: nextRole });
+      await refreshAdminData();
+      setNotice("用户角色已更新。");
+    } catch (adminError) {
+      setError(adminError instanceof Error ? adminError.message : "更新用户角色失败");
+    } finally {
+      setAdminBusyAction("");
+    }
+  }, [api, refreshAdminData, user, userRoleDrafts]);
+
+  const handleToggleManagedUserDisabled = useCallback(async (target: UserSummary) => {
+    if (!canToggleUserDisabled(user, target)) {
+      setError(isOrdinaryAdmin(user) ? "普通管理员只能封禁或解禁普通用户。" : "当前不能调整该账号状态。");
+      return;
+    }
+    setAdminBusyAction("toggle-user:" + target.id);
+    setError("");
+    setNotice("");
+    try {
+      await api.updateManagedUser(target.id, { disabled: !Boolean(target.disabled) });
+      await refreshAdminData();
+      setNotice(target.disabled ? "用户已解禁。" : "用户已封禁。");
+    } catch (adminError) {
+      setError(adminError instanceof Error ? adminError.message : "更新用户状态失败");
+    } finally {
+      setAdminBusyAction("");
+    }
+  }, [api, refreshAdminData, user]);
+
+  const handleSendPasswordChangeCode = useCallback(async () => {
+    if (isSuperAdmin(user)) {
+      setError("超级管理员密码不提供自助修改，请走平台外部人工修改流程。");
+      return;
+    }
+    setAdminBusyAction("send-password-code");
+    setError("");
+    setNotice("");
+    try {
+      const response = await api.sendPasswordChangeCode();
+      setNotice(`验证码已发送到 ${response.email}。`);
+    } catch (adminError) {
+      setError(adminError instanceof Error ? adminError.message : "发送验证码失败");
+    } finally {
+      setAdminBusyAction("");
+    }
+  }, [api, user]);
+
+  const handleConfirmPasswordChange = useCallback(async () => {
+    if (isSuperAdmin(user)) {
+      setError("超级管理员密码不提供自助修改，请走平台外部人工修改流程。");
+      return;
+    }
+    if (!passwordChangeForm.code.trim() || !passwordChangeForm.password.trim()) {
+      setError("请输入验证码和新密码");
+      return;
+    }
+    if (passwordChangeForm.password !== passwordChangeForm.confirmPassword) {
+      setError("两次输入的新密码不一致");
+      return;
+    }
+    setAdminBusyAction("confirm-password-change");
+    setError("");
+    setNotice("");
+    try {
+      const response = await api.confirmPasswordChange(passwordChangeForm.code.trim(), passwordChangeForm.password);
+      setUser(response.user);
+      setPasswordChangeForm({ code: "", password: "", confirmPassword: "" });
+      setNotice("当前账号密码已更新。");
+    } catch (adminError) {
+      setError(adminError instanceof Error ? adminError.message : "修改密码失败");
+    } finally {
+      setAdminBusyAction("");
+    }
+  }, [api, passwordChangeForm, user]);
 
   const handleDeleteProfile = useCallback(async (email: string) => {
     try {
@@ -783,12 +1051,14 @@ export default function App() {
 
   const renderLoginPage = () => (
     <div className="card auth-card">
-      <h2>登录用户端</h2>
-      <p className="helper-text">用户端用于访问网盘、执行批量图床上传、接入 P2P 网络。云端仍负责鉴权、目录和公开入口。</p>
+      <h2>{authMode === "register" ? "注册普通用户" : "登录用户端"}</h2>
+      <p className="helper-text">
+        用户端用于访问网盘、图床和 P2P 网络。图床、网盘自身仍会做业务登录，所以用户端不再额外限制这两个服务的 P2P 入口。
+      </p>
       <label>云端地址</label>
       <input value={apiUrl} onChange={(event) => setApiUrl(event.target.value)} placeholder={defaultApiUrl} />
       <label>邮箱</label>
-      {loginProfiles?.profiles.length ? (
+      {authMode === "login" && loginProfiles?.profiles.length ? (
         <div className="profile-selector">
           <div className="profile-input-wrap">
             <input value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} onFocus={() => setProfileListOpen(false)} />
@@ -823,8 +1093,20 @@ export default function App() {
       ) : (
         <input value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} />
       )}
+      {authMode === "register" ? (
+        <>
+          <label>昵称</label>
+          <input value={registerDisplayName} onChange={(event) => setRegisterDisplayName(event.target.value)} />
+        </>
+      ) : null}
       <label>密码</label>
       <input type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} />
+      {authMode === "register" ? (
+        <>
+          <label>确认密码</label>
+          <input type="password" value={registerConfirmPassword} onChange={(event) => setRegisterConfirmPassword(event.target.value)} />
+        </>
+      ) : null}
       <label className="check-row">
         <input
           type="checkbox"
@@ -852,11 +1134,31 @@ export default function App() {
         <span>自动登录</span>
       </label>
       <div className="action-row">
-        <button className="primary" type="button" onClick={() => void handleLogin()} disabled={busy}>
-          {busy ? "登录中..." : "登录"}
+        <button
+          className="primary"
+          type="button"
+          onClick={() => void (authMode === "register" ? handleRegister() : handleLogin())}
+          disabled={busy}
+        >
+          {busy ? (authMode === "register" ? "注册中..." : "登录中...") : (authMode === "register" ? "注册并登录" : "登录")}
         </button>
         <button className="secondary" type="button" onClick={() => void saveAndReconnect()} disabled={busy}>
           保存地址
+        </button>
+      </div>
+      <div className="action-row">
+        <button
+          className="secondary"
+          type="button"
+          onClick={() => {
+            setAuthMode((current) => current === "login" ? "register" : "login");
+            setError("");
+            setNotice("");
+            setProfileListOpen(false);
+          }}
+          disabled={busy}
+        >
+          {authMode === "register" ? "返回登录" : "注册普通用户"}
         </button>
       </div>
     </div>
@@ -908,6 +1210,9 @@ export default function App() {
     return items;
   }, [catalogByKey]);
 
+  const managementVisible = Boolean(user && (isSuperAdmin(user) || isOrdinaryAdmin(user)));
+  const superManagementVisible = Boolean(user && isSuperAdmin(user));
+
   return (
     <div className="app-shell">
       <div className="titlebar" onMouseDown={handleTitlebarDrag}>
@@ -927,6 +1232,11 @@ export default function App() {
             <button className={`nav-btn ${page === "drive" ? "active" : ""}`} type="button" onClick={() => setPage("drive")}>网盘</button>
             <button className={`nav-btn ${page === "gallery" ? "active" : ""}`} type="button" onClick={() => setPage("gallery")}>图床</button>
             <button className={`nav-btn ${page === "p2p" ? "active" : ""}`} type="button" onClick={() => setPage("p2p")}>P2P 网络</button>
+            {(isSuperAdmin(user) || isOrdinaryAdmin(user)) ? (
+              <button className={`nav-btn ${page === "management" ? "active" : ""}`} type="button" onClick={() => setPage("management")}>
+                {isSuperAdmin(user) ? "超级管理" : "管理页"}
+              </button>
+            ) : null}
             <button className={`nav-btn ${page === "settings" ? "active" : ""}`} type="button" onClick={() => setPage("settings")}>设置</button>
             <div className="sidebar-footer">
               <div className="user-info">
@@ -1370,11 +1680,297 @@ export default function App() {
           </>
         ) : null}
 
+        {!initializing && user && page === "management" && managementVisible ? (
+          <>
+            <div className="page-header">
+              <h1>{superManagementVisible ? "超级管理" : "管理页"}</h1>
+              <p>
+                {superManagementVisible
+                  ? "超级管理员负责用户体系本身：公开注册、账号创建、普通管理员权限，以及普通用户的封禁解禁。"
+                  : "普通管理员只负责日常用户值守：查看账号状态，并对普通用户做封禁或解禁。平台注册开关和管理员权限仍由超级管理员维护。"}
+              </p>
+            </div>
+            <div className="grid two">
+              <section className="card">
+                <h2>{superManagementVisible ? "管理边界" : "普通管理员边界"}</h2>
+                <div className="policy-chip">当前身份: {roleLabel(user.role)}</div>
+                <div className="policy-chip">当前账号: {user.email}</div>
+                <div className="policy-chip">公开注册: {superManagementVisible ? (authSettings.publicRegistrationEnabled ? "开启" : "关闭") : "仅超级管理员可见"}</div>
+                <ul className="plain-list">
+                  {superManagementVisible ? (
+                    <>
+                      <li>当前账号固定为唯一超级管理员，不允许删除、封禁或降级。</li>
+                      <li>你可以创建普通用户和普通管理员，也可以把普通管理员降回普通用户。</li>
+                      <li>公开注册开关只在超级管理员页出现，不再放在设置页。</li>
+                    </>
+                  ) : (
+                    <>
+                      <li>普通管理员只能查看账号列表，并对普通用户执行封禁或解禁。</li>
+                      <li>普通管理员不能创建账号、不能改公开注册，也不能提升或降级管理员。</li>
+                      <li>管理员账号和超级管理员账号都只能由超级管理员维护。</li>
+                    </>
+                  )}
+                </ul>
+              </section>
+              <section className="card">
+                <h2>{superManagementVisible ? "超级管理员密码" : "当前账号改密码"}</h2>
+                {superManagementVisible ? (
+                  <>
+                    <div className="policy-chip">当前超级管理员账号已锁定自助改密</div>
+                    <p className="helper-text">超级管理员密码不再提供邮箱验证码修改入口，只能通过你当前这种人工干预方式单独调整。</p>
+                    <div className="mono-box">当前超级管理员账号不会在用户端页面中提供“发送验证码”或“验证并修改密码”功能。</div>
+                  </>
+                ) : (
+                  <>
+                    <p className="helper-text">验证码会发送到当前账号邮箱：{user.email}</p>
+                    <label>邮箱验证码</label>
+                    <div className="action-row wrap inline-form-row">
+                      <input
+                        value={passwordChangeForm.code}
+                        onChange={(event) => setPasswordChangeForm((current) => ({ ...current, code: event.target.value }))}
+                        placeholder="6 位验证码"
+                      />
+                      <button
+                        className="secondary"
+                        type="button"
+                        onClick={() => void handleSendPasswordChangeCode()}
+                        disabled={adminBusyAction === "send-password-code"}
+                      >
+                        {adminBusyAction === "send-password-code" ? "发送中..." : "发送验证码"}
+                      </button>
+                    </div>
+                    <label>新密码</label>
+                    <input
+                      type="password"
+                      value={passwordChangeForm.password}
+                      onChange={(event) => setPasswordChangeForm((current) => ({ ...current, password: event.target.value }))}
+                      placeholder="输入新密码"
+                    />
+                    <label>确认新密码</label>
+                    <input
+                      type="password"
+                      value={passwordChangeForm.confirmPassword}
+                      onChange={(event) => setPasswordChangeForm((current) => ({ ...current, confirmPassword: event.target.value }))}
+                      placeholder="再次输入新密码"
+                    />
+                    <div className="action-row wrap">
+                      <button
+                        className="primary"
+                        type="button"
+                        onClick={() => void handleConfirmPasswordChange()}
+                        disabled={adminBusyAction === "confirm-password-change"}
+                      >
+                        {adminBusyAction === "confirm-password-change" ? "修改中..." : "验证并修改密码"}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </section>
+            </div>
+            {superManagementVisible ? (
+              <>
+                <section className="card" style={{ marginTop: 18 }}>
+                  <h2>公开注册</h2>
+                  <div className="grid two compact-grid">
+                    <div className="admin-block">
+                      <h3>当前状态</h3>
+                      <div className="policy-chip">{authSettings.publicRegistrationEnabled ? "公开注册已开启" : "公开注册已关闭"}</div>
+                      <p className="inline-note">关闭后，普通用户不能自行注册，只能由超级管理员手工创建账号。</p>
+                    </div>
+                    <div className="admin-block">
+                      <h3>注册开关</h3>
+                      <p className="inline-note">该开关作用于整套用户端登录体系，不区分图床和网盘。</p>
+                      <div className="action-row wrap">
+                        <button
+                          className="primary"
+                          type="button"
+                          onClick={() => void handleTogglePublicRegistration(!authSettings.publicRegistrationEnabled)}
+                          disabled={adminBusyAction === "toggle-registration"}
+                        >
+                          {adminBusyAction === "toggle-registration"
+                            ? "保存中..."
+                            : (authSettings.publicRegistrationEnabled ? "关闭公开注册" : "开启公开注册")}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+                <section className="card" style={{ marginTop: 18 }}>
+                  <h2>创建用户</h2>
+                  <div className="grid two compact-grid">
+                    <div>
+                      <label>邮箱</label>
+                      <input
+                        value={managedUserForm.email}
+                        onChange={(event) => setManagedUserForm((current) => ({ ...current, email: event.target.value }))}
+                        placeholder="user@example.com"
+                      />
+                    </div>
+                    <div>
+                      <label>昵称</label>
+                      <input
+                        value={managedUserForm.displayName}
+                        onChange={(event) => setManagedUserForm((current) => ({ ...current, displayName: event.target.value }))}
+                        placeholder="显示名称"
+                      />
+                    </div>
+                    <div>
+                      <label>初始密码</label>
+                      <input
+                        type="password"
+                        value={managedUserForm.password}
+                        onChange={(event) => setManagedUserForm((current) => ({ ...current, password: event.target.value }))}
+                        placeholder="输入初始密码"
+                      />
+                    </div>
+                    <div>
+                      <label>角色</label>
+                      <select
+                        value={managedUserForm.role}
+                        onChange={(event) => setManagedUserForm((current) => ({ ...current, role: event.target.value as UserRole }))}
+                      >
+                        <option value="user">普通用户</option>
+                        <option value="manager">普通管理员</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="action-row wrap">
+                    <button
+                      className="primary"
+                      type="button"
+                      onClick={() => void handleCreateManagedUser()}
+                      disabled={adminBusyAction === "create-user"}
+                    >
+                      {adminBusyAction === "create-user" ? "创建中..." : "创建用户"}
+                    </button>
+                  </div>
+                </section>
+              </>
+            ) : (
+              <section className="card" style={{ marginTop: 18 }}>
+                <h2>超级管理员保留操作</h2>
+                <ul className="plain-list">
+                  <li>公开注册开关由超级管理员控制。</li>
+                  <li>新账号创建和管理员权限调整由超级管理员执行。</li>
+                  <li>普通管理员当前页只保留普通用户封禁解禁与自身邮箱验证码改密码。</li>
+                </ul>
+              </section>
+            )}
+            <section className="card" style={{ marginTop: 18 }}>
+              <div className="service-header-row">
+                <div>
+                  <h2>用户管理</h2>
+                  <p className="helper-text">
+                    {superManagementVisible
+                      ? "超级管理员可以维护普通用户与普通管理员；保留超级管理员账号不会在这里开放删除、封禁或降级。"
+                      : "普通管理员可以查看全部账号，但只能封禁或解禁普通用户。"}
+                  </p>
+                </div>
+                <button className="secondary" type="button" onClick={() => void refreshAdminData()} disabled={adminLoading}>
+                  {adminLoading ? "刷新中..." : "刷新用户列表"}
+                </button>
+              </div>
+              <div className="admin-user-list">
+                {managedUsers.length === 0 ? (
+                  <div className="service-empty">
+                    <strong>暂无用户数据</strong>
+                    <p>当前还没有可管理的用户记录。</p>
+                  </div>
+                ) : managedUsers.map((target) => {
+                  const isCurrentAccount = target.id === user.id;
+                  const roleEditable = canEditUserRole(user, target);
+                  const disabledEditable = canToggleUserDisabled(user, target);
+                  const roleDraft = userRoleDrafts[target.id] || target.role;
+                  let stateDescription = "";
+                  if (isCurrentAccount) {
+                    stateDescription = "当前登录账号只能走邮箱验证码改密码，不允许在这里封禁、删除或修改自身角色。";
+                  } else if (target.role === "admin") {
+                    stateDescription = "保留超级管理员账号，由平台固定持有，不开放封禁、降级或删除。";
+                  } else if (!superManagementVisible && target.role === "manager") {
+                    stateDescription = "普通管理员账号由超级管理员维护，当前页只展示状态，不开放修改。";
+                  } else if (target.disabled) {
+                    stateDescription = "该用户已被封禁，现有会话会在服务端被拦截。";
+                  } else if (!superManagementVisible && target.role === "user") {
+                    stateDescription = "普通管理员可在当前页对该普通用户执行封禁或解禁。";
+                  } else {
+                    stateDescription = "该用户当前可正常登录和访问已授权服务。";
+                  }
+
+                  return (
+                    <div key={target.id} className="admin-user-card">
+                      <div className="admin-user-head">
+                        <div>
+                          <strong>{target.displayName}</strong>
+                          <div className="helper-text small-text">{target.email}</div>
+                        </div>
+                        <div className="service-chip-row">
+                          <span className="service-chip">{roleLabel(target.role)}</span>
+                          <span className={`service-chip${target.disabled ? " danger-chip" : ""}`}>{userStateLabel(target)}</span>
+                        </div>
+                      </div>
+                      <div className="grid two compact-grid">
+                        <div>
+                          <label>{superManagementVisible ? "角色维护" : "权限范围"}</label>
+                          {roleEditable ? (
+                            <select
+                              value={roleDraft}
+                              onChange={(event) => setUserRoleDrafts((current) => ({ ...current, [target.id]: event.target.value as UserRole }))}
+                            >
+                              <option value="user">普通用户</option>
+                              <option value="manager">普通管理员</option>
+                            </select>
+                          ) : (
+                            <div className="mono-box">
+                              {target.role === "admin"
+                                ? "超级管理员账号固定保留，不开放角色调整。"
+                                : isCurrentAccount
+                                  ? "当前登录账号不允许在这里改角色。"
+                                  : (!superManagementVisible && target.role === "manager")
+                                    ? "普通管理员不能调整其他管理员权限。"
+                                    : "当前账号无需调整角色。"}
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <label>状态说明</label>
+                          <div className="mono-box">{stateDescription}</div>
+                        </div>
+                      </div>
+                      <div className="action-row wrap">
+                        {superManagementVisible ? (
+                          <button
+                            className="primary"
+                            type="button"
+                            onClick={() => void handleSaveManagedUserRole(target)}
+                            disabled={!roleEditable || adminBusyAction === "role:" + target.id}
+                          >
+                            {adminBusyAction === "role:" + target.id ? "保存中..." : "保存权限"}
+                          </button>
+                        ) : null}
+                        <button
+                          className={target.disabled ? "secondary" : "danger"}
+                          type="button"
+                          onClick={() => void handleToggleManagedUserDisabled(target)}
+                          disabled={!disabledEditable || adminBusyAction === "toggle-user:" + target.id}
+                        >
+                          {adminBusyAction === "toggle-user:" + target.id
+                            ? "处理中..."
+                            : (target.disabled ? "解禁用户" : "封禁用户")}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          </>
+        ) : null}
+
         {!initializing && user && page === "settings" ? (
           <>
             <div className="page-header">
               <h1>设置</h1>
-              <p>用户端只管理用户侧访问、P2P 和本地体验，不承担服务端发布工作。</p>
+              <p>设置页只保留用户端本地体验、连接地址和登录历史；账号管理已经移到独立管理页。</p>
             </div>
             <div className="grid two">
               <section className="card">

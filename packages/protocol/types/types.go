@@ -517,6 +517,7 @@ type UserSummary struct {
 	Email       string    `json:"email"`
 	DisplayName string    `json:"displayName"`
 	Role        UserRole  `json:"role"`
+	Disabled    bool      `json:"disabled"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
@@ -526,8 +527,18 @@ type AuthLoginRequest struct {
 	Password string `json:"password"`
 }
 
+type AuthRegisterRequest struct {
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Password    string `json:"password"`
+}
+
 type AuthUserResponse struct {
 	User UserSummary `json:"user"`
+}
+
+type AuthSettings struct {
+	PublicRegistrationEnabled bool `json:"publicRegistrationEnabled"`
 }
 
 type AuthBootstrapStatusResponse struct {
@@ -545,6 +556,18 @@ type UpdateUserRequest struct {
 	DisplayName string   `json:"displayName,omitempty"`
 	Password    string   `json:"password,omitempty"`
 	Role        UserRole `json:"role,omitempty"`
+	Disabled    *bool    `json:"disabled,omitempty"`
+}
+
+type UpdateAuthSettingsRequest struct {
+	PublicRegistrationEnabled bool `json:"publicRegistrationEnabled"`
+}
+
+type SendPasswordChangeCodeRequest struct{}
+
+type ConfirmPasswordChangeRequest struct {
+	Code     string `json:"code"`
+	Password string `json:"password"`
 }
 
 type BootstrapAdminRequest struct {

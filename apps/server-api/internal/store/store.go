@@ -93,6 +93,7 @@ type UpdateUserParams struct {
 	DisplayName string
 	Password    string
 	Role        types.UserRole
+	Disabled    *bool
 }
 
 type AuditLogFilter struct {
@@ -147,6 +148,8 @@ type Store interface {
 
 	BootstrapStatus(ctx context.Context) (bool, error)
 	BootstrapAdmin(ctx context.Context, params CreateUserParams) (types.UserSummary, error)
+	GetAuthSettings(ctx context.Context) (types.AuthSettings, error)
+	UpdateAuthSettings(ctx context.Context, settings types.AuthSettings) (types.AuthSettings, error)
 	AuthenticateUser(ctx context.Context, params AuthenticateUserParams) (types.UserSummary, error)
 	ListUsers(ctx context.Context) ([]types.UserSummary, error)
 	GetUser(ctx context.Context, id string) (types.UserSummary, error)

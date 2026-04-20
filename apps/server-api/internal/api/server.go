@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -15,7 +16,9 @@ import (
 	"log"
 	mathrand "math/rand"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/smtp"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,51 +49,65 @@ type authClaims struct {
 	Expiry time.Time
 }
 
+type passwordChangeCodeRecord struct {
+	CodeHash  string
+	Email     string
+	ExpiresAt time.Time
+	SentAt    time.Time
+}
+
 type Server struct {
-	version              string
-	startedAt            time.Time
-	store                store.Store
-	controlExecutor      controlExecutor
-	relayTCPRuntimeURL   string
-	nginxManager         *nginx.Manager
-	acmeEmail            string
-	httpClient           *http.Client
-	mux                  *http.ServeMux
-	accessSecret         string
-	adminWebDir          string
-	publicEntryHost      string
-	accessTokenTTL       time.Duration
-	refreshTokenTTL      time.Duration
-	adminBootstrapSecret string
-	releaseUploadDir     string
-	releasePublicBaseURL string
-	allowedOrigins       map[string]struct{}
-	authCookiesSecure    bool
-	controlExecuteMu     sync.Mutex
-	controlExecuteActive map[string]struct{}
-	controlExecuteDone   map[string]controlExecutionRecord
+	version                string
+	startedAt              time.Time
+	store                  store.Store
+	controlExecutor        controlExecutor
+	relayTCPRuntimeURL     string
+	nginxManager           *nginx.Manager
+	acmeEmail              string
+	httpClient             *http.Client
+	mux                    *http.ServeMux
+	accessSecret           string
+	adminWebDir            string
+	publicEntryHost        string
+	accessTokenTTL         time.Duration
+	refreshTokenTTL        time.Duration
+	adminBootstrapSecret   string
+	releaseUploadDir       string
+	releasePublicBaseURL   string
+	allowedOrigins         map[string]struct{}
+	authCookiesSecure      bool
+	controlExecuteMu       sync.Mutex
+	controlExecuteActive   map[string]struct{}
+	controlExecuteDone     map[string]controlExecutionRecord
+	passwordChangeMu       sync.Mutex
+	passwordChangeCodes    map[string]passwordChangeCodeRecord
+	passwordChangeCodeTTL  time.Duration
+	sendPasswordChangeCode func(to, code string) error
 }
 
 func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *Server {
 	s := &Server{
-		version:              version,
-		startedAt:            time.Now().UTC(),
-		store:                backend,
-		relayTCPRuntimeURL:   relayTCPRuntimeURL,
-		httpClient:           &http.Client{Timeout: 5 * time.Second},
-		mux:                  http.NewServeMux(),
-		accessSecret:         envOrDefault("SERVER_API_ACCESS_SECRET", "cloud-relay-access-secret-dev"),
-		adminWebDir:          envOrDefault("SERVER_API_ADMIN_WEB_DIR", "/opt/cloud-relay-platform/admin-web"),
-		publicEntryHost:      envOrDefault("SERVER_API_PUBLIC_ENTRY_HOST", "publisher.manage.020309.top"),
-		accessTokenTTL:       15 * time.Minute,
-		refreshTokenTTL:      7 * 24 * time.Hour,
-		adminBootstrapSecret: strings.TrimSpace(os.Getenv("SERVER_API_ADMIN_BOOTSTRAP_SECRET")),
-		releaseUploadDir:     strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_UPLOAD_DIR")),
-		releasePublicBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_PUBLIC_BASE_URL")), "/"),
-		allowedOrigins:       parseAllowedOrigins(os.Getenv("SERVER_API_ALLOWED_ORIGINS")),
-		authCookiesSecure:    parseBoolEnv(os.Getenv("SERVER_API_AUTH_COOKIES_SECURE")),
-		controlExecuteActive: map[string]struct{}{},
-		controlExecuteDone:   map[string]controlExecutionRecord{},
+		version:                version,
+		startedAt:              time.Now().UTC(),
+		store:                  backend,
+		relayTCPRuntimeURL:     relayTCPRuntimeURL,
+		httpClient:             &http.Client{Timeout: 5 * time.Second},
+		mux:                    http.NewServeMux(),
+		accessSecret:           envOrDefault("SERVER_API_ACCESS_SECRET", "cloud-relay-access-secret-dev"),
+		adminWebDir:            envOrDefault("SERVER_API_ADMIN_WEB_DIR", "/opt/cloud-relay-platform/admin-web"),
+		publicEntryHost:        envOrDefault("SERVER_API_PUBLIC_ENTRY_HOST", "publisher.manage.020309.top"),
+		accessTokenTTL:         15 * time.Minute,
+		refreshTokenTTL:        7 * 24 * time.Hour,
+		adminBootstrapSecret:   strings.TrimSpace(os.Getenv("SERVER_API_ADMIN_BOOTSTRAP_SECRET")),
+		releaseUploadDir:       strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_UPLOAD_DIR")),
+		releasePublicBaseURL:   strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_PUBLIC_BASE_URL")), "/"),
+		allowedOrigins:         parseAllowedOrigins(os.Getenv("SERVER_API_ALLOWED_ORIGINS")),
+		authCookiesSecure:      parseBoolEnv(os.Getenv("SERVER_API_AUTH_COOKIES_SECURE")),
+		controlExecuteActive:   map[string]struct{}{},
+		controlExecuteDone:     map[string]controlExecutionRecord{},
+		passwordChangeCodes:    map[string]passwordChangeCodeRecord{},
+		passwordChangeCodeTTL:  10 * time.Minute,
+		sendPasswordChangeCode: newSMTPPasswordChangeCodeSenderFromEnv(),
 	}
 	s.controlExecutor = newStateMutationControlExecutor(backend, newConfiguredControlExecutor())
 	s.routes()
@@ -132,13 +149,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/auth/bootstrap-status", s.handleBootstrapStatus)
 	s.mux.HandleFunc("/api/auth/bootstrap", s.handleBootstrap)
 	s.mux.HandleFunc("/api/auth/login", s.handleLogin)
+	s.mux.HandleFunc("/api/auth/register", s.handleRegisterUser)
 	s.mux.HandleFunc("/api/auth/refresh", s.handleRefresh)
 	s.mux.HandleFunc("/api/auth/logout", s.handleLogout)
 	s.mux.Handle("/api/auth/me", s.requireRole(types.UserRoleUser, http.HandlerFunc(s.handleAuthMe)))
+	s.mux.Handle("/api/auth/password-change/send-code", s.requireRole(types.UserRoleUser, http.HandlerFunc(s.handleSendPasswordChangeCode)))
+	s.mux.Handle("/api/auth/password-change/confirm", s.requireRole(types.UserRoleUser, http.HandlerFunc(s.handleConfirmPasswordChange)))
 	s.mux.Handle("/api/user/services", s.requireRole(types.UserRoleUser, http.HandlerFunc(s.handleUserServices)))
 
-	s.mux.Handle("/api/users", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleUsers)))
-	s.mux.Handle("/api/users/", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleUserByID)))
+	s.mux.Handle("/api/admin/auth-settings", s.requireRole(types.UserRoleAdmin, http.HandlerFunc(s.handleAdminAuthSettings)))
+	s.mux.Handle("/api/users", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleUsers)))
+	s.mux.Handle("/api/users/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleUserByID)))
 	s.mux.Handle("/api/nodes", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodes)))
 	s.mux.Handle("/api/node-options", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodeOptions)))
 	s.mux.Handle("/api/nodes/", s.requireRole(types.UserRoleManager, http.HandlerFunc(s.handleNodeByID)))
@@ -648,6 +669,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := s.store.AuthenticateUser(r.Context(), store.AuthenticateUserParams{Email: req.Email, Password: req.Password})
 	if err != nil {
+		if errors.Is(err, store.ErrForbidden) {
+			writeError(w, http.StatusForbidden, "user is disabled")
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
@@ -657,6 +682,62 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.writeAudit(r, "login", "session", "", map[string]string{"userId": user.ID, "email": user.Email})
 	writeJSON(w, http.StatusOK, types.AuthUserResponse{User: user})
+}
+
+func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	required, err := s.store.BootstrapStatus(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if required {
+		writeError(w, http.StatusConflict, "bootstrap required before public registration")
+		return
+	}
+	settings, err := s.store.GetAuthSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !settings.PublicRegistrationEnabled {
+		writeError(w, http.StatusForbidden, "public registration is disabled")
+		return
+	}
+	var req types.AuthRegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid register payload")
+		return
+	}
+	if strings.TrimSpace(req.Email) == "" || strings.TrimSpace(req.DisplayName) == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "email, displayName and password are required")
+		return
+	}
+	user, err := s.store.CreateUser(r.Context(), store.CreateUserParams{
+		Email:       req.Email,
+		DisplayName: req.DisplayName,
+		Password:    req.Password,
+		Role:        types.UserRoleUser,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		message := err.Error()
+		if errors.Is(err, store.ErrConflict) {
+			status = http.StatusConflict
+			message = "user already exists or registration payload is invalid"
+		}
+		writeError(w, status, message)
+		return
+	}
+	if err := s.issueAuthSession(w, r, user); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeAudit(r, "register_user", "user", user.ID, map[string]string{"email": user.Email, "role": string(user.Role)})
+	writeJSON(w, http.StatusCreated, types.AuthUserResponse{User: user})
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
@@ -685,6 +766,12 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.clearAuthCookies(w)
 		writeError(w, http.StatusUnauthorized, "session user not found")
+		return
+	}
+	if user.Disabled {
+		_ = s.store.DeleteWebSession(r.Context(), session.SessionID)
+		s.clearAuthCookies(w)
+		writeError(w, http.StatusForbidden, "user is disabled")
 		return
 	}
 	if err := s.rotateAuthSession(w, r, session, user); err != nil {
@@ -722,6 +809,133 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, types.AuthUserResponse{User: user})
 }
 
+func (s *Server) handleSendPasswordChangeCode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	user, ok := authUserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if user.Role == types.UserRoleAdmin {
+		writeError(w, http.StatusConflict, "super admin password must be changed manually outside self-service flow")
+		return
+	}
+	if strings.TrimSpace(user.Email) == "" {
+		writeError(w, http.StatusBadRequest, "current account does not have an email address")
+		return
+	}
+	if s.sendPasswordChangeCode == nil {
+		writeError(w, http.StatusServiceUnavailable, "password change email verification is not configured")
+		return
+	}
+
+	now := time.Now().UTC()
+	s.passwordChangeMu.Lock()
+	current := s.passwordChangeCodes[user.ID]
+	if !current.SentAt.IsZero() && now.Before(current.SentAt.Add(60*time.Second)) {
+		retryAfter := int(current.SentAt.Add(60 * time.Second).Sub(now).Seconds())
+		s.passwordChangeMu.Unlock()
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("verification code was already sent, retry after %d seconds", retryAfter))
+		return
+	}
+	s.passwordChangeMu.Unlock()
+
+	code, err := numericCode(6)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate verification code")
+		return
+	}
+	if err := s.sendPasswordChangeCode(user.Email, code); err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+
+	s.passwordChangeMu.Lock()
+	s.passwordChangeCodes[user.ID] = passwordChangeCodeRecord{
+		CodeHash:  hashOpaqueToken(code),
+		Email:     user.Email,
+		ExpiresAt: now.Add(s.passwordChangeCodeTTL),
+		SentAt:    now,
+	}
+	s.passwordChangeMu.Unlock()
+
+	s.writeAudit(r, "send_password_change_code", "user", user.ID, map[string]string{"email": user.Email})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "sent", "expiresInSec": int(s.passwordChangeCodeTTL.Seconds()), "email": user.Email})
+}
+
+func (s *Server) handleConfirmPasswordChange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	user, ok := authUserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if user.Role == types.UserRoleAdmin {
+		writeError(w, http.StatusConflict, "super admin password must be changed manually outside self-service flow")
+		return
+	}
+	var req types.ConfirmPasswordChangeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid password change payload")
+		return
+	}
+	if strings.TrimSpace(req.Code) == "" || strings.TrimSpace(req.Password) == "" {
+		writeError(w, http.StatusBadRequest, "code and password are required")
+		return
+	}
+	if err := s.consumePasswordChangeCode(user.ID, user.Email, req.Code); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	updatedUser, err := s.store.UpdateUser(r.Context(), store.UpdateUserParams{
+		ID:       user.ID,
+		Password: req.Password,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeAudit(r, "change_password", "user", user.ID, map[string]string{"email": updatedUser.Email, "verifiedBy": "email_code"})
+	writeJSON(w, http.StatusOK, types.AuthUserResponse{User: updatedUser})
+}
+
+func (s *Server) handleAdminAuthSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.store.GetAuthSettings(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	case http.MethodPut:
+		var req types.UpdateAuthSettingsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid auth settings payload")
+			return
+		}
+		settings, err := s.store.UpdateAuthSettings(r.Context(), types.AuthSettings{
+			PublicRegistrationEnabled: req.PublicRegistrationEnabled,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.writeAudit(r, "update_auth_settings", "auth_settings", "public_registration", map[string]string{
+			"publicRegistrationEnabled": strconv.FormatBool(settings.PublicRegistrationEnabled),
+		})
+		writeJSON(w, http.StatusOK, settings)
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut)
+	}
+}
+
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -732,9 +946,18 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	case http.MethodPost:
+		actor, ok := authUserFromContext(r.Context())
+		if !ok || actor.Role != types.UserRoleAdmin {
+			writeError(w, http.StatusForbidden, "only super admin can create users")
+			return
+		}
 		var req types.CreateUserRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid user payload")
+			return
+		}
+		if normalizeManagedUserRole(req.Role) == types.UserRoleAdmin {
+			writeError(w, http.StatusConflict, "super admin account is reserved and cannot be created here")
 			return
 		}
 		user, err := s.store.CreateUser(r.Context(), store.CreateUserParams{Email: req.Email, DisplayName: req.DisplayName, Password: req.Password, Role: req.Role})
@@ -746,7 +969,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
-		s.writeAudit(r, "create_user", "user", user.ID, map[string]string{"email": user.Email, "role": string(user.Role)})
+		s.writeAudit(r, "create_user", "user", user.ID, map[string]string{"email": user.Email, "role": string(user.Role), "disabled": strconv.FormatBool(user.Disabled)})
 		writeJSON(w, http.StatusCreated, user)
 	default:
 		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
@@ -759,6 +982,11 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "user id is required")
 		return
 	}
+	actor, ok := authUserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	switch r.Method {
 	case http.MethodPut:
 		var req types.UpdateUserRequest
@@ -766,7 +994,34 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid user payload")
 			return
 		}
-		user, err := s.store.UpdateUser(r.Context(), store.UpdateUserParams{ID: id, DisplayName: req.DisplayName, Password: req.Password, Role: req.Role})
+		if actor.Role != types.UserRoleAdmin {
+			if req.Role != "" || req.Password != "" || strings.TrimSpace(req.DisplayName) != "" || req.Disabled == nil {
+				writeError(w, http.StatusForbidden, "ordinary admin can only ban or unban normal users")
+				return
+			}
+			targetUser, err := s.store.GetUser(r.Context(), id)
+			if err != nil {
+				status := http.StatusInternalServerError
+				if errors.Is(err, store.ErrNotFound) {
+					status = http.StatusNotFound
+				}
+				writeError(w, status, err.Error())
+				return
+			}
+			if targetUser.Role != types.UserRoleUser {
+				writeError(w, http.StatusForbidden, "ordinary admin can only manage normal users")
+				return
+			}
+		}
+		if normalizeManagedUserRole(req.Role) == types.UserRoleAdmin && req.Role != "" {
+			writeError(w, http.StatusConflict, "super admin account is reserved and cannot be assigned here")
+			return
+		}
+		if err := s.ensureUserManagementBoundary(r.Context(), r, id, req.Role, req.Disabled, req.Password != "", false); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		user, err := s.store.UpdateUser(r.Context(), store.UpdateUserParams{ID: id, DisplayName: req.DisplayName, Password: req.Password, Role: req.Role, Disabled: req.Disabled})
 		if err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, store.ErrNotFound) {
@@ -775,9 +1030,20 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
-		s.writeAudit(r, "update_user", "user", user.ID, map[string]string{"email": user.Email, "role": string(user.Role)})
+		if user.Disabled {
+			_ = s.store.DeleteUserSessions(r.Context(), user.ID)
+		}
+		s.writeAudit(r, "update_user", "user", user.ID, map[string]string{"email": user.Email, "role": string(user.Role), "disabled": strconv.FormatBool(user.Disabled)})
 		writeJSON(w, http.StatusOK, user)
 	case http.MethodDelete:
+		if actor.Role != types.UserRoleAdmin {
+			writeError(w, http.StatusForbidden, "only super admin can delete users")
+			return
+		}
+		if err := s.ensureUserManagementBoundary(r.Context(), r, id, "", nil, false, true); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		user, err := s.store.GetUser(r.Context(), id)
 		if err != nil {
 			status := http.StatusInternalServerError
@@ -795,7 +1061,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, err.Error())
 			return
 		}
-		s.writeAudit(r, "delete_user", "user", id, map[string]string{"email": user.Email, "displayName": user.DisplayName, "role": string(user.Role)})
+		s.writeAudit(r, "delete_user", "user", id, map[string]string{"email": user.Email, "displayName": user.DisplayName, "role": string(user.Role), "disabled": strconv.FormatBool(user.Disabled)})
 		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
 	default:
 		writeMethodNotAllowed(w, http.MethodPut+", "+http.MethodDelete)
@@ -1612,7 +1878,11 @@ func (s *Server) requireRole(minRole types.UserRole, next http.Handler) http.Han
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, err := s.authenticateRequest(r)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, err.Error())
+			status := http.StatusUnauthorized
+			if errors.Is(err, store.ErrForbidden) {
+				status = http.StatusForbidden
+			}
+			writeError(w, status, err.Error())
 			return
 		}
 		if !roleAllowed(user.Role, minRole) {
@@ -1632,10 +1902,182 @@ func (s *Server) authenticateRequest(r *http.Request) (types.UserSummary, error)
 	if err != nil {
 		return types.UserSummary{}, store.ErrUnauthorized
 	}
+	if user.Disabled {
+		return types.UserSummary{}, store.ErrForbidden
+	}
 	if user.Role != claims.Role {
 		return types.UserSummary{}, store.ErrUnauthorized
 	}
 	return user, nil
+}
+
+func (s *Server) ensureUserManagementBoundary(ctx context.Context, r *http.Request, targetUserID string, requestedRole types.UserRole, requestedDisabled *bool, selfPasswordChange bool, deleting bool) error {
+	actor, ok := authUserFromContext(r.Context())
+	if ok && deleting && actor.ID == targetUserID {
+		return errors.New("cannot delete the current account")
+	}
+	if ok && actor.ID == targetUserID {
+		if selfPasswordChange {
+			if actor.Role == types.UserRoleAdmin {
+				return errors.New("super admin password must be changed manually outside self-service flow")
+			}
+			return errors.New("current account password must be changed through email verification")
+		}
+		if requestedDisabled != nil && *requestedDisabled {
+			return errors.New("cannot disable the current account")
+		}
+		if requestedRole != "" && normalizeManagedUserRole(requestedRole) != types.UserRoleAdmin {
+			return errors.New("cannot change the current account role")
+		}
+	}
+
+	targetUser, err := s.store.GetUser(ctx, targetUserID)
+	if err != nil {
+		return err
+	}
+
+	nextRole := targetUser.Role
+	if requestedRole != "" {
+		nextRole = normalizeManagedUserRole(requestedRole)
+	}
+	nextDisabled := targetUser.Disabled
+	if requestedDisabled != nil {
+		nextDisabled = *requestedDisabled
+	}
+
+	if deleting {
+		nextDisabled = true
+	}
+	if targetUser.Role == types.UserRoleAdmin && !targetUser.Disabled && (deleting || nextRole != types.UserRoleAdmin || nextDisabled) {
+		users, err := s.store.ListUsers(ctx)
+		if err != nil {
+			return err
+		}
+		enabledAdminCount := 0
+		for _, user := range users {
+			if user.Role == types.UserRoleAdmin && !user.Disabled {
+				enabledAdminCount++
+			}
+		}
+		if enabledAdminCount <= 1 {
+			return errors.New("cannot remove the last enabled admin")
+		}
+	}
+
+	return nil
+}
+
+func normalizeManagedUserRole(role types.UserRole) types.UserRole {
+	switch role {
+	case types.UserRoleAdmin, types.UserRoleManager, types.UserRoleUser:
+		return role
+	default:
+		return types.UserRoleUser
+	}
+}
+
+func (s *Server) consumePasswordChangeCode(userID, email, code string) error {
+	s.passwordChangeMu.Lock()
+	defer s.passwordChangeMu.Unlock()
+
+	record, ok := s.passwordChangeCodes[userID]
+	if !ok {
+		return errors.New("verification code has not been requested")
+	}
+	if !strings.EqualFold(strings.TrimSpace(record.Email), strings.TrimSpace(email)) {
+		delete(s.passwordChangeCodes, userID)
+		return errors.New("verification email no longer matches the current account")
+	}
+	if time.Now().UTC().After(record.ExpiresAt) {
+		delete(s.passwordChangeCodes, userID)
+		return errors.New("verification code has expired")
+	}
+	if hashOpaqueToken(strings.TrimSpace(code)) != record.CodeHash {
+		return errors.New("invalid verification code")
+	}
+	delete(s.passwordChangeCodes, userID)
+	return nil
+}
+
+func numericCode(length int) (string, error) {
+	if length <= 0 {
+		return "", errors.New("invalid code length")
+	}
+	bytes := make([]byte, length)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	var builder strings.Builder
+	builder.Grow(length)
+	for _, value := range bytes {
+		builder.WriteByte(byte('0' + (value % 10)))
+	}
+	return builder.String(), nil
+}
+
+func newSMTPPasswordChangeCodeSenderFromEnv() func(to, code string) error {
+	host := strings.TrimSpace(os.Getenv("SERVER_API_SMTP_HOST"))
+	port := strings.TrimSpace(os.Getenv("SERVER_API_SMTP_PORT"))
+	username := strings.TrimSpace(os.Getenv("SERVER_API_SMTP_USERNAME"))
+	password := strings.TrimSpace(os.Getenv("SERVER_API_SMTP_PASSWORD"))
+	from := strings.TrimSpace(os.Getenv("SERVER_API_SMTP_FROM"))
+	if port == "" {
+		port = "587"
+	}
+	if from == "" {
+		from = username
+	}
+
+	return func(to, code string) error {
+		if host == "" || username == "" || password == "" || from == "" {
+			return errors.New("password change email verification is not configured")
+		}
+		subject := "Cloud Relay password change code"
+		body := fmt.Sprintf("Your Cloud Relay password change code is %s.\r\nThis code expires in 10 minutes.\r\n", code)
+		return sendSMTPMail(host, port, username, password, from, to, subject, body)
+	}
+}
+
+func sendSMTPMail(host, port, username, password, from, to, subject, body string) error {
+	addr := net.JoinHostPort(host, port)
+	client, err := smtp.Dial(addr)
+	if err != nil {
+		return fmt.Errorf("smtp dial failed: %w", err)
+	}
+	defer client.Close()
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(&tls.Config{ServerName: host}); err != nil {
+			return fmt.Errorf("smtp starttls failed: %w", err)
+		}
+	}
+	if ok, _ := client.Extension("AUTH"); ok {
+		if err := client.Auth(smtp.PlainAuth("", username, password, host)); err != nil {
+			return fmt.Errorf("smtp auth failed: %w", err)
+		}
+	}
+	if err := client.Mail(from); err != nil {
+		return fmt.Errorf("smtp MAIL FROM failed: %w", err)
+	}
+	if err := client.Rcpt(to); err != nil {
+		return fmt.Errorf("smtp RCPT TO failed: %w", err)
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("smtp DATA failed: %w", err)
+	}
+	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s", from, to, subject, body)
+	if _, err := writer.Write([]byte(message)); err != nil {
+		_ = writer.Close()
+		return fmt.Errorf("smtp body write failed: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("smtp body close failed: %w", err)
+	}
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("smtp quit failed: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) issueAuthSession(w http.ResponseWriter, r *http.Request, user types.UserSummary) error {

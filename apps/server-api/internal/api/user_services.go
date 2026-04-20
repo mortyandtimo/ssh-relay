@@ -108,6 +108,7 @@ func userServiceEntryFromTunnel(
 
 	cloudAccess := normalizeServiceAccessPolicy(tunnel.Metadata[serviceMetaCloudAccessKey], publicURL != "")
 	p2pAccess := normalizeServiceAccessPolicy(tunnel.Metadata[serviceMetaP2PAccessKey], p2pURL != "")
+	p2pAccess = normalizeEndUserP2PAccess(key, kind, p2pAccess, p2pURL != "")
 	preferredPath := normalizeServicePreferredPath(tunnel.Metadata[serviceMetaPreferredPathKey], publicURL != "", p2pURL != "")
 
 	return types.UserServiceEntry{
@@ -285,6 +286,20 @@ func serviceAccessAllowed(policy string, role types.UserRole) bool {
 		return role == types.UserRoleAdmin
 	default:
 		return false
+	}
+}
+
+func normalizeEndUserP2PAccess(key, kind, policy string, hasP2PURL bool) string {
+	if !hasP2PURL {
+		return policy
+	}
+	switch {
+	case kind == "drive", kind == "gallery":
+		return serviceAccessAllUsers
+	case key == "drive", key == "gallery":
+		return serviceAccessAllUsers
+	default:
+		return policy
 	}
 }
 
