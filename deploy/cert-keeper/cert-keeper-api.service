@@ -9,14 +9,12 @@ WorkingDirectory=/opt/cert-keeper
 ExecStart=/opt/cert-keeper/cert-keeper-api
 Restart=always
 RestartSec=5
+EnvironmentFile=-/etc/cloud-relay/cert-keeper/cert-keeper.env
 Environment=CERT_KEEPER_PORT=7720
-Environment=CERT_KEEPER_DATABASE_URL=postgres://cloudrelay:CloudRelay2024!@127.0.0.1:5432/cloudrelay?sslmode=disable
-Environment=CERT_KEEPER_PUBLIC_IP=82.156.236.104
 Environment=CERT_KEEPER_CERT_DIR=/etc/cloud-relay/cert-keeper/certs
 Environment=CERT_KEEPER_NGINX_CONF_DIR=/etc/cloud-relay/cert-keeper/nginx
 Environment=CERT_KEEPER_WEBROOT=/www/server/nginx/html
 Environment=CERT_KEEPER_NGINX_BIN=/www/server/nginx/sbin/nginx
-Environment=CERT_KEEPER_ACME_EMAIL=g2574385582@gmail.com
 Environment=CERT_KEEPER_BOOTSTRAP_SECRET=%m
 
 [Install]

@@ -63,6 +63,9 @@ export function createDesktopApi(apiBaseUrl = "", transport?: DesktopApiTranspor
       throw new Error("登录已失效，请重新登录。");
     }
     if (!response.ok) {
+      if (response.status === 404 && path === "/api/auth/register") {
+        throw new Error("当前服务端未部署公开注册接口，请先更新云端 server-api。");
+      }
       throw new Error(
         payload &&
         typeof payload === "object" &&

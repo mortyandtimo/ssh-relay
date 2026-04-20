@@ -92,6 +92,7 @@ export type AuthUserResponse = {
 
 export type BootstrapStatusResponse = {
   required: boolean;
+  publicRegistrationEnabled: boolean;
 };
 
 export type DesktopMode = "local-node" | "operator";

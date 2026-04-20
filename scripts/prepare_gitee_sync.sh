@@ -32,8 +32,8 @@ echo
 echo "Recommended build machine workflow:"
 echo "  1. ./scripts/packager_build_and_upload.sh all"
 echo "  2. VERSION=<release-version> ./scripts/packager_build_and_upload.sh all   # optional formal release tag"
-echo "     built-in defaults: SERVER_URL=https://manage.020309.top COOKIE_FILE=\$HOME/manage.cookies"
-echo "     built-in admin login: 2574385582@qq.com / wdblsw12138"
+echo "     upload defaults: SERVER_URL=https://manage.020309.top COOKIE_FILE=\$HOME/manage.cookies"
+echo "     if the cookie jar is missing or expired, export ADMIN_EMAIL / ADMIN_PASSWORD first"
 echo
 echo "Optional EasyTier overrides for user-console builds on the packager:"
 echo "  - EASYTIER_VERSION=vX.Y.Z ./scripts/packager_build_and_upload.sh user"

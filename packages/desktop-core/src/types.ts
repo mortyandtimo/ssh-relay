@@ -156,6 +156,7 @@ export type AuthSettings = {
 
 export type BootstrapStatusResponse = {
   required: boolean;
+  publicRegistrationEnabled: boolean;
 };
 
 export type ManagedUserListResponse = {

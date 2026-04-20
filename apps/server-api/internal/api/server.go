@@ -604,7 +604,15 @@ func (s *Server) handleBootstrapStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, types.AuthBootstrapStatusResponse{Required: required})
+	settings, err := s.store.GetAuthSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, types.AuthBootstrapStatusResponse{
+		Required:                  required,
+		PublicRegistrationEnabled: settings.PublicRegistrationEnabled,
+	})
 }
 
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {

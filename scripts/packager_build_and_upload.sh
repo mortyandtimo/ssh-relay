@@ -40,7 +40,7 @@ Upload phase defaults now built in:
   SERVER_URL       defaults to https://manage.020309.top
   COOKIE_FILE      defaults to $HOME/manage.cookies
   ADMIN_EMAIL / ADMIN_PASSWORD
-                   default admin credentials are embedded for automatic login refresh
+                   optional; required only when the upload step must refresh an admin login automatically
   VERSION          optional; forwarded to upload_windows_artifacts.sh
 EOF
 }

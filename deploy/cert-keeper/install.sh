@@ -3,6 +3,38 @@ set -e
 
 echo "=== CertKeeper API Deploy ==="
 
+ENV_DIR=/etc/cloud-relay/cert-keeper
+ENV_FILE="$ENV_DIR/cert-keeper.env"
+
+mkdir -p "$ENV_DIR"
+
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+fi
+
+: "${CERT_KEEPER_DATABASE_URL:?Set CERT_KEEPER_DATABASE_URL in the environment or $ENV_FILE before running this installer}"
+
+if [ ! -f "$ENV_FILE" ]; then
+    : "${CERT_KEEPER_ACME_EMAIL:?Set CERT_KEEPER_ACME_EMAIL before running this installer}"
+    : "${CERT_KEEPER_PUBLIC_IP:?Set CERT_KEEPER_PUBLIC_IP before running this installer}"
+    umask 077
+    cat >"$ENV_FILE" <<EOF
+CERT_KEEPER_DATABASE_URL=$CERT_KEEPER_DATABASE_URL
+CERT_KEEPER_ACME_EMAIL=$CERT_KEEPER_ACME_EMAIL
+CERT_KEEPER_PUBLIC_IP=$CERT_KEEPER_PUBLIC_IP
+CERT_KEEPER_ACCESS_SECRET=${CERT_KEEPER_ACCESS_SECRET:-}
+CERT_KEEPER_BOOTSTRAP_SECRET=${CERT_KEEPER_BOOTSTRAP_SECRET:-}
+CERT_KEEPER_ALLOWED_ORIGINS=${CERT_KEEPER_ALLOWED_ORIGINS:-}
+CERT_KEEPER_DOMAIN_BACKENDS=${CERT_KEEPER_DOMAIN_BACKENDS:-}
+CERT_KEEPER_SKIP_DOMAINS=${CERT_KEEPER_SKIP_DOMAINS:-}
+EOF
+    chmod 600 "$ENV_FILE"
+    echo "Wrote $ENV_FILE from current shell environment"
+fi
+
 # Build
 cd /root/cloud-relay-platform/apps/cert-keeper-api
 CGO_ENABLED=0 go build -o /opt/cert-keeper/cert-keeper-api ./cmd/cert-keeper-api/
@@ -10,7 +42,7 @@ echo "Built cert-keeper-api"
 
 # DB schema
 echo "Applying database schema..."
-PGPASSWORD=CloudRelay2024! psql -h 127.0.0.1 -U cloudrelay -d cloudrelay -f /root/cloud-relay-platform/db/cert-keeper-schema.sql
+psql "$CERT_KEEPER_DATABASE_URL" -f /root/cloud-relay-platform/db/cert-keeper-schema.sql
 
 # Nginx include
 NGINX_CONF=/www/server/nginx/conf/nginx.conf

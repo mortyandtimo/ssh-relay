@@ -8,8 +8,8 @@ COOKIE_FILE="${COOKIE_FILE:-${HOME:-/tmp}/manage.cookies}"
 VERSION="${VERSION:-}"
 UPLOAD_RETRY_COUNT="${UPLOAD_RETRY_COUNT:-4}"
 UPLOAD_RETRY_DELAY="${UPLOAD_RETRY_DELAY:-2}"
-ADMIN_EMAIL="${ADMIN_EMAIL:-2574385582@qq.com}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-wdblsw12138}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 UPLOAD_FALLBACK_URLS="${UPLOAD_FALLBACK_URLS:-}"
 
 usage() {
@@ -22,7 +22,7 @@ Optional env:
   VERSION      release version path used by /downloads/releases/<product>/<version>/
                If omitted, a traceable default is derived from package version + git commit.
   ADMIN_EMAIL / ADMIN_PASSWORD
-               defaults are built in; the script refreshes a missing/expired admin cookie jar automatically
+               optional; required only when the script must create or refresh an admin session automatically
   UPLOAD_FALLBACK_URLS
                optional whitespace-separated alternate base URLs tried after SERVER_URL for transient upload failures
 EOF
@@ -53,6 +53,7 @@ json_escape() {
 login_admin_session() {
   local base_url="${1:-$SERVER_URL}"
   if [ -z "$ADMIN_EMAIL" ] || [ -z "$ADMIN_PASSWORD" ]; then
+    echo "admin login requires ADMIN_EMAIL and ADMIN_PASSWORD to be set" >&2
     return 1
   fi
   local payload response_file status_code
@@ -81,6 +82,10 @@ ensure_cookie_session() {
   mkdir -p "$cookie_dir"
   if [ -s "$COOKIE_FILE" ]; then
     return 0
+  fi
+  if [ -z "$ADMIN_EMAIL" ] || [ -z "$ADMIN_PASSWORD" ]; then
+    echo "missing admin session cookie: provide COOKIE_FILE or set ADMIN_EMAIL and ADMIN_PASSWORD" >&2
+    return 1
   fi
   echo "Admin cookie session missing; logging in automatically..." >&2
   login_admin_session "$SERVER_URL"

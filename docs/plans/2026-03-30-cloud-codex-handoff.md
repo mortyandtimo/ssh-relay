@@ -34,7 +34,7 @@
 
 ```env
 SERVER_API_ADDR=:7710
-DATABASE_URL=postgres://postgres:wdblsw12138@127.0.0.1:5432/cloud_relay?sslmode=disable
+DATABASE_URL=postgres://postgres:<set-in-env>@127.0.0.1:5432/cloud_relay?sslmode=disable
 ```
 
 ### `/etc/cloud-relay-platform/relay-tcp.env`

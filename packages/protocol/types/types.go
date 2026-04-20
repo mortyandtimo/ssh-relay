@@ -542,7 +542,8 @@ type AuthSettings struct {
 }
 
 type AuthBootstrapStatusResponse struct {
-	Required bool `json:"required"`
+	Required                  bool `json:"required"`
+	PublicRegistrationEnabled bool `json:"publicRegistrationEnabled"`
 }
 
 type CreateUserRequest struct {

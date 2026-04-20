@@ -16,9 +16,9 @@ import (
 
 func main() {
 	port := envOr("CERT_KEEPER_PORT", "7720")
-	dbURL := envOr("CERT_KEEPER_DATABASE_URL", "postgres://cloudrelay:CloudRelay2024!@127.0.0.1:5432/cloudrelay?sslmode=disable")
-	acmeEmail := envOr("CERT_KEEPER_ACME_EMAIL", "")
-	publicIP := envOr("CERT_KEEPER_PUBLIC_IP", "82.156.236.104")
+	dbURL := requiredEnv("CERT_KEEPER_DATABASE_URL")
+	acmeEmail := strings.TrimSpace(os.Getenv("CERT_KEEPER_ACME_EMAIL"))
+	publicIP := strings.TrimSpace(os.Getenv("CERT_KEEPER_PUBLIC_IP"))
 	certDir := envOr("CERT_KEEPER_CERT_DIR", "/etc/cloud-relay/cert-keeper/certs")
 	nginxConfDir := envOr("CERT_KEEPER_NGINX_CONF_DIR", "/etc/cloud-relay/cert-keeper/nginx")
 	webroot := envOr("CERT_KEEPER_WEBROOT", "/www/server/nginx/html")
@@ -79,6 +79,14 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func requiredEnv(key string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		log.Fatalf("missing required environment variable %s", key)
+	}
+	return value
 }
 
 func envOrInt(key string, fallback int) int {

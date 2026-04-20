@@ -1804,6 +1804,16 @@ func TestBootstrapLoginAndRoleProtectedManagementFlow(t *testing.T) {
 	if statusRes.Code != http.StatusOK {
 		t.Fatalf("expected bootstrap status 200, got %d", statusRes.Code)
 	}
+	var bootstrapStatus types.AuthBootstrapStatusResponse
+	if err := json.NewDecoder(statusRes.Body).Decode(&bootstrapStatus); err != nil {
+		t.Fatal(err)
+	}
+	if !bootstrapStatus.Required {
+		t.Fatal("expected bootstrap to be required before the first admin is created")
+	}
+	if !bootstrapStatus.PublicRegistrationEnabled {
+		t.Fatal("expected public registration to default to enabled")
+	}
 
 	bootstrapBody, err := json.Marshal(types.BootstrapAdminRequest{
 		Email:       "admin@example.com",
@@ -2043,6 +2053,23 @@ func TestAdminAuthSettingsCanDisablePublicRegistration(t *testing.T) {
 	server.Handler().ServeHTTP(registerRes, registerReq)
 	if registerRes.Code != http.StatusForbidden {
 		t.Fatalf("expected register 403 when public registration is disabled, got %d", registerRes.Code)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/auth/bootstrap-status", nil)
+	statusRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(statusRes, statusReq)
+	if statusRes.Code != http.StatusOK {
+		t.Fatalf("expected bootstrap status 200 after auth settings update, got %d", statusRes.Code)
+	}
+	var status types.AuthBootstrapStatusResponse
+	if err := json.NewDecoder(statusRes.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Required {
+		t.Fatal("expected bootstrap to remain completed after admin setup")
+	}
+	if status.PublicRegistrationEnabled {
+		t.Fatal("expected bootstrap status to reflect disabled public registration")
 	}
 }
 

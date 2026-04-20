@@ -2,7 +2,7 @@ import { startTransition, useCallback, useEffect, useMemo, useRef, useState } fr
 import type { MouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { createDesktopApi } from "../../../packages/desktop-core/src/api";
-import type { AuthSettings, UserRole, UserServiceEntry, UserSummary } from "../../../packages/desktop-core/src/types";
+import type { AuthSettings, BootstrapStatusResponse, UserRole, UserServiceEntry, UserSummary } from "../../../packages/desktop-core/src/types";
 import {
   appExit,
   createTauriDesktopTransport,
@@ -66,7 +66,11 @@ type ServiceBinding = {
 const defaultApiUrl = "https://manage.020309.top";
 const defaultP2PPeerUrl = "tcp://easytier.manage.020309.top:11010";
 const defaultAuthSettings: AuthSettings = {
-  publicRegistrationEnabled: true,
+  publicRegistrationEnabled: false,
+};
+const defaultBootstrapStatus: BootstrapStatusResponse = {
+  required: false,
+  publicRegistrationEnabled: false,
 };
 const defaultConfig: Required<Pick<AppConfig, "closeAction" | "silentStart" | "autoStart" | "driveFallbackPolicy" | "imageBulkUploadMode" | "p2pUseDhcp">> = {
   closeAction: "ask",
@@ -327,6 +331,7 @@ export default function App() {
   const [serviceLoading, setServiceLoading] = useState(false);
   const [managedUsers, setManagedUsers] = useState<UserSummary[]>([]);
   const [authSettings, setAuthSettings] = useState<AuthSettings>(defaultAuthSettings);
+  const [bootstrapStatus, setBootstrapStatus] = useState<BootstrapStatusResponse>(defaultBootstrapStatus);
   const [adminBusyAction, setAdminBusyAction] = useState("");
   const [adminLoading, setAdminLoading] = useState(false);
   const [managedUserForm, setManagedUserForm] = useState({
@@ -397,6 +402,17 @@ export default function App() {
       return [];
     } finally {
       setServiceLoading(false);
+    }
+  }, [api]);
+
+  const refreshPublicAuthStatus = useCallback(async (client = api) => {
+    try {
+      const status = await client.loadBootstrapStatus();
+      setBootstrapStatus(status);
+      return status;
+    } catch {
+      setBootstrapStatus(defaultBootstrapStatus);
+      return defaultBootstrapStatus;
     }
   }, [api]);
 
@@ -475,9 +491,10 @@ export default function App() {
       setManagedUsers([]);
       setUserRoleDrafts({});
       setAuthSettings(defaultAuthSettings);
+      await refreshPublicAuthStatus(api);
       return false;
     }
-  }, [api, refreshAdminData, refreshUserServices, syncUserNodePresence]);
+  }, [api, refreshAdminData, refreshPublicAuthStatus, refreshUserServices, syncUserNodePresence]);
 
   useEffect(() => {
     if (bootstrapStartedRef.current) return;
@@ -535,6 +552,10 @@ export default function App() {
           })
           .catch(() => false);
         if (cancelled) return;
+        if (!authed) {
+          await refreshPublicAuthStatus(sessionApi);
+          if (cancelled) return;
+        }
 
         const rememberedPassword = await rememberedPasswordPromise;
         if (cancelled) return;
@@ -586,7 +607,14 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [refreshAdminData, refreshP2PStatus, refreshUserNodeStatus, refreshUserServices, syncUserNodePresence, transport]);
+  }, [refreshAdminData, refreshP2PStatus, refreshPublicAuthStatus, refreshUserNodeStatus, refreshUserServices, syncUserNodePresence, transport]);
+
+  useEffect(() => {
+    if (authMode !== "register") return;
+    if (bootstrapStatus.required || !bootstrapStatus.publicRegistrationEnabled) {
+      setAuthMode("login");
+    }
+  }, [authMode, bootstrapStatus]);
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -620,6 +648,7 @@ export default function App() {
       const ok = await loadCurrentSession();
       if (!ok) {
         setPage("login");
+        await refreshPublicAuthStatus(createDesktopApi(normalizeApiBaseUrl(apiUrl), transport || undefined));
       }
       setNotice("配置已保存。");
     } catch (saveError) {
@@ -627,7 +656,7 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [apiUrl, appConfig, loadCurrentSession, persistConfig]);
+  }, [apiUrl, appConfig, loadCurrentSession, persistConfig, refreshPublicAuthStatus, transport]);
 
   const handleLogin = useCallback(async () => {
     if (!loginEmail.trim() || !loginPassword.trim()) {
@@ -668,6 +697,14 @@ export default function App() {
       setError("请输入昵称、邮箱和密码");
       return;
     }
+    if (bootstrapStatus.required) {
+      setError("当前服务端尚未完成初始化，暂不支持公开注册。");
+      return;
+    }
+    if (!bootstrapStatus.publicRegistrationEnabled) {
+      setError("当前服务端未开启公开注册。");
+      return;
+    }
     if (loginPassword !== registerConfirmPassword) {
       setError("两次输入的密码不一致");
       return;
@@ -699,7 +736,7 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [apiUrl, appConfig, autoLogin, loginEmail, loginPassword, persistConfig, refreshAdminData, refreshLoginProfiles, refreshUserServices, registerConfirmPassword, registerDisplayName, savePassword, syncUserNodePresence, transport]);
+  }, [apiUrl, appConfig, autoLogin, bootstrapStatus, loginEmail, loginPassword, persistConfig, refreshAdminData, refreshLoginProfiles, refreshUserServices, registerConfirmPassword, registerDisplayName, savePassword, syncUserNodePresence, transport]);
 
   const handleLogout = useCallback(async () => {
     setBusy(true);
@@ -714,10 +751,12 @@ export default function App() {
       setManagedUsers([]);
       setUserRoleDrafts({});
       setAuthSettings(defaultAuthSettings);
+      setBootstrapStatus(defaultBootstrapStatus);
       setPage("login");
       setBusy(false);
+      void refreshPublicAuthStatus(api);
     }
-  }, [api, syncUserNodePresence]);
+  }, [api, refreshPublicAuthStatus, syncUserNodePresence]);
 
   const handleCreateManagedUser = useCallback(async () => {
     if (!user || !isSuperAdmin(user)) {
@@ -1147,7 +1186,11 @@ export default function App() {
       {authMode === "register" ? (
         <>
           <label>昵称</label>
-          <input value={registerDisplayName} onChange={(event) => setRegisterDisplayName(event.target.value)} />
+          <input
+            value={registerDisplayName}
+            onChange={(event) => setRegisterDisplayName(event.target.value)}
+            placeholder="支持中文昵称"
+          />
         </>
       ) : null}
       <label>密码</label>
@@ -1197,21 +1240,29 @@ export default function App() {
           保存地址
         </button>
       </div>
-      <div className="action-row">
-        <button
-          className="secondary"
-          type="button"
-          onClick={() => {
-            setAuthMode((current) => current === "login" ? "register" : "login");
-            setError("");
-            setNotice("");
-            setProfileListOpen(false);
-          }}
-          disabled={busy}
-        >
-          {authMode === "register" ? "返回登录" : "注册普通用户"}
-        </button>
-      </div>
+      {bootstrapStatus.required ? (
+        <div className="helper-text">当前服务端尚未初始化，需先由超级管理员完成首次开通。</div>
+      ) : null}
+      {!bootstrapStatus.required && !bootstrapStatus.publicRegistrationEnabled ? (
+        <div className="helper-text">当前服务端未开启公开注册。</div>
+      ) : null}
+      {!bootstrapStatus.required && bootstrapStatus.publicRegistrationEnabled ? (
+        <div className="action-row">
+          <button
+            className="secondary"
+            type="button"
+            onClick={() => {
+              setAuthMode((current) => current === "login" ? "register" : "login");
+              setError("");
+              setNotice("");
+              setProfileListOpen(false);
+            }}
+            disabled={busy}
+          >
+            {authMode === "register" ? "返回登录" : "注册普通用户"}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 
