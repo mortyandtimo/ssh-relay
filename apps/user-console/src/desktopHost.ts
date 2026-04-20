@@ -15,6 +15,8 @@ export type LoginProfilesFile = {
 export type AppConfig = {
   apiBaseUrl?: string;
   closeAction?: "ask" | "tray" | "exit";
+  silentStart?: boolean;
+  autoStart?: boolean;
   p2pAutoStart?: boolean;
   driveFallbackPolicy?: "admin_only" | "never";
   imageBulkUploadMode?: "p2p_bulk_https_light" | "https_only";
@@ -206,6 +208,18 @@ export async function loadAppConfig(): Promise<AppConfig | null> {
   } catch {
     return null;
   }
+}
+
+export async function loadAutoStartEnabled(): Promise<boolean> {
+  try {
+    return await invoke<boolean>("auto_start_enabled");
+  } catch {
+    return false;
+  }
+}
+
+export async function setAutoStart(enable: boolean): Promise<void> {
+  await invoke("set_auto_start", { enable });
 }
 
 export async function loadDesktopHostPaths() {

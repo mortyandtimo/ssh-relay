@@ -319,7 +319,15 @@ install_cli() {
   fi
   cp "$SCRIPT_SRC" /usr/local/bin/cloud-relay
   chmod +x /usr/local/bin/cloud-relay
+  local AUTOSTART_SCRIPT_SRC
+  AUTOSTART_SCRIPT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/cloud-relay-server-api-autostart.sh"
+  if [[ ! -f "$AUTOSTART_SCRIPT_SRC" ]]; then
+    error "server-api 自启脚本不存在: $AUTOSTART_SCRIPT_SRC"
+  fi
+  cp "$AUTOSTART_SCRIPT_SRC" /usr/local/bin/cloud-relay-server-api-autostart
+  chmod +x /usr/local/bin/cloud-relay-server-api-autostart
   info "管理命令已安装: cloud-relay start|stop|restart|status|ports|log|enable|disable|config"
+  info "server-api 自启命令已安装: cloud-relay-server-api-autostart enable|disable|status|verify"
 }
 
 # ─── 启动服务 ───
@@ -363,6 +371,7 @@ print_summary() {
   echo "    cloud-relay restart    — 重启所有服务"
   echo "    cloud-relay log        — 查看日志"
   echo "    cloud-relay config     — 修改配置"
+  echo "    cloud-relay-server-api-autostart enable|disable|status|verify"
   echo ""
   echo -e "  ${YELLOW}重要: 请妥善保管 bootstrap secret 和数据库密码${NC}"
   echo -e "  ${YELLOW}它们保存在 $ENV_FILE 中${NC}"

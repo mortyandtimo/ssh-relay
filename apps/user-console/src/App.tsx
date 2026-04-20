@@ -9,6 +9,7 @@ import {
   decryptLoginPassword,
   deleteLoginProfile,
   loadAppConfig,
+  loadAutoStartEnabled,
   loadP2PRuntimeStatus,
   loadUserNodeStatus,
   loadDesktopHostPaths,
@@ -19,6 +20,7 @@ import {
   readLoginProfiles,
   saveAppConfig,
   saveLoginProfile,
+  setAutoStart,
   startP2PRuntime,
   stopP2PRuntime,
   syncUserNode,
@@ -66,8 +68,10 @@ const defaultP2PPeerUrl = "tcp://easytier.manage.020309.top:11010";
 const defaultAuthSettings: AuthSettings = {
   publicRegistrationEnabled: true,
 };
-const defaultConfig: Required<Pick<AppConfig, "closeAction" | "driveFallbackPolicy" | "imageBulkUploadMode" | "p2pUseDhcp">> = {
+const defaultConfig: Required<Pick<AppConfig, "closeAction" | "silentStart" | "autoStart" | "driveFallbackPolicy" | "imageBulkUploadMode" | "p2pUseDhcp">> = {
   closeAction: "ask",
+  silentStart: false,
+  autoStart: false,
   driveFallbackPolicy: "admin_only",
   imageBulkUploadMode: "p2p_bulk_https_light",
   p2pUseDhcp: true,
@@ -105,6 +109,8 @@ function mergeConfig(config?: AppConfig | null): AppConfig {
   return {
     apiBaseUrl: normalizeApiBaseUrl(config?.apiBaseUrl),
     closeAction: (config?.closeAction || defaultConfig.closeAction) as CloseAction,
+    silentStart: Boolean(config?.silentStart),
+    autoStart: Boolean(config?.autoStart),
     p2pAutoStart: Boolean(config?.p2pAutoStart),
     driveFallbackPolicy: (config?.driveFallbackPolicy || defaultConfig.driveFallbackPolicy) as DriveFallbackPolicy,
     imageBulkUploadMode: (config?.imageBulkUploadMode || defaultConfig.imageBulkUploadMode) as ImageBulkUploadMode,
@@ -476,14 +482,18 @@ export default function App() {
     let cancelled = false;
     void (async () => {
       try {
-        const [config, profiles, hostPaths] = await Promise.all([
+        const [config, profiles, hostPaths, autoStartEnabled] = await Promise.all([
           loadAppConfig(),
           readLoginProfiles(),
           loadDesktopHostPaths(),
+          transport ? loadAutoStartEnabled() : Promise.resolve(false),
         ]);
         if (cancelled) return;
 
-        const mergedConfig = mergeConfig(config);
+        const mergedConfig = {
+          ...mergeConfig(config),
+          autoStart: transport ? autoStartEnabled : Boolean(config?.autoStart),
+        };
         const nextApiUrl = mergedConfig.apiBaseUrl || defaultApiUrl;
         const lastEmail = profiles?.lastUsedEmail || profiles?.profiles[0]?.email || "";
         const lastProfile = lastEmail ? profiles?.profiles.find((item) => item.email === lastEmail) : null;
@@ -853,6 +863,40 @@ export default function App() {
       setError(deleteError instanceof Error ? deleteError.message : "删除失败");
     }
   }, [fillProfileCredentials, loginEmail, refreshLoginProfiles]);
+
+  const handleSilentStartToggle = useCallback(async (enabled: boolean) => {
+    const previous = Boolean(appConfig.silentStart);
+    const nextConfig = { ...appConfig, silentStart: enabled };
+    setAppConfig(nextConfig);
+    setError("");
+    try {
+      await saveAppConfig(nextConfig);
+    } catch (saveError) {
+      setAppConfig((current) => ({ ...mergeConfig(current), silentStart: previous }));
+      setError(saveError instanceof Error ? saveError.message : "保存静默启动设置失败");
+    }
+  }, [appConfig]);
+
+  const handleAutoStartToggle = useCallback(async (enabled: boolean) => {
+    const previous = Boolean(appConfig.autoStart);
+    const nextConfig = { ...appConfig, autoStart: enabled };
+    setAppConfig(nextConfig);
+    setError("");
+    try {
+      await setAutoStart(enabled);
+      const actual = transport ? await loadAutoStartEnabled() : enabled;
+      if (actual !== enabled) {
+        throw new Error(enabled ? "开机自启注册校验失败" : "开机自启取消校验失败");
+      }
+      const verifiedConfig = { ...nextConfig, autoStart: actual };
+      setAppConfig(verifiedConfig);
+      await saveAppConfig(verifiedConfig);
+    } catch (autoStartError) {
+      const actual = transport ? await loadAutoStartEnabled().catch(() => previous) : previous;
+      setAppConfig((current) => ({ ...mergeConfig(current), autoStart: actual }));
+      setError(autoStartError instanceof Error ? autoStartError.message : "设置开机自启失败");
+    }
+  }, [appConfig, transport]);
 
   const handleWindowClose = useCallback(() => {
     const closeAction = (appConfig.closeAction || defaultConfig.closeAction) as CloseAction;
@@ -1989,6 +2033,29 @@ export default function App() {
                   <option value="tray">最小化到托盘</option>
                   <option value="exit">直接退出</option>
                 </select>
+                <div className="state-row">
+                  <span>静默启动</span>
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(appConfig.silentStart)}
+                      onChange={(event) => void handleSilentStartToggle(event.target.checked)}
+                    />
+                    <span>开机自启时隐藏到托盘</span>
+                  </label>
+                </div>
+                <div className="state-row">
+                  <span>开机启动</span>
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: transport ? "pointer" : "not-allowed", opacity: transport ? 1 : 0.6 }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(appConfig.autoStart)}
+                      disabled={!transport}
+                      onChange={(event) => void handleAutoStartToggle(event.target.checked)}
+                    />
+                    <span>{transport ? "登录系统后自动启动用户端" : "仅桌面版可用"}</span>
+                  </label>
+                </div>
                 <div className="action-row">
                   <button className="primary" type="button" onClick={() => void saveAndReconnect()} disabled={busy}>保存并重连</button>
                 </div>

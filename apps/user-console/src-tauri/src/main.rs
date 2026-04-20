@@ -31,6 +31,8 @@ use tauri::{
 use std::os::windows::process::CommandExt;
 
 const INSTALLER_QUIT_ARG: &str = "--quit-for-install";
+const AUTO_START_ARG: &str = "--auto-start";
+const SILENT_START_ARG: &str = "--silent-start";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DEFAULT_API_BASE_URL: &str = "https://manage.020309.top";
 const P2P_RUNTIME_RELATIVE_PATH: &str = "runtime/easytier-core.exe";
@@ -45,6 +47,8 @@ const WORKSPACE_PROXY_LOG_FILE: &str = "workspace-proxy.log";
 const WORKSPACE_PROXY_PORT_MAP_FILE: &str = "workspace-proxy-ports.json";
 const WORKSPACE_PROXY_PORT_BASE: u16 = 36000;
 const WORKSPACE_PROXY_PORT_SPAN: u16 = 4096;
+const WINDOWS_RUN_REG_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+const WINDOWS_RUN_VALUE_NAME: &str = "CloudRelayUserDesktop";
 
 static WORKSPACE_PROXY_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -313,6 +317,10 @@ struct AppConfig {
     api_base_url: Option<String>,
     #[serde(rename = "closeAction")]
     close_action: Option<String>,
+    #[serde(rename = "silentStart")]
+    silent_start: Option<bool>,
+    #[serde(rename = "autoStart")]
+    auto_start: Option<bool>,
     #[serde(rename = "p2pAutoStart")]
     p2p_auto_start: Option<bool>,
     #[serde(rename = "driveFallbackPolicy")]
@@ -1855,80 +1863,212 @@ fn open_additional_window(app: AppHandle) -> Result<(), String> {
     create_additional_window(&app)
 }
 
+fn launch_arg_present(args: &[String], expected: &str) -> bool {
+    args.iter().any(|arg| arg.eq_ignore_ascii_case(expected))
+}
+
+fn auto_start_requested(args: &[String]) -> bool {
+    launch_arg_present(args, AUTO_START_ARG)
+}
+
+fn startup_requested_silent(args: &[String], config: &AppConfig) -> bool {
+    launch_arg_present(args, SILENT_START_ARG)
+        || (auto_start_requested(args) && config.silent_start.unwrap_or(false))
+}
+
+fn expected_auto_start_command(exe_path: &str) -> String {
+    format!("\"{}\" {}", exe_path, AUTO_START_ARG)
+}
+
+fn legacy_auto_start_command(exe_path: &str) -> String {
+    format!("\"{}\"", exe_path)
+}
+
+fn normalize_run_value(raw: &str) -> String {
+    raw.trim_end_matches('\0').trim().to_string()
+}
+
+fn registered_auto_start_matches(raw: &str, exe_path: &str) -> bool {
+    let normalized = normalize_run_value(raw);
+    normalized.eq_ignore_ascii_case(&expected_auto_start_command(exe_path))
+        || normalized.eq_ignore_ascii_case(&legacy_auto_start_command(exe_path))
+}
+
+#[cfg(target_os = "windows")]
+fn read_run_registry_value(key: &str, value_name: &str) -> Result<Option<String>, String> {
+    use windows_sys::Win32::System::Registry::*;
+
+    let mut h_key: HKEY = core::ptr::null_mut();
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            encode_wide(key).as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut h_key,
+        )
+    };
+    if result == 2 {
+        return Ok(None);
+    }
+    if result != 0 {
+        return Err(format!("RegOpenKeyEx failed: {}", result));
+    }
+
+    let mut kind: u32 = 0;
+    let mut byte_len: u32 = 0;
+    let result = unsafe {
+        RegQueryValueExW(
+            h_key,
+            encode_wide(value_name).as_ptr(),
+            core::ptr::null_mut(),
+            &mut kind,
+            core::ptr::null_mut(),
+            &mut byte_len,
+        )
+    };
+    if result == 2 {
+        unsafe { RegCloseKey(h_key) };
+        return Ok(None);
+    }
+    if result != 0 {
+        unsafe { RegCloseKey(h_key) };
+        return Err(format!("RegQueryValueEx failed: {}", result));
+    }
+    if byte_len == 0 {
+        unsafe { RegCloseKey(h_key) };
+        return Ok(Some(String::new()));
+    }
+
+    let mut buffer = vec![0u16; (byte_len as usize / 2).max(1)];
+    let result = unsafe {
+        RegQueryValueExW(
+            h_key,
+            encode_wide(value_name).as_ptr(),
+            core::ptr::null_mut(),
+            &mut kind,
+            buffer.as_mut_ptr() as *mut u8,
+            &mut byte_len,
+        )
+    };
+    unsafe { RegCloseKey(h_key) };
+    if result != 0 {
+        return Err(format!("RegQueryValueEx failed: {}", result));
+    }
+
+    Ok(Some(normalize_run_value(&String::from_utf16_lossy(
+        &buffer,
+    ))))
+}
+
+#[cfg(target_os = "windows")]
+fn write_run_registry_value(key: &str, value_name: &str, value: &str) -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::*;
+
+    let mut h_key: HKEY = core::ptr::null_mut();
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            encode_wide(key).as_ptr(),
+            0,
+            KEY_SET_VALUE,
+            &mut h_key,
+        )
+    };
+    if result != 0 {
+        return Err(format!("RegOpenKeyEx failed: {}", result));
+    }
+
+    let data = encode_wide(value);
+    let result = unsafe {
+        RegSetValueExW(
+            h_key,
+            encode_wide(value_name).as_ptr(),
+            0,
+            REG_SZ as u32,
+            data.as_ptr() as *const u8,
+            (data.len() * 2) as u32,
+        )
+    };
+    unsafe { RegCloseKey(h_key) };
+    if result != 0 {
+        return Err(format!("RegSetValueEx failed: {}", result));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn delete_run_registry_value(key: &str, value_name: &str) -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::*;
+
+    let mut h_key: HKEY = core::ptr::null_mut();
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            encode_wide(key).as_ptr(),
+            0,
+            KEY_SET_VALUE,
+            &mut h_key,
+        )
+    };
+    if result != 0 {
+        return Err(format!("RegOpenKeyEx failed: {}", result));
+    }
+
+    let result = unsafe { RegDeleteValueW(h_key, encode_wide(value_name).as_ptr()) };
+    unsafe { RegCloseKey(h_key) };
+    if result != 0 && result != 2 {
+        return Err(format!("RegDeleteValue failed: {}", result));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn auto_start_enabled() -> Result<bool, String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|err| err.to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        let registered = read_run_registry_value(WINDOWS_RUN_REG_PATH, WINDOWS_RUN_VALUE_NAME)?;
+        return Ok(registered
+            .as_deref()
+            .map(|raw| registered_auto_start_matches(raw, &exe_path))
+            .unwrap_or(false));
+    }
+
+    #[allow(unreachable_code)]
+    Ok(false)
+}
+
 #[tauri::command]
 fn set_auto_start(enable: bool) -> Result<(), String> {
     let exe_path = std::env::current_exe()
         .map_err(|err| err.to_string())?
         .to_string_lossy()
         .to_string();
-    let key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-    let value_name = "CloudRelayUserDesktop";
 
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::System::Registry::*;
-        let mut h_key: HKEY = core::ptr::null_mut();
-        let result = unsafe {
-            RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                encode_wide(key).as_ptr(),
-                0,
-                KEY_SET_VALUE,
-                &mut h_key,
-            )
-        };
-        if result != 0 {
-            return Err(format!("RegOpenKeyEx failed: {}", result));
-        }
-        unsafe { RegCloseKey(h_key) };
-
         if enable {
-            let mut h_key: HKEY = core::ptr::null_mut();
-            let result = unsafe {
-                RegOpenKeyExW(
-                    HKEY_CURRENT_USER,
-                    encode_wide(key).as_ptr(),
-                    0,
-                    KEY_SET_VALUE,
-                    &mut h_key,
-                )
-            };
-            if result != 0 {
-                return Err(format!("RegOpenKeyEx failed: {}", result));
-            }
-            let data = encode_wide(&format!("\"{}\"", exe_path));
-            let result = unsafe {
-                RegSetValueExW(
-                    h_key,
-                    encode_wide(value_name).as_ptr(),
-                    0,
-                    REG_SZ as u32,
-                    data.as_ptr() as *const u8,
-                    (data.len() * 2) as u32,
-                )
-            };
-            unsafe { RegCloseKey(h_key) };
-            if result != 0 {
-                return Err(format!("RegSetValueEx failed: {}", result));
+            let expected = expected_auto_start_command(&exe_path);
+            write_run_registry_value(WINDOWS_RUN_REG_PATH, WINDOWS_RUN_VALUE_NAME, &expected)?;
+            let actual = read_run_registry_value(WINDOWS_RUN_REG_PATH, WINDOWS_RUN_VALUE_NAME)?
+                .unwrap_or_default();
+            if !normalize_run_value(&actual).eq_ignore_ascii_case(&expected) {
+                return Err(format!(
+                    "开机自启注册校验失败：期望 `{expected}`，实际 `{}`",
+                    normalize_run_value(&actual)
+                ));
             }
         } else {
-            let mut h_key: HKEY = core::ptr::null_mut();
-            let result = unsafe {
-                RegOpenKeyExW(
-                    HKEY_CURRENT_USER,
-                    encode_wide(key).as_ptr(),
-                    0,
-                    KEY_SET_VALUE,
-                    &mut h_key,
-                )
-            };
-            if result != 0 {
-                return Err(format!("RegOpenKeyEx failed: {}", result));
-            }
-            let result = unsafe { RegDeleteValueW(h_key, encode_wide(value_name).as_ptr()) };
-            unsafe { RegCloseKey(h_key) };
-            if result != 0 && result != 2 {
-                return Err(format!("RegDeleteValue failed: {}", result));
+            delete_run_registry_value(WINDOWS_RUN_REG_PATH, WINDOWS_RUN_VALUE_NAME)?;
+            if read_run_registry_value(WINDOWS_RUN_REG_PATH, WINDOWS_RUN_VALUE_NAME)?.is_some() {
+                return Err("开机自启取消校验失败：注册项仍然存在".to_string());
             }
         }
     }
@@ -3647,6 +3787,42 @@ mod tests {
         assert!(next >= WORKSPACE_PROXY_PORT_BASE);
         assert!(next < WORKSPACE_PROXY_PORT_BASE + WORKSPACE_PROXY_PORT_SPAN);
     }
+
+    #[test]
+    fn registered_auto_start_matches_new_and_legacy_commands() {
+        let exe_path = r"C:\Cloud Relay\CloudRelayUser.exe";
+
+        assert!(registered_auto_start_matches(
+            &expected_auto_start_command(exe_path),
+            exe_path
+        ));
+        assert!(registered_auto_start_matches(
+            &legacy_auto_start_command(exe_path),
+            exe_path
+        ));
+        assert!(!registered_auto_start_matches(
+            r#""C:\Cloud Relay\Other.exe" --auto-start"#,
+            exe_path
+        ));
+    }
+
+    #[test]
+    fn startup_requested_silent_only_hides_auto_start_when_enabled() {
+        let args = vec![AUTO_START_ARG.to_string()];
+        let mut config = AppConfig::default();
+
+        assert!(!startup_requested_silent(&args, &config));
+
+        config.silent_start = Some(true);
+        assert!(startup_requested_silent(&args, &config));
+    }
+
+    #[test]
+    fn explicit_silent_flag_always_hides_startup_window() {
+        let args = vec![SILENT_START_ARG.to_string()];
+
+        assert!(startup_requested_silent(&args, &AppConfig::default()));
+    }
 }
 
 fn main() {
@@ -3657,6 +3833,9 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if installer_requested_quit(&args) {
                 handle_installer_quit_request(app);
+                return;
+            }
+            if auto_start_requested(&args) || launch_arg_present(&args, SILENT_START_ARG) {
                 return;
             }
             request_second_launch_confirmation(app);
@@ -3676,12 +3855,20 @@ fn main() {
             }
             setup_tray(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
+                let launch_args = std::env::args().skip(1).collect::<Vec<_>>();
+                let start_hidden = load_app_config(app.handle().clone())
+                    .map(|config| startup_requested_silent(&launch_args, &config))
+                    .unwrap_or_else(|_| {
+                        startup_requested_silent(&launch_args, &AppConfig::default())
+                    });
                 if let Ok(bounds) = load_window_bounds(app.handle().clone()) {
                     apply_window_bounds(&window, &bounds);
                 }
                 let _ = window.set_title("驻阡陌用户端");
                 set_window_icon(&window);
-                let _ = window.show();
+                if !start_hidden {
+                    let _ = window.show();
+                }
             }
             start_background_bootstrap_tasks(app.handle());
             start_user_node_agent_loop(app.handle());
@@ -3719,6 +3906,7 @@ fn main() {
             window_toggle_maximize,
             window_request_close,
             app_exit,
+            auto_start_enabled,
             open_external,
             open_service_workspace,
             open_service_workspace_external,

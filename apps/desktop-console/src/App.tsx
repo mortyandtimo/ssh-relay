@@ -1901,6 +1901,40 @@ export default function App() {
     }
   }
 
+  async function handleSilentStartToggle(enabled: boolean) {
+    const previous = Boolean(appConfig.silentStart);
+    const newConfig = { ...appConfig, silentStart: enabled };
+    setAppConfig(newConfig);
+    setError("");
+    try {
+      await saveAppConfig(newConfig);
+    } catch (saveError) {
+      setAppConfig((current) => ({ ...normalizePublisherAppConfig(current), silentStart: previous }));
+      setError(saveError instanceof Error ? saveError.message : "保存静默启动设置失败");
+    }
+  }
+
+  async function handleAutoStartToggle(enabled: boolean) {
+    const previous = Boolean(appConfig.autoStart);
+    const newConfig = { ...appConfig, autoStart: enabled };
+    setAppConfig(newConfig);
+    setError("");
+    try {
+      await setAutoStart(enabled);
+      const actual = desktopTransport ? await loadAutoStartEnabled() : enabled;
+      if (actual !== enabled) {
+        throw new Error(enabled ? "开机自启注册校验失败" : "开机自启取消校验失败");
+      }
+      const verifiedConfig = { ...newConfig, autoStart: actual };
+      setAppConfig(verifiedConfig);
+      await saveAppConfig(verifiedConfig);
+    } catch (autoStartError) {
+      const actual = desktopTransport ? await loadAutoStartEnabled().catch(() => previous) : previous;
+      setAppConfig((current) => ({ ...normalizePublisherAppConfig(current), autoStart: actual }));
+      setError(autoStartError instanceof Error ? autoStartError.message : "设置开机自启失败");
+    }
+  }
+
   async function saveP2PSettings() {
     setP2PBusy(true);
     setError("");
@@ -2727,27 +2761,24 @@ export default function App() {
           <div className="settings-row">
             <span>静默启动</span>
             <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-              <input type="checkbox" checked={appConfig.silentStart || false} onChange={async (event) => {
-                const newConfig = { ...appConfig, silentStart: event.target.checked };
-                setAppConfig(newConfig);
-                try { await saveAppConfig(newConfig); } catch { /* ignore */ }
-              }} />
+              <input
+                type="checkbox"
+                checked={appConfig.silentStart || false}
+                onChange={(event) => void handleSilentStartToggle(event.target.checked)}
+              />
               <span style={{ fontSize: 12, color: "#5a6e80" }}>启动时最小化到托盘</span>
             </label>
           </div>
           <div className="settings-row">
             <span>开机启动</span>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-              <input type="checkbox" checked={appConfig.autoStart || false} onChange={async (event) => {
-                const val = event.target.checked;
-                try {
-                  await setAutoStart(val);
-                  const newConfig = { ...appConfig, autoStart: val };
-                  setAppConfig(newConfig);
-                  await saveAppConfig(newConfig);
-                } catch (e) { setError(e instanceof Error ? e.message : "设置失败"); }
-              }} />
-              <span style={{ fontSize: 12, color: "#5a6e80" }}>开机时自动运行</span>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: desktopTransport ? "pointer" : "not-allowed", opacity: desktopTransport ? 1 : 0.6 }}>
+              <input
+                type="checkbox"
+                checked={appConfig.autoStart || false}
+                disabled={!desktopTransport}
+                onChange={(event) => void handleAutoStartToggle(event.target.checked)}
+              />
+              <span style={{ fontSize: 12, color: "#5a6e80" }}>{desktopTransport ? "开机时自动运行" : "仅桌面版可用"}</span>
             </label>
           </div>
 

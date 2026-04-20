@@ -4,6 +4,27 @@ set -euo pipefail
 
 SERVICES=(server-api relay-tcp relay-udp relay-web relay-http relay-https)
 ALL_UNITS() { for s in "${SERVICES[@]}"; do echo "cloud-relay-${s}"; done; }
+verify_enabled() {
+  local failed=0
+  for u in $(ALL_UNITS); do
+    if [[ "$(systemctl is-enabled "$u" 2>/dev/null || echo disabled)" != "enabled" ]]; then
+      echo "校验失败: $u 未成功注册开机自启" >&2
+      failed=1
+    fi
+  done
+  [[ $failed -eq 0 ]]
+}
+
+verify_disabled() {
+  local failed=0
+  for u in $(ALL_UNITS); do
+    if [[ "$(systemctl is-enabled "$u" 2>/dev/null || echo disabled)" != "disabled" ]]; then
+      echo "校验失败: $u 仍然处于已启用状态" >&2
+      failed=1
+    fi
+  done
+  [[ $failed -eq 0 ]]
+}
 
 case "${1:-help}" in
   start)
@@ -20,7 +41,7 @@ case "${1:-help}" in
     ;;
   status)
     for u in $(ALL_UNITS); do
-      printf "%-30s %s\n" "$u" "$(systemctl is-active "$u" 2>/dev/null || echo inactive)"
+      printf "%-30s active=%-10s enabled=%s\n" "$u" "$(systemctl is-active "$u" 2>/dev/null || echo inactive)" "$(systemctl is-enabled "$u" 2>/dev/null || echo disabled)"
     done
     ;;
   log|logs)
@@ -29,11 +50,13 @@ case "${1:-help}" in
     ;;
   enable)
     systemctl enable $(ALL_UNITS)
-    echo "已设置开机自启"
+    verify_enabled || exit 1
+    echo "已设置开机自启并完成校验"
     ;;
   disable)
     systemctl disable $(ALL_UNITS)
-    echo "已取消开机自启"
+    verify_disabled || exit 1
+    echo "已取消开机自启并完成校验"
     ;;
   config)
     ${EDITOR:-vi} /etc/cloud-relay/cloud-relay.env
@@ -74,5 +97,6 @@ case "${1:-help}" in
     echo "  help       显示帮助"
     echo ""
     echo "单服务操作: systemctl restart cloud-relay-server-api"
+    echo "server-api 自启: cloud-relay-server-api-autostart enable|disable|status|verify"
     ;;
 esac

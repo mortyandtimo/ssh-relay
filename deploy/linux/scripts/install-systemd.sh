@@ -17,10 +17,12 @@ sudo install -m 0644 "${SYSTEMD_DIR}/cloud-relay-easytier@.service" /etc/systemd
 sudo install -m 0644 "${SYSTEMD_DIR}/cloud-relay-client-agent.service" /etc/systemd/system/cloud-relay-client-agent.service
 sudo install -m 0644 "${SYSTEMD_DIR}/cloud-relay-client-agent@.service" /etc/systemd/system/cloud-relay-client-agent@.service
 sudo install -m 0644 "${SYSTEMD_DIR}/cloud-relay-service-node@.target" /etc/systemd/system/cloud-relay-service-node@.target
+sudo install -m 0755 "${ROOT_DIR}/deploy/linux/scripts/cloud-relay-server-api-autostart.sh" /usr/local/bin/cloud-relay-server-api-autostart
 
 sudo systemctl daemon-reload
 
 echo "systemd unit files installed."
+echo "Server API autostart helper: cloud-relay-server-api-autostart enable|disable|status|verify"
 echo "Single-instance compatibility env: /etc/cloud-relay-platform/client-agent.env"
 echo "Multi-instance env dir: /etc/cloud-relay-platform/client-agent/<node-id>.env"
 echo "EasyTier env dir: /etc/cloud-relay-platform/easytier/<node-id>.env"

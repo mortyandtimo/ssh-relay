@@ -25,6 +25,7 @@ SetCompressor /SOLID lzma
 !define APP_EXE "CloudRelayPublisher.exe"
 !define PROCESS_BASENAME "CloudRelayPublisher"
 !define INSTALLER_QUIT_ARG "--quit-for-install"
+!define AUTO_START_ARG "--auto-start"
 !define INSTALL_DIR_DEFAULT "$LOCALAPPDATA\CloudRelayPublisher"
 !define OLD_INSTALL_DIR "$LOCALAPPDATA\CloudRelayPublisher"
 !define UNINSTALL_REG_PATH "Software\Microsoft\Windows\CurrentVersion\Uninstall\CloudRelayPublisher"
@@ -257,12 +258,22 @@ Function un.DeleteStartMenuShortcuts
 FunctionEnd
 
 Function EnableAutoStart
-  WriteRegStr HKCU "${RUN_REG_PATH}" "${RUN_VALUE_NAME}" "$\"$INSTDIR\${APP_EXE}$\""
+  WriteRegStr HKCU "${RUN_REG_PATH}" "${RUN_VALUE_NAME}" "$\"$INSTDIR\${APP_EXE}$\" ${AUTO_START_ARG}"
+  ReadRegStr $0 HKCU "${RUN_REG_PATH}" "${RUN_VALUE_NAME}"
+  StrCmp $0 "$\"$INSTDIR\${APP_EXE}$\" ${AUTO_START_ARG}" done
+  MessageBox MB_OK|MB_ICONSTOP "开机自启注册失败。安装器已写入注册项，但回读校验未通过。"
+  Abort
+done:
 FunctionEnd
 
 Function DisableAutoStart
   ; install-section helper
   DeleteRegValue HKCU "${RUN_REG_PATH}" "${RUN_VALUE_NAME}"
+  ReadRegStr $0 HKCU "${RUN_REG_PATH}" "${RUN_VALUE_NAME}"
+  StrCmp $0 "" done
+  MessageBox MB_OK|MB_ICONSTOP "取消开机自启失败。注册项删除后仍然存在。"
+  Abort
+done:
 FunctionEnd
 
 Function un.DisableAutoStart

@@ -51,6 +51,8 @@ const AGENT_RELAY_CONNECT_PATH: &str = "/agent/reverse-tcp";
 const AGENT_UDP_RELAY_CONNECT_PATH: &str = "/agent/reverse-udp";
 const AGENT_WEB_RELAY_CONNECT_PATH: &str = "/agent/reverse-web";
 const INSTALLER_QUIT_ARG: &str = "--quit-for-install";
+const AUTO_START_ARG: &str = "--auto-start";
+const SILENT_START_ARG: &str = "--silent-start";
 const P2P_RUNTIME_RELATIVE_PATH: &str = "runtime/easytier-core.exe";
 const P2P_CLI_RELATIVE_PATH: &str = "runtime/easytier-cli.exe";
 const PUBLISHER_P2P_TCP_LISTENER: &str = "tcp://0.0.0.0:21110";
@@ -58,6 +60,8 @@ const PUBLISHER_P2P_UDP_LISTENER: &str = "udp://0.0.0.0:21110";
 const PUBLISHER_P2P_RPC_PORTAL: &str = "127.0.0.1:15888";
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const P2P_FORWARDER_LOG_FILE: &str = "p2p-service-forwarder.log";
+const WINDOWS_RUN_REG_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+const WINDOWS_RUN_VALUE_NAME: &str = "ZhuQianMo";
 
 static P2P_FORWARDER_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -604,82 +608,182 @@ fn app_exit(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn launch_arg_present(args: &[String], expected: &str) -> bool {
+    args.iter().any(|arg| arg.eq_ignore_ascii_case(expected))
+}
+
+fn auto_start_requested(args: &[String]) -> bool {
+    launch_arg_present(args, AUTO_START_ARG)
+}
+
+fn startup_requested_silent(args: &[String], config: &AppConfig) -> bool {
+    launch_arg_present(args, SILENT_START_ARG)
+        || (auto_start_requested(args) && config.silent_start.unwrap_or(false))
+}
+
+fn expected_auto_start_command(exe_path: &str) -> String {
+    format!("\"{}\" {}", exe_path, AUTO_START_ARG)
+}
+
+fn legacy_auto_start_command(exe_path: &str) -> String {
+    format!("\"{}\"", exe_path)
+}
+
+fn normalize_run_value(raw: &str) -> String {
+    raw.trim_end_matches('\0').trim().to_string()
+}
+
+fn registered_auto_start_matches(raw: &str, exe_path: &str) -> bool {
+    let normalized = normalize_run_value(raw);
+    normalized.eq_ignore_ascii_case(&expected_auto_start_command(exe_path))
+        || normalized.eq_ignore_ascii_case(&legacy_auto_start_command(exe_path))
+}
+
+#[cfg(target_os = "windows")]
+fn read_run_registry_value(key: &str, value_name: &str) -> Result<Option<String>, String> {
+    use windows_sys::Win32::System::Registry::*;
+
+    let mut h_key: HKEY = core::ptr::null_mut();
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            encode_wide(key).as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut h_key,
+        )
+    };
+    if result == 2 {
+        return Ok(None);
+    }
+    if result != 0 {
+        return Err(format!("RegOpenKeyEx failed: {}", result));
+    }
+
+    let mut kind: u32 = 0;
+    let mut byte_len: u32 = 0;
+    let result = unsafe {
+        RegQueryValueExW(
+            h_key,
+            encode_wide(value_name).as_ptr(),
+            core::ptr::null_mut(),
+            &mut kind,
+            core::ptr::null_mut(),
+            &mut byte_len,
+        )
+    };
+    if result == 2 {
+        unsafe { RegCloseKey(h_key) };
+        return Ok(None);
+    }
+    if result != 0 {
+        unsafe { RegCloseKey(h_key) };
+        return Err(format!("RegQueryValueEx failed: {}", result));
+    }
+    if byte_len == 0 {
+        unsafe { RegCloseKey(h_key) };
+        return Ok(Some(String::new()));
+    }
+
+    let mut buffer = vec![0u16; (byte_len as usize / 2).max(1)];
+    let result = unsafe {
+        RegQueryValueExW(
+            h_key,
+            encode_wide(value_name).as_ptr(),
+            core::ptr::null_mut(),
+            &mut kind,
+            buffer.as_mut_ptr() as *mut u8,
+            &mut byte_len,
+        )
+    };
+    unsafe { RegCloseKey(h_key) };
+    if result != 0 {
+        return Err(format!("RegQueryValueEx failed: {}", result));
+    }
+
+    Ok(Some(normalize_run_value(&String::from_utf16_lossy(
+        &buffer,
+    ))))
+}
+
+#[cfg(target_os = "windows")]
+fn write_run_registry_value(key: &str, value_name: &str, value: &str) -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::*;
+
+    let mut h_key: HKEY = core::ptr::null_mut();
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            encode_wide(key).as_ptr(),
+            0,
+            KEY_SET_VALUE,
+            &mut h_key,
+        )
+    };
+    if result != 0 {
+        return Err(format!("RegOpenKeyEx failed: {}", result));
+    }
+
+    let data = encode_wide(value);
+    let result = unsafe {
+        RegSetValueExW(
+            h_key,
+            encode_wide(value_name).as_ptr(),
+            0,
+            REG_SZ as u32,
+            data.as_ptr() as *const u8,
+            (data.len() * 2) as u32,
+        )
+    };
+    unsafe { RegCloseKey(h_key) };
+    if result != 0 {
+        return Err(format!("RegSetValueEx failed: {}", result));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn delete_run_registry_value(key: &str, value_name: &str) -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::*;
+
+    let mut h_key: HKEY = core::ptr::null_mut();
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            encode_wide(key).as_ptr(),
+            0,
+            KEY_SET_VALUE,
+            &mut h_key,
+        )
+    };
+    if result != 0 {
+        return Err(format!("RegOpenKeyEx failed: {}", result));
+    }
+
+    let result = unsafe { RegDeleteValueW(h_key, encode_wide(value_name).as_ptr()) };
+    unsafe { RegCloseKey(h_key) };
+    if result != 0 && result != 2 {
+        return Err(format!("RegDeleteValue failed: {}", result));
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 fn auto_start_enabled() -> Result<bool, String> {
     let exe_path = std::env::current_exe()
         .map_err(|err| err.to_string())?
         .to_string_lossy()
         .to_string();
-    let key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-    let value_name = "ZhuQianMo";
 
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::System::Registry::*;
-        let mut h_key: HKEY = core::ptr::null_mut();
-        let result = unsafe {
-            RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                encode_wide(key).as_ptr(),
-                0,
-                KEY_QUERY_VALUE,
-                &mut h_key,
-            )
-        };
-        if result == 2 {
-            return Ok(false);
-        }
-        if result != 0 {
-            return Err(format!("RegOpenKeyEx failed: {}", result));
-        }
-
-        let mut kind: u32 = 0;
-        let mut byte_len: u32 = 0;
-        let result = unsafe {
-            RegQueryValueExW(
-                h_key,
-                encode_wide(value_name).as_ptr(),
-                core::ptr::null_mut(),
-                &mut kind,
-                core::ptr::null_mut(),
-                &mut byte_len,
-            )
-        };
-        if result == 2 {
-            unsafe { RegCloseKey(h_key) };
-            return Ok(false);
-        }
-        if result != 0 {
-            unsafe { RegCloseKey(h_key) };
-            return Err(format!("RegQueryValueEx failed: {}", result));
-        }
-        if byte_len == 0 {
-            unsafe { RegCloseKey(h_key) };
-            return Ok(false);
-        }
-
-        let mut buffer = vec![0u16; (byte_len as usize / 2).max(1)];
-        let result = unsafe {
-            RegQueryValueExW(
-                h_key,
-                encode_wide(value_name).as_ptr(),
-                core::ptr::null_mut(),
-                &mut kind,
-                buffer.as_mut_ptr() as *mut u8,
-                &mut byte_len,
-            )
-        };
-        unsafe { RegCloseKey(h_key) };
-        if result != 0 {
-            return Err(format!("RegQueryValueEx failed: {}", result));
-        }
-
-        let raw = String::from_utf16_lossy(&buffer)
-            .trim_end_matches('\0')
-            .trim()
-            .trim_matches('"')
-            .to_string();
-        return Ok(raw.eq_ignore_ascii_case(&exe_path));
+        let registered = read_run_registry_value(WINDOWS_RUN_REG_PATH, WINDOWS_RUN_VALUE_NAME)?;
+        return Ok(registered
+            .as_deref()
+            .map(|raw| registered_auto_start_matches(raw, &exe_path))
+            .unwrap_or(false));
     }
 
     #[allow(unreachable_code)]
@@ -692,74 +796,24 @@ fn set_auto_start(enable: bool) -> Result<(), String> {
         .map_err(|err| err.to_string())?
         .to_string_lossy()
         .to_string();
-    let key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-    let value_name = "ZhuQianMo";
 
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::System::Registry::*;
-        let mut h_key: HKEY = core::ptr::null_mut();
-        let result = unsafe {
-            RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                encode_wide(key).as_ptr(),
-                0,
-                KEY_SET_VALUE,
-                &mut h_key,
-            )
-        };
-        if result != 0 {
-            return Err(format!("RegOpenKeyEx failed: {}", result));
-        }
-        unsafe { RegCloseKey(h_key) };
-
         if enable {
-            let mut h_key: HKEY = core::ptr::null_mut();
-            let result = unsafe {
-                RegOpenKeyExW(
-                    HKEY_CURRENT_USER,
-                    encode_wide(key).as_ptr(),
-                    0,
-                    KEY_SET_VALUE,
-                    &mut h_key,
-                )
-            };
-            if result != 0 {
-                return Err(format!("RegOpenKeyEx failed: {}", result));
-            }
-            let data = encode_wide(&format!("\"{}\"", exe_path));
-            let result = unsafe {
-                RegSetValueExW(
-                    h_key,
-                    encode_wide(value_name).as_ptr(),
-                    0,
-                    REG_SZ as u32,
-                    data.as_ptr() as *const u8,
-                    (data.len() * 2) as u32,
-                )
-            };
-            unsafe { RegCloseKey(h_key) };
-            if result != 0 {
-                return Err(format!("RegSetValueEx failed: {}", result));
+            let expected = expected_auto_start_command(&exe_path);
+            write_run_registry_value(WINDOWS_RUN_REG_PATH, WINDOWS_RUN_VALUE_NAME, &expected)?;
+            let actual = read_run_registry_value(WINDOWS_RUN_REG_PATH, WINDOWS_RUN_VALUE_NAME)?
+                .unwrap_or_default();
+            if !normalize_run_value(&actual).eq_ignore_ascii_case(&expected) {
+                return Err(format!(
+                    "开机自启注册校验失败：期望 `{expected}`，实际 `{}`",
+                    normalize_run_value(&actual)
+                ));
             }
         } else {
-            let mut h_key: HKEY = core::ptr::null_mut();
-            let result = unsafe {
-                RegOpenKeyExW(
-                    HKEY_CURRENT_USER,
-                    encode_wide(key).as_ptr(),
-                    0,
-                    KEY_SET_VALUE,
-                    &mut h_key,
-                )
-            };
-            if result != 0 {
-                return Err(format!("RegOpenKeyEx failed: {}", result));
-            }
-            let result = unsafe { RegDeleteValueW(h_key, encode_wide(value_name).as_ptr()) };
-            unsafe { RegCloseKey(h_key) };
-            if result != 0 && result != 2 {
-                return Err(format!("RegDeleteValue failed: {}", result));
+            delete_run_registry_value(WINDOWS_RUN_REG_PATH, WINDOWS_RUN_VALUE_NAME)?;
+            if read_run_registry_value(WINDOWS_RUN_REG_PATH, WINDOWS_RUN_VALUE_NAME)?.is_some() {
+                return Err("开机自启取消校验失败：注册项仍然存在".to_string());
             }
         }
     }
@@ -1215,6 +1269,47 @@ fn handle_installer_quit_request(app: &AppHandle) {
     }
     save_bounds_on_exit(app);
     app.exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registered_auto_start_matches_new_and_legacy_commands() {
+        let exe_path = r"C:\Cloud Relay\CloudRelayPublisher.exe";
+
+        assert!(registered_auto_start_matches(
+            &expected_auto_start_command(exe_path),
+            exe_path
+        ));
+        assert!(registered_auto_start_matches(
+            &legacy_auto_start_command(exe_path),
+            exe_path
+        ));
+        assert!(!registered_auto_start_matches(
+            r#""C:\Cloud Relay\Other.exe" --auto-start"#,
+            exe_path
+        ));
+    }
+
+    #[test]
+    fn startup_requested_silent_only_hides_auto_start_when_enabled() {
+        let args = vec![AUTO_START_ARG.to_string()];
+        let mut config = AppConfig::default();
+
+        assert!(!startup_requested_silent(&args, &config));
+
+        config.silent_start = Some(true);
+        assert!(startup_requested_silent(&args, &config));
+    }
+
+    #[test]
+    fn explicit_silent_flag_always_hides_startup_window() {
+        let args = vec![SILENT_START_ARG.to_string()];
+
+        assert!(startup_requested_silent(&args, &AppConfig::default()));
+    }
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -3470,6 +3565,9 @@ fn main() {
                 handle_installer_quit_request(app);
                 return;
             }
+            if auto_start_requested(&args) || launch_arg_present(&args, SILENT_START_ARG) {
+                return;
+            }
             notify_existing_instance(app);
         }))
         .manage(http_state)
@@ -3489,6 +3587,12 @@ fn main() {
             setup_tray(app.handle())?;
             // Restore saved window bounds, then show window (avoids flash at default position)
             if let Some(window) = app.get_webview_window("main") {
+                let launch_args = std::env::args().skip(1).collect::<Vec<_>>();
+                let start_hidden = load_app_config(app.handle().clone())
+                    .map(|config| startup_requested_silent(&launch_args, &config))
+                    .unwrap_or_else(|_| {
+                        startup_requested_silent(&launch_args, &AppConfig::default())
+                    });
                 // Set high-res window icon (taskbar icon)
                 let window_icon = Image::from_bytes(include_bytes!("../icons/icon-256.png"))?;
                 let _ = window.set_icon(window_icon);
@@ -3506,7 +3610,9 @@ fn main() {
                         }
                     }
                 }
-                let _ = window.show();
+                if !start_hidden {
+                    let _ = window.show();
+                }
             }
             let app_handle = app.handle().clone();
             thread::spawn(move || {
