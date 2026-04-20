@@ -20,12 +20,12 @@ import (
 )
 
 const (
-	routeSyncInterval     = 5 * time.Second
-	standbyPoolTargetSize = 8
-	standbyPoolMaxSize    = 16
-	globalMaxStandby      = 300
-	standbyConnMaxAge     = 60 * time.Second
-	defaultAcquireTimeout = 10 * time.Second
+	routeSyncInterval                  = 5 * time.Second
+	defaultStandbyPoolTargetSize       = 64
+	defaultStandbyPoolMaxSize          = 128
+	defaultGlobalMaxStandby      int64 = 16384
+	standbyConnMaxAge                  = 60 * time.Second
+	defaultAcquireTimeout              = 10 * time.Second
 )
 
 type standbyConn struct {
@@ -87,7 +87,7 @@ func (p *standbyPool) enqueue(item standbyConn) (int, []standbyConn, error) {
 		return len(p.items), nil, errors.New("pool closed")
 	}
 	var evicted []standbyConn
-	for len(p.items) >= p.target {
+	for len(p.items) >= p.max {
 		idx := p.oldestIndexLocked()
 		evicted = append(evicted, p.items[idx])
 		p.items = append(p.items[:idx], p.items[idx+1:]...)
@@ -156,16 +156,36 @@ var totalStandby int64
 type Service struct {
 	apiBaseURL string
 	httpClient *http.Client
+	poolTarget int
+	poolMax    int
+	globalMax  int64
 
 	mu     sync.Mutex
 	routes map[string]types.TunnelSpec // key: lowercase domain
 	pools  map[string]*standbyPool     // key: routePoolKey(nodeID, 0) — 0 because web routes don't use publicPort
 }
 
-func NewService(apiBaseURL string) *Service {
+func NewService(apiBaseURL string, poolTarget, poolMax int, globalMax int64) *Service {
+	if poolTarget < 1 {
+		poolTarget = defaultStandbyPoolTargetSize
+	}
+	if poolMax < poolTarget {
+		if poolMax < 1 {
+			poolMax = defaultStandbyPoolMaxSize
+		}
+		if poolMax < poolTarget {
+			poolMax = poolTarget
+		}
+	}
+	if globalMax < 1 {
+		globalMax = defaultGlobalMaxStandby
+	}
 	return &Service{
 		apiBaseURL: apiBaseURL,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
+		poolTarget: poolTarget,
+		poolMax:    poolMax,
+		globalMax:  globalMax,
 		routes:     make(map[string]types.TunnelSpec),
 		pools:      make(map[string]*standbyPool),
 	}
@@ -235,7 +255,7 @@ func (s *Service) syncRoutes(ctx context.Context) error {
 		s.routes[domain] = route
 		key := webPoolKey(route.NodeID, route.ID)
 		if _, ok := s.pools[key]; !ok {
-			s.pools[key] = newStandbyPool(key, standbyPoolTargetSize, standbyPoolMaxSize)
+			s.pools[key] = newStandbyPool(key, s.poolTarget, s.poolMax)
 		}
 		log.Printf("web route active: domain=%s node=%s tunnel=%s", domain, route.NodeID, route.ID)
 	}
@@ -295,7 +315,7 @@ func (s *Service) HandleAgentReverse(w http.ResponseWriter, r *http.Request) {
 	key := webPoolKey(route.NodeID, route.ID)
 	pool, ok := s.pools[key]
 	if !ok {
-		pool = newStandbyPool(key, standbyPoolTargetSize, standbyPoolMaxSize)
+		pool = newStandbyPool(key, s.poolTarget, s.poolMax)
 		s.pools[key] = pool
 	}
 	s.mu.Unlock()
@@ -422,7 +442,7 @@ func (s *Service) acquireStandbyConn(ctx context.Context, route types.TunnelSpec
 }
 
 func (s *Service) enqueueStandbyConn(pool *standbyPool, key string, item standbyConn) (int, int64, error) {
-	if globalMaxStandby > 0 && atomic.LoadInt64(&totalStandby) >= globalMaxStandby {
+	if s.globalMax > 0 && atomic.LoadInt64(&totalStandby) >= s.globalMax {
 		return pool.lenLocked(), atomic.LoadInt64(&totalStandby), errors.New("global standby pool full")
 	}
 	poolSize, evicted, err := pool.enqueue(item)

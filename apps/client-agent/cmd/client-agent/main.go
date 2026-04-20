@@ -26,10 +26,11 @@ import (
 )
 
 const (
-	agentVersion           = "0.1.0"
-	tunnelPollInterval     = 5 * time.Second
-	defaultReversePoolSize = 4
-	defaultRelayTimeout    = 10 * time.Second
+	agentVersion              = "0.1.0"
+	tunnelPollInterval        = 5 * time.Second
+	defaultReversePoolSize    = 16
+	defaultWebReversePoolSize = 32
+	defaultRelayTimeout       = 10 * time.Second
 )
 
 type reverseManager struct {
@@ -39,6 +40,7 @@ type reverseManager struct {
 	relayWebURL        string
 	httpClient         *http.Client
 	poolSize           int
+	webPoolSize        int
 	connectTimout      time.Duration
 	udpResponseTimeout time.Duration
 
@@ -79,6 +81,10 @@ func main() {
 	if reversePoolSize < 1 {
 		reversePoolSize = 1
 	}
+	webReversePoolSize := config.GetIntEnv("AGENT_WEB_REVERSE_POOL_SIZE", defaultWebReversePoolSize)
+	if webReversePoolSize < 1 {
+		webReversePoolSize = 1
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	registeredID, err := register(client, baseURL, nodeID, nodeName, deploymentMode, serviceUnit, instanceProfile, p2pConfig)
@@ -111,6 +117,7 @@ func main() {
 		relayWebURL:        relayWebURL,
 		httpClient:         client,
 		poolSize:           reversePoolSize,
+		webPoolSize:        webReversePoolSize,
 		connectTimout:      defaultRelayTimeout,
 		workers:            make(map[string]managedTunnel),
 		httpProbeMetrics:   make(map[string]string),
@@ -411,6 +418,9 @@ func (m *reverseManager) syncTunnels(ctx context.Context, nodeID string) error {
 	}
 	for _, start := range toStart {
 		slotCount := m.poolSize
+		if start.tunnel.Type == "http" || start.tunnel.Type == "https" {
+			slotCount = m.webPoolSize
+		}
 		if start.tunnel.Type == "udp" {
 			slotCount = 1
 		}

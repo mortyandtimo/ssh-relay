@@ -16,8 +16,11 @@ func main() {
 	controlAddr := config.GetEnv("RELAY_WEB_ADDR", ":9094")
 	proxyAddr := config.GetEnv("RELAY_WEB_HTTP_ADDR", ":9095")
 	apiBaseURL := config.GetEnv("RELAY_WEB_API_BASE_URL", "http://127.0.0.1:7710")
+	poolTarget := config.GetIntEnv("RELAY_WEB_STANDBY_TARGET_SIZE", 64)
+	poolMax := config.GetIntEnv("RELAY_WEB_STANDBY_MAX_SIZE", 128)
+	globalMax := int64(config.GetIntEnv("RELAY_WEB_GLOBAL_MAX_STANDBY", 16384))
 
-	service := runtime.NewService(apiBaseURL)
+	service := runtime.NewService(apiBaseURL, poolTarget, poolMax, globalMax)
 	go func() {
 		if err := service.Run(context.Background()); err != nil {
 			log.Fatal(err)
@@ -33,7 +36,15 @@ func main() {
 	})
 	controlMux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"service": "relay-web", "controlAddr": controlAddr, "proxyAddr": proxyAddr, "apiBaseUrl": apiBaseURL})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"service":           "relay-web",
+			"controlAddr":       controlAddr,
+			"proxyAddr":         proxyAddr,
+			"apiBaseUrl":        apiBaseURL,
+			"standbyTargetSize": poolTarget,
+			"standbyMaxSize":    poolMax,
+			"globalMaxStandby":  globalMax,
+		})
 	})
 	controlMux.HandleFunc("/runtime", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

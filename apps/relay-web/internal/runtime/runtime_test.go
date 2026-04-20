@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/25743/cloud-relay-platform/packages/protocol/types"
 )
@@ -102,5 +103,37 @@ func TestCopyHTTPResponseRewritesLocationAndRefreshOnly(t *testing.T) {
 	}
 	if report.RefreshOriginal != "0; url=http://127.0.0.1:8181/login" || report.RefreshRewritten != "0; url=https://img.020309.top/login" {
 		t.Fatalf("unexpected refresh rewrite report: %#v", report)
+	}
+}
+
+func TestStandbyPoolEnqueueUsesMaxCapacity(t *testing.T) {
+	pool := newStandbyPool("node:tunnel", 2, 4)
+	base := time.Unix(1_700_000_000, 0).UTC()
+
+	for i := 0; i < 4; i++ {
+		poolSize, evicted, err := pool.enqueue(standbyConn{registeredAt: base.Add(time.Duration(i) * time.Second)})
+		if err != nil {
+			t.Fatalf("enqueue %d failed: %v", i, err)
+		}
+		if len(evicted) != 0 {
+			t.Fatalf("enqueue %d unexpectedly evicted %d items before max capacity", i, len(evicted))
+		}
+		if want := i + 1; poolSize != want {
+			t.Fatalf("enqueue %d pool size = %d, want %d", i, poolSize, want)
+		}
+	}
+
+	poolSize, evicted, err := pool.enqueue(standbyConn{registeredAt: base.Add(5 * time.Second)})
+	if err != nil {
+		t.Fatalf("enqueue overflow failed: %v", err)
+	}
+	if poolSize != 4 {
+		t.Fatalf("overflow pool size = %d, want 4", poolSize)
+	}
+	if len(evicted) != 1 {
+		t.Fatalf("overflow evicted %d items, want 1", len(evicted))
+	}
+	if !evicted[0].registeredAt.Equal(base) {
+		t.Fatalf("overflow evicted wrong item: got %s want %s", evicted[0].registeredAt, base)
 	}
 }

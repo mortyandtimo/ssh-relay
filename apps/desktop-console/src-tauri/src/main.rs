@@ -433,7 +433,8 @@ fn runtime_start(
     command.env("CLIENT_NODE_NAME", &node_name);
     command.env("CLIENT_DEPLOYMENT_MODE", "managed");
     command.env("CLIENT_SERVICE_UNIT", "desktop-embedded-runtime");
-    command.env("AGENT_REVERSE_POOL_SIZE", "8");
+    command.env("AGENT_REVERSE_POOL_SIZE", "16");
+    command.env("AGENT_WEB_REVERSE_POOL_SIZE", "32");
     if let Ok(p2p_cli_path) = resolve_p2p_cli_executable(&app) {
         command.env("CLIENT_P2P_ASSIST", "true");
         command.env("CLIENT_P2P_CLI", p2p_cli_path);
