@@ -2497,14 +2497,20 @@ func TestUserServiceCatalogRespectsServiceMetadataAndRolePolicy(t *testing.T) {
 	if userOut.Items[0].Key != "drive" {
 		t.Fatalf("expected service key drive, got %q", userOut.Items[0].Key)
 	}
-	if userOut.Items[0].PublicURL != "https://drive.020309.top" {
-		t.Fatalf("expected public url https://drive.020309.top, got %q", userOut.Items[0].PublicURL)
+	if userOut.Items[0].PublicURL != "" {
+		t.Fatalf("expected public url to be hidden, got %q", userOut.Items[0].PublicURL)
 	}
 	if userOut.Items[0].CloudAllowed {
 		t.Fatal("expected normal user cloud access to be denied")
 	}
 	if !userOut.Items[0].P2PAllowed {
 		t.Fatal("expected normal user p2p access to be allowed")
+	}
+	if userOut.Items[0].P2PURL != "http://10.126.126.20:8080" {
+		t.Fatalf("expected p2p url http://10.126.126.20:8080, got %q", userOut.Items[0].P2PURL)
+	}
+	if userOut.Items[0].TransportManifest != nil {
+		t.Fatal("expected non-music service to omit transport manifest")
 	}
 	if userOut.Items[0].PreferredPath != "p2p" {
 		t.Fatalf("expected preferredPath p2p, got %q", userOut.Items[0].PreferredPath)
@@ -2751,6 +2757,9 @@ func TestUserServiceCatalogAllowsBuiltInP2PForNormalUsers(t *testing.T) {
 	if drive.CloudAllowed {
 		t.Fatal("expected drive cloud access to remain denied for normal user")
 	}
+	if drive.PublicURL != "" {
+		t.Fatalf("expected drive public url to be hidden, got %q", drive.PublicURL)
+	}
 
 	gallery, ok := servicesByKey["gallery"]
 	if !ok {
@@ -2761,6 +2770,9 @@ func TestUserServiceCatalogAllowsBuiltInP2PForNormalUsers(t *testing.T) {
 	}
 	if gallery.P2PAccess != serviceAccessAllUsers {
 		t.Fatalf("expected gallery p2pAccess all_users, got %q", gallery.P2PAccess)
+	}
+	if gallery.PublicURL != "https://img.020309.top" {
+		t.Fatalf("expected gallery public url https://img.020309.top, got %q", gallery.PublicURL)
 	}
 }
 
@@ -3384,6 +3396,24 @@ func TestUserServiceCatalogHonorsConfiguredMusicP2PAccess(t *testing.T) {
 	}
 	if out.Items[0].P2PAccess != serviceAccessAdminOnly {
 		t.Fatalf("expected p2pAccess admin_only, got %q", out.Items[0].P2PAccess)
+	}
+	if out.Items[0].PublicURL != "https://music-policy.020309.top" {
+		t.Fatalf("expected public url https://music-policy.020309.top, got %q", out.Items[0].PublicURL)
+	}
+	if out.Items[0].P2PURL != "" {
+		t.Fatalf("expected p2p url to be hidden, got %q", out.Items[0].P2PURL)
+	}
+	if out.Items[0].PreferredPath != "cloud" {
+		t.Fatalf("expected preferredPath cloud, got %q", out.Items[0].PreferredPath)
+	}
+	if out.Items[0].TransportManifest == nil {
+		t.Fatal("expected music transport manifest")
+	}
+	if out.Items[0].TransportManifest.DataPlane.P2PBaseURL != "" {
+		t.Fatalf("expected manifest p2p base url to be hidden, got %q", out.Items[0].TransportManifest.DataPlane.P2PBaseURL)
+	}
+	if out.Items[0].TransportManifest.ControlPlane.BaseURL != "https://music-policy.020309.top" {
+		t.Fatalf("expected manifest control-plane base url https://music-policy.020309.top, got %q", out.Items[0].TransportManifest.ControlPlane.BaseURL)
 	}
 }
 

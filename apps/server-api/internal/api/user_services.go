@@ -152,12 +152,23 @@ func userServiceEntryFromTunnel(
 	cloudAccess := normalizeServiceAccessPolicy(tunnel.Metadata[serviceMetaCloudAccessKey], publicURL != "")
 	p2pAccess := normalizeServiceAccessPolicy(tunnel.Metadata[serviceMetaP2PAccessKey], p2pURL != "")
 	p2pAccess = normalizeEndUserP2PAccess(key, kind, p2pAccess, p2pURL != "")
+	cloudAllowed := serviceAccessAllowed(cloudAccess, user.Role)
+	p2pAllowed := serviceAccessAllowed(p2pAccess, user.Role)
+	visiblePublicURL := ""
+	if cloudAllowed {
+		visiblePublicURL = publicURL
+	}
+	visibleP2PURL := ""
+	if p2pAllowed {
+		visibleP2PURL = p2pURL
+	}
 	preferredPath := normalizeServicePreferredPath(
 		tunnel.Metadata[serviceMetaPreferredPathKey],
 		kind,
-		publicURL != "",
-		p2pURL != "",
+		visiblePublicURL != "",
+		visibleP2PURL != "",
 	)
+	manifest := buildServiceTransportManifest(kind, visiblePublicURL, visibleP2PURL, preferredPath)
 
 	return types.UserServiceEntry{
 		Key:                key,
@@ -176,14 +187,14 @@ func userServiceEntryFromTunnel(
 		RuntimePath:        tunnel.RuntimePath,
 		RuntimeState:       tunnel.RuntimeState,
 		HealthStatus:       string(tunnel.HealthStatus),
-		PublicURL:          publicURL,
-		P2PURL:             p2pURL,
+		PublicURL:          visiblePublicURL,
+		P2PURL:             visibleP2PURL,
 		CloudAccess:        cloudAccess,
 		P2PAccess:          p2pAccess,
-		CloudAllowed:       serviceAccessAllowed(cloudAccess, user.Role),
-		P2PAllowed:         serviceAccessAllowed(p2pAccess, user.Role),
+		CloudAllowed:       cloudAllowed,
+		P2PAllowed:         p2pAllowed,
 		PreferredPath:      preferredPath,
-		TransportManifest:  buildServiceTransportManifest(kind, publicURL, p2pURL, preferredPath),
+		TransportManifest:  manifest,
 	}, true
 }
 
@@ -485,6 +496,9 @@ func normalizeServiceURLValue(raw string) string {
 
 func buildServiceTransportManifest(kind, publicURL, p2pURL, preferredPath string) *types.ServiceTransportManifest {
 	if kind != "music" {
+		return nil
+	}
+	if strings.TrimSpace(publicURL) == "" && strings.TrimSpace(p2pURL) == "" {
 		return nil
 	}
 	return &types.ServiceTransportManifest{
