@@ -2662,6 +2662,7 @@ func TestUserServiceCatalogAllowsBuiltInP2PForNormalUsers(t *testing.T) {
 	}
 
 	createDriveBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-drive-service",
 		"nodeId":     registerOut.NodeID,
 		"name":       "drive-service",
 		"type":       "https",
@@ -2689,6 +2690,7 @@ func TestUserServiceCatalogAllowsBuiltInP2PForNormalUsers(t *testing.T) {
 	}
 
 	createGalleryBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-gallery-service",
 		"nodeId":     registerOut.NodeID,
 		"name":       "gallery-service",
 		"type":       "https",
@@ -3008,6 +3010,86 @@ func TestUserServiceCatalogInfersBuiltInServicesFromTunnelShape(t *testing.T) {
 	}
 	if !music.TransportManifest.RecoveryPolicy.FutureRequestsOnlyOnRecover {
 		t.Fatal("expected recovery policy to only affect future requests")
+	}
+}
+
+func TestPublicServiceTransportResolvesMusicManifestByPublicURL(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "service-node-public",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-public-music",
+		"nodeId":     registerOut.NodeID,
+		"name":       "闊充箰鏈嶅姟",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 4533,
+		"publicPort": 0,
+		"domain":     "music.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceP2PUrl":        "http://10.66.0.8:4533",
+			"servicePreferredPath": "p2p",
+		},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create tunnel 201, got %d: %s", createRes.Code, createRes.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/public/service-transport?kind=music&publicUrl="+url.QueryEscape("https://music.020309.top"), nil)
+	req.Host = "manage.020309.top"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected public service transport 200, got %d: %s", res.Code, res.Body.String())
+	}
+
+	var out types.PublicServiceTransportResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Key != "music" {
+		t.Fatalf("expected key music, got %q", out.Key)
+	}
+	if out.PublicURL != "https://music.020309.top" {
+		t.Fatalf("expected public url https://music.020309.top, got %q", out.PublicURL)
+	}
+	if out.P2PURL != "http://10.66.0.8:4533" {
+		t.Fatalf("expected p2p url http://10.66.0.8:4533, got %q", out.P2PURL)
+	}
+	if out.PreferredPath != "p2p" {
+		t.Fatalf("expected preferredPath p2p, got %q", out.PreferredPath)
+	}
+	if out.TransportManifest == nil {
+		t.Fatal("expected public service transport manifest")
+	}
+	if out.TransportManifest.DataPlane.P2PBaseURL != "http://10.66.0.8:4533" {
+		t.Fatalf("expected manifest p2p base url http://10.66.0.8:4533, got %q", out.TransportManifest.DataPlane.P2PBaseURL)
+	}
+	if !out.TransportManifest.RecoveryPolicy.AutoRecoverToP2P {
+		t.Fatal("expected public manifest to preserve recovery policy")
 	}
 }
 

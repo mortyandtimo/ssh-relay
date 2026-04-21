@@ -152,6 +152,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/auth/register", s.handleRegisterUser)
 	s.mux.HandleFunc("/api/auth/refresh", s.handleRefresh)
 	s.mux.HandleFunc("/api/auth/logout", s.handleLogout)
+	s.mux.HandleFunc("/api/public/service-transport", s.handlePublicServiceTransport)
 	s.mux.Handle("/api/auth/me", s.requireRole(types.UserRoleUser, http.HandlerFunc(s.handleAuthMe)))
 	s.mux.Handle("/api/auth/password-change/send-code", s.requireRole(types.UserRoleUser, http.HandlerFunc(s.handleSendPasswordChangeCode)))
 	s.mux.Handle("/api/auth/password-change/confirm", s.requireRole(types.UserRoleUser, http.HandlerFunc(s.handleConfirmPasswordChange)))

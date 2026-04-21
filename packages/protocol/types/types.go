@@ -478,6 +478,15 @@ type UserServiceCatalogResponse struct {
 	Items []UserServiceEntry `json:"items"`
 }
 
+type PublicServiceTransportResponse struct {
+	Key               string                    `json:"key"`
+	Kind              string                    `json:"kind"`
+	PublicURL         string                    `json:"publicUrl,omitempty"`
+	P2PURL            string                    `json:"p2pUrl,omitempty"`
+	PreferredPath     string                    `json:"preferredPath,omitempty"`
+	TransportManifest *ServiceTransportManifest `json:"transportManifest,omitempty"`
+}
+
 type ServiceTransportManifest struct {
 	Version        int                          `json:"version"`
 	ControlPlane   ServiceControlPlaneManifest  `json:"controlPlane"`

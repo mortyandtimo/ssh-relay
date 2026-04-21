@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,6 +86,48 @@ func (s *Server) handleUserServices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, types.UserServiceCatalogResponse{Items: services})
 }
 
+func (s *Server) handlePublicServiceTransport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	normalizedPublicURL := normalizeServiceURLValue(r.URL.Query().Get("publicUrl"))
+	if normalizedPublicURL == "" {
+		writeError(w, http.StatusBadRequest, "publicUrl is required")
+		return
+	}
+
+	kind := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("kind")))
+	if kind == "" {
+		kind = "music"
+	}
+
+	tunnels, err := s.store.ListTunnels(r.Context(), store.TunnelFilter{Status: "active"})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	nodes, _, err := s.store.ListNodes(r.Context(), store.NodeFilter{Limit: 100000, Offset: 0})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	nodeIndex := make(map[string]types.NodeSummary, len(nodes))
+	for _, node := range nodes {
+		nodeIndex[node.NodeID] = node
+	}
+
+	entry, ok := publicServiceTransportFromTunnels(r, tunnels, nodeIndex, kind, normalizedPublicURL)
+	if !ok {
+		writeError(w, http.StatusNotFound, "service transport not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, entry)
+}
+
 func userServiceEntryFromTunnel(
 	r *http.Request,
 	user types.UserSummary,
@@ -136,6 +179,69 @@ func userServiceEntryFromTunnel(
 		P2PAllowed:         serviceAccessAllowed(p2pAccess, user.Role),
 		PreferredPath:      preferredPath,
 		TransportManifest:  buildServiceTransportManifest(kind, publicURL, p2pURL, preferredPath),
+	}, true
+}
+
+func publicServiceTransportFromTunnels(
+	r *http.Request,
+	tunnels []types.TunnelSpec,
+	nodeIndex map[string]types.NodeSummary,
+	kind string,
+	normalizedPublicURL string,
+) (types.PublicServiceTransportResponse, bool) {
+	normalizedKind := strings.TrimSpace(strings.ToLower(kind))
+	for _, tunnel := range tunnels {
+		entry, ok := publicServiceTransportFromTunnel(r, tunnel, nodeIndex, normalizedKind)
+		if !ok {
+			continue
+		}
+		if normalizeServiceURLValue(entry.PublicURL) == normalizedPublicURL {
+			return entry, true
+		}
+	}
+	return types.PublicServiceTransportResponse{}, false
+}
+
+func publicServiceTransportFromTunnel(
+	r *http.Request,
+	tunnel types.TunnelSpec,
+	nodeIndex map[string]types.NodeSummary,
+	kind string,
+) (types.PublicServiceTransportResponse, bool) {
+	key, _, inferredKind, _, _, ok := resolveServiceIdentity(tunnel)
+	if !ok {
+		return types.PublicServiceTransportResponse{}, false
+	}
+	if strings.TrimSpace(strings.ToLower(inferredKind)) != kind {
+		return types.PublicServiceTransportResponse{}, false
+	}
+
+	serviceNode := resolveServiceNode(tunnel, nodeIndex)
+	publicURL := strings.TrimSpace(tunnel.Metadata[serviceMetaPublicURLKey])
+	if publicURL == "" {
+		publicURL = deriveServicePublicURL(r, tunnel)
+	}
+	if publicURL == "" {
+		return types.PublicServiceTransportResponse{}, false
+	}
+
+	p2pURL := strings.TrimSpace(tunnel.Metadata[serviceMetaP2PURLKey])
+	if p2pURL == "" {
+		p2pURL = deriveServiceP2PURL(tunnel, serviceNode)
+	}
+	preferredPath := normalizeServicePreferredPath(tunnel.Metadata[serviceMetaPreferredPathKey], publicURL != "", p2pURL != "")
+	manifest := buildServiceTransportManifest(inferredKind, publicURL, p2pURL, preferredPath)
+	if manifest == nil {
+		return types.PublicServiceTransportResponse{}, false
+	}
+
+	return types.PublicServiceTransportResponse{
+		Key:               key,
+		Kind:              inferredKind,
+		PublicURL:         publicURL,
+		P2PURL:            p2pURL,
+		PreferredPath:     preferredPath,
+		TransportManifest: manifest,
 	}, true
 }
 
@@ -313,6 +419,21 @@ func normalizeEndUserP2PAccess(key, kind, policy string, hasP2PURL bool) string 
 	default:
 		return policy
 	}
+}
+
+func normalizeServiceURLValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return strings.TrimRight(strings.ToLower(value), "/")
+	}
+	parsed.Fragment = ""
+	parsed.RawQuery = ""
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	return strings.ToLower(parsed.String())
 }
 
 func buildServiceTransportManifest(kind, publicURL, p2pURL, preferredPath string) *types.ServiceTransportManifest {
