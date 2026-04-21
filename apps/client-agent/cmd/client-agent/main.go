@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,8 +31,12 @@ const (
 	tunnelPollInterval        = 5 * time.Second
 	defaultReversePoolSize    = 16
 	defaultWebReversePoolSize = 32
+	defaultWebReversePoolMax  = 128
 	defaultRelayTimeout       = 10 * time.Second
 	relayKeepaliveInterval    = 2 * time.Second
+	webWorkerMaintenanceEvery = 2 * time.Second
+	defaultWebRecycleAfter    = 10 * time.Minute
+	defaultWebRecycleBatch    = 4
 )
 
 type reverseManager struct {
@@ -42,20 +47,58 @@ type reverseManager struct {
 	httpClient         *http.Client
 	poolSize           int
 	webPoolSize        int
+	webPoolMax         int
 	connectTimout      time.Duration
 	udpResponseTimeout time.Duration
+	webRecycleAfter    time.Duration
+	webRecycleBatch    int
 
 	mu               sync.Mutex
-	workers          map[string]managedTunnel
+	workers          map[string]*managedTunnel
 	httpProbeMetrics map[string]string
 	tunnelTraffic    map[string]trafficCounter
 	active           int64
 	activeTunnels    int64
 }
 
+type tunnelWorkerPhase string
+
+const (
+	workerPhaseDialing  tunnelWorkerPhase = "dialing"
+	workerPhaseStandby  tunnelWorkerPhase = "standby"
+	workerPhaseProxying tunnelWorkerPhase = "proxying"
+	workerPhaseBackoff  tunnelWorkerPhase = "backoff"
+)
+
 type managedTunnel struct {
-	spec   types.TunnelSpec
-	cancel context.CancelFunc
+	spec            types.TunnelSpec
+	cancel          context.CancelFunc
+	baseSlots       int
+	maxSlots        int
+	webRecycleAfter time.Duration
+	webRecycleBatch int
+	mu              sync.Mutex
+	workers         map[int]*tunnelWorker
+	nextSlot        int
+}
+
+type tunnelWorker struct {
+	slot       int
+	cancel     context.CancelFunc
+	phase      tunnelWorkerPhase
+	phaseSince time.Time
+}
+
+type workerPhaseSnapshot struct {
+	slot       int
+	phase      tunnelWorkerPhase
+	phaseSince time.Time
+}
+
+type webWorkerAdjustmentPlan struct {
+	spawn              int
+	trimStandbySlots   []int
+	recycleActiveSlots []int
 }
 
 type trafficCounter struct {
@@ -85,6 +128,18 @@ func main() {
 	webReversePoolSize := config.GetIntEnv("AGENT_WEB_REVERSE_POOL_SIZE", defaultWebReversePoolSize)
 	if webReversePoolSize < 1 {
 		webReversePoolSize = 1
+	}
+	webReversePoolMax := config.GetIntEnv("AGENT_WEB_REVERSE_MAX_SIZE", maxInt(defaultWebReversePoolMax, webReversePoolSize*4))
+	if webReversePoolMax < webReversePoolSize {
+		webReversePoolMax = webReversePoolSize
+	}
+	webRecycleAfter := config.GetDurationEnvSeconds("AGENT_WEB_REVERSE_RECYCLE_AFTER", int(defaultWebRecycleAfter/time.Second))
+	if webRecycleAfter < 0 {
+		webRecycleAfter = 0
+	}
+	webRecycleBatch := config.GetIntEnv("AGENT_WEB_REVERSE_RECYCLE_BATCH", defaultWebRecycleBatch)
+	if webRecycleBatch < 1 {
+		webRecycleBatch = 1
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -119,11 +174,14 @@ func main() {
 		httpClient:         client,
 		poolSize:           reversePoolSize,
 		webPoolSize:        webReversePoolSize,
+		webPoolMax:         webReversePoolMax,
 		connectTimout:      defaultRelayTimeout,
-		workers:            make(map[string]managedTunnel),
+		workers:            make(map[string]*managedTunnel),
 		httpProbeMetrics:   make(map[string]string),
 		tunnelTraffic:      make(map[string]trafficCounter),
 		udpResponseTimeout: 3 * time.Second,
+		webRecycleAfter:    webRecycleAfter,
+		webRecycleBatch:    webRecycleBatch,
 	}
 
 	localAddr := config.GetEnv("AGENT_LOCAL_LISTEN", "127.0.0.1:5180")
@@ -353,11 +411,11 @@ func (m *reverseManager) refreshHTTPProbeMetrics(desired map[string]types.Tunnel
 func (m *reverseManager) StopAll() {
 	m.mu.Lock()
 	workers := m.workers
-	m.workers = make(map[string]managedTunnel)
+	m.workers = make(map[string]*managedTunnel)
 	atomic.StoreInt64(&m.activeTunnels, 0)
 	m.mu.Unlock()
 	for _, worker := range workers {
-		worker.cancel()
+		worker.stop()
 	}
 }
 
@@ -387,9 +445,9 @@ func (m *reverseManager) syncTunnels(ctx context.Context, nodeID string) error {
 
 	toStart := make([]struct {
 		ctx    context.Context
-		tunnel types.TunnelSpec
+		tunnel *managedTunnel
 	}, 0)
-	toStop := make([]managedTunnel, 0)
+	toStop := make([]*managedTunnel, 0)
 
 	m.mu.Lock()
 	atomic.StoreInt64(&m.activeTunnels, int64(len(desired)))
@@ -406,28 +464,21 @@ func (m *reverseManager) syncTunnels(ctx context.Context, nodeID string) error {
 			continue
 		}
 		workerCtx, cancel := context.WithCancel(context.Background())
-		m.workers[id] = managedTunnel{spec: tunnel, cancel: cancel}
+		baseSlots, maxSlots := m.slotBoundsForTunnel(tunnel)
+		managed := newManagedTunnel(tunnel, cancel, baseSlots, maxSlots, m.webRecycleAfter, m.webRecycleBatch)
+		m.workers[id] = managed
 		toStart = append(toStart, struct {
 			ctx    context.Context
-			tunnel types.TunnelSpec
-		}{ctx: workerCtx, tunnel: tunnel})
+			tunnel *managedTunnel
+		}{ctx: workerCtx, tunnel: managed})
 	}
 	m.mu.Unlock()
 
 	for _, worker := range toStop {
-		worker.cancel()
+		worker.stop()
 	}
 	for _, start := range toStart {
-		slotCount := m.poolSize
-		if start.tunnel.Type == "http" || start.tunnel.Type == "https" {
-			slotCount = m.webPoolSize
-		}
-		if start.tunnel.Type == "udp" {
-			slotCount = 1
-		}
-		for slot := 0; slot < slotCount; slot++ {
-			go m.runTunnelWorker(start.ctx, start.tunnel, slot)
-		}
+		start.tunnel.start(start.ctx, m)
 	}
 	return nil
 }
@@ -454,22 +505,25 @@ func (m *reverseManager) fetchTunnels(ctx context.Context, nodeID string) ([]typ
 	return payload.Items, nil
 }
 
-func (m *reverseManager) runTunnelWorker(ctx context.Context, tunnel types.TunnelSpec, slot int) {
-	log.Printf("reverse tunnel worker started: tunnel=%s slot=%d publicPort=%d type=%s target=%s:%d", tunnel.ID, slot, tunnel.PublicPort, tunnel.Type, tunnel.TargetHost, tunnel.TargetPort)
+func (m *reverseManager) runTunnelWorker(ctx context.Context, tunnel *managedTunnel, slot int) {
+	spec := tunnel.spec
+	log.Printf("reverse tunnel worker started: tunnel=%s slot=%d publicPort=%d type=%s target=%s:%d", spec.ID, slot, spec.PublicPort, spec.Type, spec.TargetHost, spec.TargetPort)
 	for {
 		if ctx.Err() != nil {
-			log.Printf("reverse tunnel worker stopped: tunnel=%s slot=%d", tunnel.ID, slot)
+			log.Printf("reverse tunnel worker stopped: tunnel=%s slot=%d", spec.ID, slot)
 			return
 		}
-		if err := m.openReverseSession(ctx, tunnel); err != nil {
+		tunnel.updateWorkerPhase(slot, workerPhaseDialing)
+		if err := m.openReverseSession(ctx, spec, tunnel, slot); err != nil {
 			if ctx.Err() != nil {
-				log.Printf("reverse tunnel worker stopped: tunnel=%s slot=%d", tunnel.ID, slot)
+				log.Printf("reverse tunnel worker stopped: tunnel=%s slot=%d", spec.ID, slot)
 				return
 			}
-			log.Printf("reverse session failed for tunnel=%s slot=%d publicPort=%d: %v", tunnel.ID, slot, tunnel.PublicPort, err)
+			tunnel.updateWorkerPhase(slot, workerPhaseBackoff)
+			log.Printf("reverse session failed for tunnel=%s slot=%d publicPort=%d: %v", spec.ID, slot, spec.PublicPort, err)
 			select {
 			case <-ctx.Done():
-				log.Printf("reverse tunnel worker stopped: tunnel=%s slot=%d", tunnel.ID, slot)
+				log.Printf("reverse tunnel worker stopped: tunnel=%s slot=%d", spec.ID, slot)
 				return
 			case <-time.After(2 * time.Second):
 			}
@@ -477,7 +531,7 @@ func (m *reverseManager) runTunnelWorker(ctx context.Context, tunnel types.Tunne
 	}
 }
 
-func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.TunnelSpec) error {
+func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.TunnelSpec, managed *managedTunnel, slot int) error {
 	atomic.AddInt64(&m.active, 1)
 	defer atomic.AddInt64(&m.active, -1)
 
@@ -501,9 +555,15 @@ func (m *reverseManager) openReverseSession(ctx context.Context, tunnel types.Tu
 	enableTCPKeepalive(conn)
 	stopRelayCancel := closeConnOnCancel(ctx, conn)
 	defer stopRelayCancel()
+	if managed != nil {
+		managed.updateWorkerPhase(slot, workerPhaseStandby)
+	}
 
 	if err := waitForStart(ctx, conn); err != nil {
 		return err
+	}
+	if managed != nil {
+		managed.updateWorkerPhase(slot, workerPhaseProxying)
 	}
 	if tunnel.Type == "udp" {
 		log.Printf("udp reverse session ready: tunnel=%s publicPort=%d", tunnel.ID, tunnel.PublicPort)
@@ -873,6 +933,246 @@ func sameTunnel(left, right types.TunnelSpec) bool {
 		left.TargetHost == right.TargetHost &&
 		left.TargetPort == right.TargetPort &&
 		left.Status == right.Status
+}
+
+func newManagedTunnel(spec types.TunnelSpec, cancel context.CancelFunc, baseSlots, maxSlots int, webRecycleAfter time.Duration, webRecycleBatch int) *managedTunnel {
+	if baseSlots < 1 {
+		baseSlots = 1
+	}
+	if maxSlots < baseSlots {
+		maxSlots = baseSlots
+	}
+	return &managedTunnel{
+		spec:            spec,
+		cancel:          cancel,
+		baseSlots:       baseSlots,
+		maxSlots:        maxSlots,
+		webRecycleAfter: webRecycleAfter,
+		webRecycleBatch: webRecycleBatch,
+		workers:         make(map[int]*tunnelWorker),
+	}
+}
+
+func (m *reverseManager) slotBoundsForTunnel(tunnel types.TunnelSpec) (int, int) {
+	switch tunnel.Type {
+	case "udp":
+		return 1, 1
+	case "http", "https":
+		return m.webPoolSize, m.webPoolMax
+	default:
+		return m.poolSize, m.poolSize
+	}
+}
+
+func (t *managedTunnel) start(ctx context.Context, manager *reverseManager) {
+	t.reconcile(ctx, manager, time.Now())
+	if t.spec.Type != "http" && t.spec.Type != "https" {
+		return
+	}
+	go t.runControlLoop(ctx, manager)
+}
+
+func (t *managedTunnel) stop() {
+	t.mu.Lock()
+	for slot := range t.workers {
+		delete(t.workers, slot)
+	}
+	t.mu.Unlock()
+	t.cancel()
+}
+
+func (t *managedTunnel) runControlLoop(ctx context.Context, manager *reverseManager) {
+	ticker := time.NewTicker(webWorkerMaintenanceEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t.reconcile(ctx, manager, time.Now())
+		}
+	}
+}
+
+func (t *managedTunnel) reconcile(ctx context.Context, manager *reverseManager, now time.Time) {
+	if ctx.Err() != nil {
+		return
+	}
+
+	type workerLaunch struct {
+		slot int
+		ctx  context.Context
+	}
+
+	var launches []workerLaunch
+	var cancels []context.CancelFunc
+	var trimmedStandby int
+	var recycledActive int
+	var spawned int
+
+	t.mu.Lock()
+	if t.spec.Type == "http" || t.spec.Type == "https" {
+		snapshots := make([]workerPhaseSnapshot, 0, len(t.workers))
+		for _, worker := range t.workers {
+			snapshots = append(snapshots, workerPhaseSnapshot{
+				slot:       worker.slot,
+				phase:      worker.phase,
+				phaseSince: worker.phaseSince,
+			})
+		}
+		plan := planWebWorkerAdjustments(snapshots, t.baseSlots, t.maxSlots, t.webRecycleAfter, t.webRecycleBatch, now)
+		trimmedStandby = len(plan.trimStandbySlots)
+		recycledActive = len(plan.recycleActiveSlots)
+		for _, slot := range append(plan.trimStandbySlots, plan.recycleActiveSlots...) {
+			worker, ok := t.workers[slot]
+			if !ok {
+				continue
+			}
+			delete(t.workers, slot)
+			cancels = append(cancels, worker.cancel)
+		}
+		spawned = plan.spawn + recycledActive
+		for i := 0; i < spawned; i++ {
+			slot := t.nextSlot
+			t.nextSlot++
+			workerCtx, workerCancel := context.WithCancel(ctx)
+			t.workers[slot] = &tunnelWorker{
+				slot:       slot,
+				cancel:     workerCancel,
+				phase:      workerPhaseDialing,
+				phaseSince: now,
+			}
+			launches = append(launches, workerLaunch{slot: slot, ctx: workerCtx})
+		}
+	} else {
+		spawned = t.baseSlots - len(t.workers)
+		if spawned < 0 {
+			spawned = 0
+		}
+		for i := 0; i < spawned; i++ {
+			slot := t.nextSlot
+			t.nextSlot++
+			workerCtx, workerCancel := context.WithCancel(ctx)
+			t.workers[slot] = &tunnelWorker{
+				slot:       slot,
+				cancel:     workerCancel,
+				phase:      workerPhaseDialing,
+				phaseSince: now,
+			}
+			launches = append(launches, workerLaunch{slot: slot, ctx: workerCtx})
+		}
+	}
+	t.mu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+	for _, launch := range launches {
+		go manager.runTunnelWorker(launch.ctx, t, launch.slot)
+	}
+	if spawned > 0 {
+		log.Printf("reverse tunnel worker scale up: tunnel=%s added=%d base=%d max=%d", t.spec.ID, spawned, t.baseSlots, t.maxSlots)
+	}
+	if trimmedStandby > 0 {
+		log.Printf("reverse tunnel standby trim: tunnel=%s removed=%d base=%d", t.spec.ID, trimmedStandby, t.baseSlots)
+	}
+	if recycledActive > 0 {
+		log.Printf("reverse tunnel active recycle: tunnel=%s recycled=%d recycleAfter=%s", t.spec.ID, recycledActive, t.webRecycleAfter)
+	}
+}
+
+func (t *managedTunnel) updateWorkerPhase(slot int, phase tunnelWorkerPhase) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	worker, ok := t.workers[slot]
+	if !ok {
+		return
+	}
+	worker.phase = phase
+	worker.phaseSince = time.Now()
+}
+
+func planWebWorkerAdjustments(workers []workerPhaseSnapshot, baseSlots, maxSlots int, recycleAfter time.Duration, recycleBatch int, now time.Time) webWorkerAdjustmentPlan {
+	if baseSlots < 1 {
+		baseSlots = 1
+	}
+	if maxSlots < baseSlots {
+		maxSlots = baseSlots
+	}
+	if recycleBatch < 1 {
+		recycleBatch = 1
+	}
+
+	var plan webWorkerAdjustmentPlan
+	standby := make([]workerPhaseSnapshot, 0)
+	active := make([]workerPhaseSnapshot, 0)
+	dialing := 0
+
+	for _, worker := range workers {
+		switch worker.phase {
+		case workerPhaseStandby:
+			standby = append(standby, worker)
+		case workerPhaseDialing:
+			dialing++
+		case workerPhaseProxying:
+			active = append(active, worker)
+		}
+	}
+
+	availableSoon := len(standby) + dialing
+	if availableSoon < baseSlots && len(workers) < maxSlots {
+		plan.spawn = minInt(baseSlots-availableSoon, maxSlots-len(workers))
+	}
+
+	if len(standby) > baseSlots {
+		sort.Slice(standby, func(i, j int) bool {
+			if standby[i].phaseSince.Equal(standby[j].phaseSince) {
+				return standby[i].slot < standby[j].slot
+			}
+			return standby[i].phaseSince.Before(standby[j].phaseSince)
+		})
+		excess := len(standby) - baseSlots
+		plan.trimStandbySlots = make([]int, 0, excess)
+		for i := 0; i < excess; i++ {
+			plan.trimStandbySlots = append(plan.trimStandbySlots, standby[i].slot)
+		}
+	}
+
+	deficit := baseSlots - availableSoon
+	if deficit > 0 && len(workers) >= maxSlots && recycleAfter > 0 {
+		sort.Slice(active, func(i, j int) bool {
+			if active[i].phaseSince.Equal(active[j].phaseSince) {
+				return active[i].slot < active[j].slot
+			}
+			return active[i].phaseSince.Before(active[j].phaseSince)
+		})
+		limit := minInt(deficit, recycleBatch)
+		for _, worker := range active {
+			if now.Sub(worker.phaseSince) < recycleAfter {
+				continue
+			}
+			plan.recycleActiveSlots = append(plan.recycleActiveSlots, worker.slot)
+			if len(plan.recycleActiveSlots) >= limit {
+				break
+			}
+		}
+	}
+
+	return plan
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func defaultNodeName() string {

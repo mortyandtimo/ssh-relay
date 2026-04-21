@@ -159,3 +159,82 @@ func TestWaitForStartWithKeepaliveStopsAfterStart(t *testing.T) {
 		t.Fatalf("expected timeout after start, got %v", err)
 	}
 }
+
+func TestPlanWebWorkerAdjustmentsSpawnsForStandbyDeficit(t *testing.T) {
+	now := time.Now()
+	workers := []workerPhaseSnapshot{
+		{slot: 1, phase: workerPhaseStandby, phaseSince: now.Add(-time.Minute)},
+		{slot: 2, phase: workerPhaseStandby, phaseSince: now.Add(-50 * time.Second)},
+		{slot: 3, phase: workerPhaseDialing, phaseSince: now.Add(-10 * time.Second)},
+		{slot: 4, phase: workerPhaseProxying, phaseSince: now.Add(-20 * time.Second)},
+		{slot: 5, phase: workerPhaseProxying, phaseSince: now.Add(-15 * time.Second)},
+	}
+
+	plan := planWebWorkerAdjustments(workers, 4, 8, 5*time.Minute, 2, now)
+	if plan.spawn != 1 {
+		t.Fatalf("spawn = %d, want 1", plan.spawn)
+	}
+	if len(plan.trimStandbySlots) != 0 {
+		t.Fatalf("trimStandbySlots = %v, want none", plan.trimStandbySlots)
+	}
+	if len(plan.recycleActiveSlots) != 0 {
+		t.Fatalf("recycleActiveSlots = %v, want none", plan.recycleActiveSlots)
+	}
+}
+
+func TestPlanWebWorkerAdjustmentsTrimsOldestStandby(t *testing.T) {
+	now := time.Now()
+	workers := []workerPhaseSnapshot{
+		{slot: 11, phase: workerPhaseStandby, phaseSince: now.Add(-5 * time.Minute)},
+		{slot: 12, phase: workerPhaseStandby, phaseSince: now.Add(-4 * time.Minute)},
+		{slot: 13, phase: workerPhaseStandby, phaseSince: now.Add(-3 * time.Minute)},
+		{slot: 14, phase: workerPhaseStandby, phaseSince: now.Add(-2 * time.Minute)},
+	}
+
+	plan := planWebWorkerAdjustments(workers, 2, 8, 5*time.Minute, 2, now)
+	if plan.spawn != 0 {
+		t.Fatalf("spawn = %d, want 0", plan.spawn)
+	}
+	if len(plan.trimStandbySlots) != 2 {
+		t.Fatalf("trimStandbySlots len = %d, want 2", len(plan.trimStandbySlots))
+	}
+	if plan.trimStandbySlots[0] != 11 || plan.trimStandbySlots[1] != 12 {
+		t.Fatalf("trimStandbySlots = %v, want [11 12]", plan.trimStandbySlots)
+	}
+}
+
+func TestPlanWebWorkerAdjustmentsRecyclesOldActiveAtBurstCap(t *testing.T) {
+	now := time.Now()
+	workers := []workerPhaseSnapshot{
+		{slot: 21, phase: workerPhaseProxying, phaseSince: now.Add(-12 * time.Minute)},
+		{slot: 22, phase: workerPhaseProxying, phaseSince: now.Add(-11 * time.Minute)},
+		{slot: 23, phase: workerPhaseProxying, phaseSince: now.Add(-2 * time.Minute)},
+		{slot: 24, phase: workerPhaseProxying, phaseSince: now.Add(-90 * time.Second)},
+	}
+
+	plan := planWebWorkerAdjustments(workers, 2, 4, 10*time.Minute, 2, now)
+	if plan.spawn != 0 {
+		t.Fatalf("spawn = %d, want 0 while capped", plan.spawn)
+	}
+	if len(plan.recycleActiveSlots) != 2 {
+		t.Fatalf("recycleActiveSlots len = %d, want 2", len(plan.recycleActiveSlots))
+	}
+	if plan.recycleActiveSlots[0] != 21 || plan.recycleActiveSlots[1] != 22 {
+		t.Fatalf("recycleActiveSlots = %v, want [21 22]", plan.recycleActiveSlots)
+	}
+}
+
+func TestPlanWebWorkerAdjustmentsDoesNotRecycleFreshActive(t *testing.T) {
+	now := time.Now()
+	workers := []workerPhaseSnapshot{
+		{slot: 31, phase: workerPhaseProxying, phaseSince: now.Add(-2 * time.Minute)},
+		{slot: 32, phase: workerPhaseProxying, phaseSince: now.Add(-90 * time.Second)},
+		{slot: 33, phase: workerPhaseProxying, phaseSince: now.Add(-80 * time.Second)},
+		{slot: 34, phase: workerPhaseProxying, phaseSince: now.Add(-70 * time.Second)},
+	}
+
+	plan := planWebWorkerAdjustments(workers, 2, 4, 5*time.Minute, 2, now)
+	if len(plan.recycleActiveSlots) != 0 {
+		t.Fatalf("recycleActiveSlots = %v, want none", plan.recycleActiveSlots)
+	}
+}
