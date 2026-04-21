@@ -76,6 +76,7 @@ type Server struct {
 	releasePublicBaseURL   string
 	allowedOrigins         map[string]struct{}
 	authCookiesSecure      bool
+	easyTierBootstrap      *easyTierBootstrapConfig
 	controlExecuteMu       sync.Mutex
 	controlExecuteActive   map[string]struct{}
 	controlExecuteDone     map[string]controlExecutionRecord
@@ -103,6 +104,7 @@ func NewServer(version string, backend store.Store, relayTCPRuntimeURL string) *
 		releasePublicBaseURL:   strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_API_RELEASE_PUBLIC_BASE_URL")), "/"),
 		allowedOrigins:         parseAllowedOrigins(os.Getenv("SERVER_API_ALLOWED_ORIGINS")),
 		authCookiesSecure:      parseBoolEnv(os.Getenv("SERVER_API_AUTH_COOKIES_SECURE")),
+		easyTierBootstrap:      loadEasyTierBootstrapConfig(),
 		controlExecuteActive:   map[string]struct{}{},
 		controlExecuteDone:     map[string]controlExecutionRecord{},
 		passwordChangeCodes:    map[string]passwordChangeCodeRecord{},

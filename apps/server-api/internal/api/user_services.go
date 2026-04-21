@@ -66,7 +66,7 @@ func (s *Server) handleUserServices(w http.ResponseWriter, r *http.Request) {
 
 	services := make([]types.UserServiceEntry, 0, len(tunnels))
 	for _, tunnel := range tunnels {
-		entry, ok := userServiceEntryFromTunnel(r, user, tunnel, nodeIndex)
+		entry, ok := userServiceEntryFromTunnel(r, user, tunnel, nodeIndex, s.easyTierBootstrap)
 		if !ok {
 			continue
 		}
@@ -119,7 +119,7 @@ func (s *Server) handlePublicServiceTransport(w http.ResponseWriter, r *http.Req
 		nodeIndex[node.NodeID] = node
 	}
 
-	entry, ok := publicServiceTransportFromTunnels(r, tunnels, nodeIndex, kind, normalizedPublicURL)
+	entry, ok := publicServiceTransportFromTunnels(r, tunnels, nodeIndex, kind, normalizedPublicURL, s.easyTierBootstrap)
 	if !ok {
 		writeError(w, http.StatusNotFound, "service transport not found")
 		return
@@ -133,6 +133,7 @@ func userServiceEntryFromTunnel(
 	user types.UserSummary,
 	tunnel types.TunnelSpec,
 	nodeIndex map[string]types.NodeSummary,
+	bootstrap *easyTierBootstrapConfig,
 ) (types.UserServiceEntry, bool) {
 	key, title, kind, summary, registrationSource, ok := resolveServiceIdentity(tunnel)
 	if !ok {
@@ -169,6 +170,7 @@ func userServiceEntryFromTunnel(
 		visibleP2PURL != "",
 	)
 	manifest := buildServiceTransportManifest(kind, visiblePublicURL, visibleP2PURL, preferredPath)
+	p2pBootstrap := bootstrap.build(kind, visibleP2PURL)
 
 	return types.UserServiceEntry{
 		Key:                key,
@@ -195,6 +197,7 @@ func userServiceEntryFromTunnel(
 		P2PAllowed:         p2pAllowed,
 		PreferredPath:      preferredPath,
 		TransportManifest:  manifest,
+		P2PBootstrap:       p2pBootstrap,
 	}, true
 }
 
@@ -204,6 +207,7 @@ func publicServiceTransportFromTunnels(
 	nodeIndex map[string]types.NodeSummary,
 	kind string,
 	normalizedPublicURL string,
+	bootstrap *easyTierBootstrapConfig,
 ) (types.PublicServiceTransportResponse, bool) {
 	normalizedKind := strings.TrimSpace(strings.ToLower(kind))
 	for _, tunnel := range tunnels {
@@ -223,7 +227,7 @@ func publicServiceTransportFromTunnels(
 			continue
 		}
 
-		entry, ok := publicServiceTransportFromTunnel(r, tunnel, nodeIndex, normalizedKind)
+		entry, ok := publicServiceTransportFromTunnel(r, tunnel, nodeIndex, normalizedKind, bootstrap)
 		if !ok {
 			continue
 		}
@@ -238,6 +242,7 @@ func publicServiceTransportFromTunnel(
 	tunnel types.TunnelSpec,
 	nodeIndex map[string]types.NodeSummary,
 	kind string,
+	bootstrap *easyTierBootstrapConfig,
 ) (types.PublicServiceTransportResponse, bool) {
 	key, _, inferredKind, _, _, ok := resolveServiceIdentity(tunnel)
 	if !ok {
@@ -292,6 +297,7 @@ func publicServiceTransportFromTunnel(
 	if manifest == nil {
 		return types.PublicServiceTransportResponse{}, false
 	}
+	p2pBootstrap := bootstrap.build(inferredKind, publicP2PURL)
 
 	return types.PublicServiceTransportResponse{
 		Key:               key,
@@ -300,6 +306,7 @@ func publicServiceTransportFromTunnel(
 		P2PURL:            publicP2PURL,
 		PreferredPath:     preferredPath,
 		TransportManifest: manifest,
+		P2PBootstrap:      p2pBootstrap,
 	}, true
 }
 

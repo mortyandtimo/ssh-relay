@@ -76,6 +76,23 @@ func (b *blockingControlExecutor) execute(_ context.Context, _ controlExecutionP
 	return controlExecutionResult{outcome: controlExecutionOutcomeAcceptedPlaceholder, humanMessage: "blocked executor released", executionMode: types.ControlExecutionPlaceholder}
 }
 
+func writeTestEasyTierEnv(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := dir + "/easytier.env"
+	content := strings.Join([]string{
+		"ET_NETWORK_NAME=cloud-relay",
+		"ET_NETWORK_SECRET=test-network-secret",
+		"ET_HOSTNAME=easytier.manage.020309.top",
+		"ET_INSTANCE_NAME=cloud-relay-cloud-bootstrap",
+		"ET_PRIVATE_MODE=true",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestRegisterHeartbeatTunnelAndMetrics(t *testing.T) {
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
@@ -2887,6 +2904,7 @@ func TestUserServiceCatalogDerivesP2PURLFromDedicatedServiceNode(t *testing.T) {
 }
 
 func TestUserServiceCatalogInfersBuiltInServicesFromTunnelShape(t *testing.T) {
+	t.Setenv("SERVER_API_EASYTIER_ENV_FILE", writeTestEasyTierEnv(t))
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
 	adminCookies := bootstrapAdminAndCollectCookies(t, server)
@@ -3020,12 +3038,22 @@ func TestUserServiceCatalogInfersBuiltInServicesFromTunnelShape(t *testing.T) {
 	if music.TransportManifest.DataPlane.P2PBaseURL != "http://10.66.0.8:4533" {
 		t.Fatalf("expected music p2p base url to round-trip, got %q", music.TransportManifest.DataPlane.P2PBaseURL)
 	}
+	if music.P2PBootstrap == nil {
+		t.Fatal("expected inferred music service p2p bootstrap")
+	}
+	if music.P2PBootstrap.Provider != "easytier" {
+		t.Fatalf("expected p2p bootstrap provider easytier, got %q", music.P2PBootstrap.Provider)
+	}
+	if music.P2PBootstrap.OverlayBaseURL != "http://10.66.0.8:4533" {
+		t.Fatalf("expected overlay base url http://10.66.0.8:4533, got %q", music.P2PBootstrap.OverlayBaseURL)
+	}
 	if !music.TransportManifest.RecoveryPolicy.FutureRequestsOnlyOnRecover {
 		t.Fatal("expected recovery policy to only affect future requests")
 	}
 }
 
 func TestPublicServiceTransportResolvesMusicManifestByPublicURL(t *testing.T) {
+	t.Setenv("SERVER_API_EASYTIER_ENV_FILE", writeTestEasyTierEnv(t))
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
 	adminCookies := bootstrapAdminAndCollectCookies(t, server)
@@ -3100,12 +3128,22 @@ func TestPublicServiceTransportResolvesMusicManifestByPublicURL(t *testing.T) {
 	if out.TransportManifest.DataPlane.P2PBaseURL != "http://10.66.0.8:4533" {
 		t.Fatalf("expected manifest p2p base url http://10.66.0.8:4533, got %q", out.TransportManifest.DataPlane.P2PBaseURL)
 	}
+	if out.P2PBootstrap == nil {
+		t.Fatal("expected public service transport p2p bootstrap")
+	}
+	if out.P2PBootstrap.NetworkName != "cloud-relay" {
+		t.Fatalf("expected networkName cloud-relay, got %q", out.P2PBootstrap.NetworkName)
+	}
+	if len(out.P2PBootstrap.Peers) != 2 {
+		t.Fatalf("expected 2 peers, got %d", len(out.P2PBootstrap.Peers))
+	}
 	if !out.TransportManifest.RecoveryPolicy.AutoRecoverToP2P {
 		t.Fatal("expected public manifest to preserve recovery policy")
 	}
 }
 
 func TestPublicServiceTransportHidesAdminOnlyP2PFromAnonymousCaller(t *testing.T) {
+	t.Setenv("SERVER_API_EASYTIER_ENV_FILE", writeTestEasyTierEnv(t))
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
 	adminCookies := bootstrapAdminAndCollectCookies(t, server)
@@ -3178,6 +3216,9 @@ func TestPublicServiceTransportHidesAdminOnlyP2PFromAnonymousCaller(t *testing.T
 	}
 	if out.TransportManifest.DataPlane.P2PBaseURL != "" {
 		t.Fatalf("expected manifest p2p base url to be hidden, got %q", out.TransportManifest.DataPlane.P2PBaseURL)
+	}
+	if out.P2PBootstrap != nil {
+		t.Fatal("expected p2p bootstrap to be hidden when anonymous caller cannot use p2p")
 	}
 }
 
@@ -3314,6 +3355,7 @@ func TestPublicServiceTransportReturnsNotFoundWhenAnonymousAccessIsDisabled(t *t
 }
 
 func TestUserServiceCatalogHonorsConfiguredMusicP2PAccess(t *testing.T) {
+	t.Setenv("SERVER_API_EASYTIER_ENV_FILE", writeTestEasyTierEnv(t))
 	server := NewServer("test", store.NewInMemoryStore(), "")
 	server.adminBootstrapSecret = "bootstrap-secret"
 	adminCookies := bootstrapAdminAndCollectCookies(t, server)
@@ -3411,6 +3453,9 @@ func TestUserServiceCatalogHonorsConfiguredMusicP2PAccess(t *testing.T) {
 	}
 	if out.Items[0].TransportManifest.DataPlane.P2PBaseURL != "" {
 		t.Fatalf("expected manifest p2p base url to be hidden, got %q", out.Items[0].TransportManifest.DataPlane.P2PBaseURL)
+	}
+	if out.Items[0].P2PBootstrap != nil {
+		t.Fatal("expected p2p bootstrap to be hidden when p2p access is denied")
 	}
 	if out.Items[0].TransportManifest.ControlPlane.BaseURL != "https://music-policy.020309.top" {
 		t.Fatalf("expected manifest control-plane base url https://music-policy.020309.top, got %q", out.Items[0].TransportManifest.ControlPlane.BaseURL)
