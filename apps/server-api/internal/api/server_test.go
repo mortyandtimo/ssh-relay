@@ -2901,12 +2901,14 @@ func TestUserServiceCatalogInfersBuiltInServicesFromTunnelShape(t *testing.T) {
 			"targetHost": "127.0.0.1",
 			"targetPort": 5212,
 			"publicPort": 0,
+			"id":         "tunnel-inferred-drive",
 			"domain":     "drive.020309.top",
 			"tlsMode":    "edge_terminate",
 			"status":     "active",
 			"metadata":   map[string]string{},
 		},
 		{
+			"id":         "tunnel-inferred-gallery",
 			"nodeId":     registerOut.NodeID,
 			"name":       "图床",
 			"type":       "https",
@@ -2917,6 +2919,21 @@ func TestUserServiceCatalogInfersBuiltInServicesFromTunnelShape(t *testing.T) {
 			"tlsMode":    "edge_terminate",
 			"status":     "active",
 			"metadata":   map[string]string{},
+		},
+		{
+			"id":         "tunnel-inferred-music",
+			"nodeId":     registerOut.NodeID,
+			"name":       "音乐服务",
+			"type":       "https",
+			"targetHost": "127.0.0.1",
+			"targetPort": 4533,
+			"publicPort": 0,
+			"domain":     "music.020309.top",
+			"tlsMode":    "edge_terminate",
+			"status":     "active",
+			"metadata": map[string]string{
+				"serviceP2PUrl": "http://10.66.0.8:4533",
+			},
 		},
 	} {
 		createBody, _ := json.Marshal(item)
@@ -2942,8 +2959,8 @@ func TestUserServiceCatalogInfersBuiltInServicesFromTunnelShape(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Items) != 2 {
-		t.Fatalf("expected 2 inferred services, got %d", len(out.Items))
+	if len(out.Items) != 3 {
+		t.Fatalf("expected 3 inferred services, got %d", len(out.Items))
 	}
 
 	servicesByKey := make(map[string]types.UserServiceEntry, len(out.Items))
@@ -2971,6 +2988,26 @@ func TestUserServiceCatalogInfersBuiltInServicesFromTunnelShape(t *testing.T) {
 	}
 	if gallery.Title != "图床服务" {
 		t.Fatalf("expected inferred gallery title, got %q", gallery.Title)
+	}
+
+	music, ok := servicesByKey["music"]
+	if !ok {
+		t.Fatal("expected inferred music service")
+	}
+	if music.RegistrationSource != "inferred" {
+		t.Fatalf("expected music registrationSource inferred, got %q", music.RegistrationSource)
+	}
+	if music.TransportManifest == nil {
+		t.Fatal("expected music transport manifest")
+	}
+	if music.TransportManifest.ControlPlane.Mode != "https_only" {
+		t.Fatalf("expected control plane mode https_only, got %q", music.TransportManifest.ControlPlane.Mode)
+	}
+	if music.TransportManifest.DataPlane.P2PBaseURL != "http://10.66.0.8:4533" {
+		t.Fatalf("expected music p2p base url to round-trip, got %q", music.TransportManifest.DataPlane.P2PBaseURL)
+	}
+	if !music.TransportManifest.RecoveryPolicy.FutureRequestsOnlyOnRecover {
+		t.Fatal("expected recovery policy to only affect future requests")
 	}
 }
 

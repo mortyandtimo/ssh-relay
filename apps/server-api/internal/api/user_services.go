@@ -135,6 +135,7 @@ func userServiceEntryFromTunnel(
 		CloudAllowed:       serviceAccessAllowed(cloudAccess, user.Role),
 		P2PAllowed:         serviceAccessAllowed(p2pAccess, user.Role),
 		PreferredPath:      preferredPath,
+		TransportManifest:  buildServiceTransportManifest(kind, publicURL, p2pURL, preferredPath),
 	}, true
 }
 
@@ -221,6 +222,15 @@ func inferServiceIdentity(tunnel types.TunnelSpec) (inferredServiceIdentity, boo
 		}, true
 	}
 
+	if strings.Contains(name, "音乐") || strings.Contains(name, "music") || strings.Contains(name, "navidrome") || strings.Contains(name, "subsonic") || matchesServiceDomain(domain, "music", "navidrome", "subsonic", "audio") {
+		return inferredServiceIdentity{
+			key:     "music",
+			title:   "音乐服务",
+			kind:    "music",
+			summary: "控制面固定走云端 HTTPS，歌曲流、下载与封面优先通过 P2P 获取，异常时快速回退到公网入口。",
+		}, true
+	}
+
 	return inferredServiceIdentity{}, false
 }
 
@@ -249,7 +259,7 @@ func normalizeServiceKey(value string) string {
 func normalizeServiceKind(value, key string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
 	switch value {
-	case "drive", "gallery", "app":
+	case "drive", "gallery", "music", "app":
 		return value
 	}
 	switch key {
@@ -257,6 +267,8 @@ func normalizeServiceKind(value, key string) string {
 		return "drive"
 	case "gallery":
 		return "gallery"
+	case "music":
+		return "music"
 	default:
 		return "app"
 	}
@@ -294,12 +306,50 @@ func normalizeEndUserP2PAccess(key, kind, policy string, hasP2PURL bool) string 
 		return policy
 	}
 	switch {
-	case kind == "drive", kind == "gallery":
+	case kind == "drive", kind == "gallery", kind == "music":
 		return serviceAccessAllUsers
-	case key == "drive", key == "gallery":
+	case key == "drive", key == "gallery", key == "music":
 		return serviceAccessAllUsers
 	default:
 		return policy
+	}
+}
+
+func buildServiceTransportManifest(kind, publicURL, p2pURL, preferredPath string) *types.ServiceTransportManifest {
+	if kind != "music" {
+		return nil
+	}
+	return &types.ServiceTransportManifest{
+		Version: 1,
+		ControlPlane: types.ServiceControlPlaneManifest{
+			Mode:    "https_only",
+			BaseURL: publicURL,
+		},
+		DataPlane: types.ServiceDataPlaneManifest{
+			PreferredPath: preferredPath,
+			CloudBaseURL:  publicURL,
+			P2PBaseURL:    p2pURL,
+		},
+		Capabilities: types.ServiceTransportCapabilities{
+			SupportsStream:   true,
+			SupportsDownload: true,
+			SupportsCoverArt: true,
+			SupportsRange:    true,
+		},
+		ProbePolicy: types.ServiceProbePolicy{
+			ConnectTimeoutMs:         1200,
+			ReadTimeoutMs:            2000,
+			ConsecutiveFailureWindow: 2,
+			CooldownSeconds:          30,
+			RecoveryProbeIntervalSec: 15,
+			RecoverySuccessThreshold: 2,
+		},
+		RecoveryPolicy: types.ServiceRecoveryPolicy{
+			KeepCurrentPlayback:          true,
+			FutureRequestsOnlyOnRecover:  true,
+			QuickFallbackOnNetworkChange: true,
+			AutoRecoverToP2P:             true,
+		},
 	}
 }
 

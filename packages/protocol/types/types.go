@@ -471,10 +471,54 @@ type UserServiceEntry struct {
 	CloudAllowed       bool   `json:"cloudAllowed"`
 	P2PAllowed         bool   `json:"p2pAllowed"`
 	PreferredPath      string `json:"preferredPath,omitempty"`
+	TransportManifest  *ServiceTransportManifest `json:"transportManifest,omitempty"`
 }
 
 type UserServiceCatalogResponse struct {
 	Items []UserServiceEntry `json:"items"`
+}
+
+type ServiceTransportManifest struct {
+	Version        int                          `json:"version"`
+	ControlPlane   ServiceControlPlaneManifest  `json:"controlPlane"`
+	DataPlane      ServiceDataPlaneManifest     `json:"dataPlane"`
+	Capabilities   ServiceTransportCapabilities `json:"capabilities"`
+	ProbePolicy    ServiceProbePolicy           `json:"probePolicy"`
+	RecoveryPolicy ServiceRecoveryPolicy        `json:"recoveryPolicy"`
+}
+
+type ServiceControlPlaneManifest struct {
+	Mode    string `json:"mode"`
+	BaseURL string `json:"baseUrl,omitempty"`
+}
+
+type ServiceDataPlaneManifest struct {
+	PreferredPath string `json:"preferredPath,omitempty"`
+	CloudBaseURL  string `json:"cloudBaseUrl,omitempty"`
+	P2PBaseURL    string `json:"p2pBaseUrl,omitempty"`
+}
+
+type ServiceTransportCapabilities struct {
+	SupportsStream   bool `json:"supportsStream"`
+	SupportsDownload bool `json:"supportsDownload"`
+	SupportsCoverArt bool `json:"supportsCoverArt"`
+	SupportsRange    bool `json:"supportsRange"`
+}
+
+type ServiceProbePolicy struct {
+	ConnectTimeoutMs          int `json:"connectTimeoutMs"`
+	ReadTimeoutMs             int `json:"readTimeoutMs"`
+	ConsecutiveFailureWindow  int `json:"consecutiveFailureWindow"`
+	CooldownSeconds           int `json:"cooldownSeconds"`
+	RecoveryProbeIntervalSec  int `json:"recoveryProbeIntervalSec"`
+	RecoverySuccessThreshold  int `json:"recoverySuccessThreshold"`
+}
+
+type ServiceRecoveryPolicy struct {
+	KeepCurrentPlayback          bool `json:"keepCurrentPlayback"`
+	FutureRequestsOnlyOnRecover  bool `json:"futureRequestsOnlyOnRecover"`
+	QuickFallbackOnNetworkChange bool `json:"quickFallbackOnNetworkChange"`
+	AutoRecoverToP2P             bool `json:"autoRecoverToP2P"`
 }
 
 type ServerMetrics struct {
