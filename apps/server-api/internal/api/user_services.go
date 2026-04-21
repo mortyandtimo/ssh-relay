@@ -152,7 +152,12 @@ func userServiceEntryFromTunnel(
 	cloudAccess := normalizeServiceAccessPolicy(tunnel.Metadata[serviceMetaCloudAccessKey], publicURL != "")
 	p2pAccess := normalizeServiceAccessPolicy(tunnel.Metadata[serviceMetaP2PAccessKey], p2pURL != "")
 	p2pAccess = normalizeEndUserP2PAccess(key, kind, p2pAccess, p2pURL != "")
-	preferredPath := normalizeServicePreferredPath(tunnel.Metadata[serviceMetaPreferredPathKey], publicURL != "", p2pURL != "")
+	preferredPath := normalizeServicePreferredPath(
+		tunnel.Metadata[serviceMetaPreferredPathKey],
+		kind,
+		publicURL != "",
+		p2pURL != "",
+	)
 
 	return types.UserServiceEntry{
 		Key:                key,
@@ -191,13 +196,28 @@ func publicServiceTransportFromTunnels(
 ) (types.PublicServiceTransportResponse, bool) {
 	normalizedKind := strings.TrimSpace(strings.ToLower(kind))
 	for _, tunnel := range tunnels {
+		key, _, inferredKind, _, _, ok := resolveServiceIdentity(tunnel)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(strings.ToLower(inferredKind)) != normalizedKind {
+			continue
+		}
+
+		publicURL := strings.TrimSpace(tunnel.Metadata[serviceMetaPublicURLKey])
+		if publicURL == "" {
+			publicURL = deriveServicePublicURL(r, tunnel)
+		}
+		if normalizeServiceURLValue(publicURL) != normalizedPublicURL {
+			continue
+		}
+
 		entry, ok := publicServiceTransportFromTunnel(r, tunnel, nodeIndex, normalizedKind)
 		if !ok {
 			continue
 		}
-		if normalizeServiceURLValue(entry.PublicURL) == normalizedPublicURL {
-			return entry, true
-		}
+		entry.Key = key
+		return entry, true
 	}
 	return types.PublicServiceTransportResponse{}, false
 }
@@ -229,8 +249,35 @@ func publicServiceTransportFromTunnel(
 	if p2pURL == "" {
 		p2pURL = deriveServiceP2PURL(tunnel, serviceNode)
 	}
-	preferredPath := normalizeServicePreferredPath(tunnel.Metadata[serviceMetaPreferredPathKey], publicURL != "", p2pURL != "")
-	manifest := buildServiceTransportManifest(inferredKind, publicURL, p2pURL, preferredPath)
+
+	cloudAccess := normalizeServiceAccessPolicy(
+		tunnel.Metadata[serviceMetaCloudAccessKey],
+		publicURL != "",
+	)
+	p2pAccess := normalizeServiceAccessPolicy(
+		tunnel.Metadata[serviceMetaP2PAccessKey],
+		p2pURL != "",
+	)
+
+	publicCloudURL := ""
+	if cloudAccess == serviceAccessAllUsers {
+		publicCloudURL = publicURL
+	}
+	publicP2PURL := ""
+	if p2pAccess == serviceAccessAllUsers {
+		publicP2PURL = p2pURL
+	}
+	if publicCloudURL == "" && publicP2PURL == "" {
+		return types.PublicServiceTransportResponse{}, false
+	}
+
+	preferredPath := normalizeServicePreferredPath(
+		tunnel.Metadata[serviceMetaPreferredPathKey],
+		inferredKind,
+		publicCloudURL != "",
+		publicP2PURL != "",
+	)
+	manifest := buildServiceTransportManifest(inferredKind, publicCloudURL, publicP2PURL, preferredPath)
 	if manifest == nil {
 		return types.PublicServiceTransportResponse{}, false
 	}
@@ -238,8 +285,8 @@ func publicServiceTransportFromTunnel(
 	return types.PublicServiceTransportResponse{
 		Key:               key,
 		Kind:              inferredKind,
-		PublicURL:         publicURL,
-		P2PURL:            p2pURL,
+		PublicURL:         publicCloudURL,
+		P2PURL:            publicP2PURL,
 		PreferredPath:     preferredPath,
 		TransportManifest: manifest,
 	}, true
@@ -412,9 +459,9 @@ func normalizeEndUserP2PAccess(key, kind, policy string, hasP2PURL bool) string 
 		return policy
 	}
 	switch {
-	case kind == "drive", kind == "gallery", kind == "music":
+	case kind == "drive", kind == "gallery":
 		return serviceAccessAllUsers
-	case key == "drive", key == "gallery", key == "music":
+	case key == "drive", key == "gallery":
 		return serviceAccessAllUsers
 	default:
 		return policy
@@ -474,13 +521,16 @@ func buildServiceTransportManifest(kind, publicURL, p2pURL, preferredPath string
 	}
 }
 
-func normalizeServicePreferredPath(value string, hasPublicURL, hasP2PURL bool) string {
+func normalizeServicePreferredPath(value, kind string, hasPublicURL, hasP2PURL bool) string {
 	switch strings.TrimSpace(strings.ToLower(value)) {
 	case "cloud", "p2p", "dual":
 		return strings.TrimSpace(strings.ToLower(value))
 	}
 	switch {
 	case hasPublicURL && hasP2PURL:
+		if strings.TrimSpace(strings.ToLower(kind)) == "music" {
+			return "p2p"
+		}
 		return "dual"
 	case hasP2PURL:
 		return "p2p"

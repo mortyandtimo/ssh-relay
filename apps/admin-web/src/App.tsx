@@ -218,7 +218,7 @@ type TunnelForm = {
   probePath: string;
   serviceKey: string;
   serviceTitle: string;
-  serviceKind: "app" | "drive" | "gallery";
+  serviceKind: "app" | "drive" | "gallery" | "music";
   serviceSummary: string;
   servicePublicUrl: string;
   serviceP2PUrl: string;
@@ -245,7 +245,7 @@ type TunnelEditForm = {
   transportPolicy: string;
   serviceKey: string;
   serviceTitle: string;
-  serviceKind: "app" | "drive" | "gallery";
+  serviceKind: "app" | "drive" | "gallery" | "music";
   serviceSummary: string;
   servicePublicUrl: string;
   serviceP2PUrl: string;
@@ -336,6 +336,26 @@ const initialTunnelForm: TunnelForm = {
   servicePreferredPath: "dual",
 };
 
+function defaultServicePreferredPath(kind: "app" | "drive" | "gallery" | "music") {
+  return kind === "music" ? "p2p" : "dual";
+}
+
+function applyServiceKindChange<T extends { serviceKind: "app" | "drive" | "gallery" | "music"; servicePreferredPath: "dual" | "cloud" | "p2p" }>(
+  current: T,
+  nextKind: "app" | "drive" | "gallery" | "music",
+): T {
+  const currentDefault = defaultServicePreferredPath(current.serviceKind);
+  const nextDefault = defaultServicePreferredPath(nextKind);
+  return {
+    ...current,
+    serviceKind: nextKind,
+    servicePreferredPath:
+      current.servicePreferredPath === currentDefault
+        ? nextDefault
+        : current.servicePreferredPath,
+  };
+}
+
 const initialAuditFilter: AuditFilterState = {
   action: "",
   actionPrefix: "",
@@ -402,7 +422,7 @@ function extractTunnelServiceFields(metadata?: Record<string, string>) {
   return {
     serviceKey: metadata?.serviceKey || "",
     serviceTitle: metadata?.serviceTitle || "",
-    serviceKind: (metadata?.serviceKind || "app") as "app" | "drive" | "gallery",
+    serviceKind: (metadata?.serviceKind || "app") as "app" | "drive" | "gallery" | "music",
     serviceSummary: metadata?.serviceSummary || "",
     servicePublicUrl: metadata?.servicePublicUrl || "",
     serviceP2PUrl: metadata?.serviceP2PUrl || "",
@@ -411,7 +431,12 @@ function extractTunnelServiceFields(metadata?: Record<string, string>) {
     serviceP2PPath: metadata?.serviceP2PPath || "",
     serviceCloudAccess: (metadata?.serviceCloudAccess || "all_users") as "all_users" | "admin_only" | "disabled",
     serviceP2PAccess: (metadata?.serviceP2PAccess || "all_users") as "all_users" | "admin_only" | "disabled",
-    servicePreferredPath: (metadata?.servicePreferredPath || "dual") as "dual" | "cloud" | "p2p",
+    servicePreferredPath: (
+      metadata?.servicePreferredPath ||
+      defaultServicePreferredPath(
+        (metadata?.serviceKind || "app") as "app" | "drive" | "gallery" | "music",
+      )
+    ) as "dual" | "cloud" | "p2p",
   };
 }
 
@@ -2389,7 +2414,7 @@ function buildAuditQuery(filter: AuditFilterState) {
                         <div className="form-note">服务双入口登记：同一个 tunnel 继续承担云端反代，同时可以登记一个 P2P 入口给用户端使用；不需要额外新建一条“P2P tunnel”。</div>
                         <label><span>服务键</span><input value={tunnelEditForm.serviceKey} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceKey: event.target.value } : current)} placeholder="例如 drive / gallery / notes" /></label>
                         <label><span>服务标题</span><input value={tunnelEditForm.serviceTitle} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceTitle: event.target.value } : current)} placeholder="例如 网盘服务" /></label>
-                        <label><span>服务类型</span><select value={tunnelEditForm.serviceKind} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceKind: event.target.value as "app" | "drive" | "gallery" } : current)}><option value="app">app</option><option value="drive">drive</option><option value="gallery">gallery</option></select></label>
+                        <label><span>服务类型</span><select value={tunnelEditForm.serviceKind} onChange={(event) => setTunnelEditForm((current) => current ? applyServiceKindChange(current, event.target.value as "app" | "drive" | "gallery" | "music") : current)}><option value="app">app</option><option value="drive">drive</option><option value="gallery">gallery</option><option value="music">music</option></select></label>
                         <label><span>服务摘要</span><input value={tunnelEditForm.serviceSummary} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceSummary: event.target.value } : current)} placeholder="用户端里显示的说明文案" /></label>
                         <label><span>云端入口 URL</span><input value={tunnelEditForm.servicePublicUrl} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, servicePublicUrl: event.target.value } : current)} placeholder="留空则按当前 tunnel 入口推导" /></label>
                         <label><span>P2P 入口 URL</span><input value={tunnelEditForm.serviceP2PUrl} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, serviceP2PUrl: event.target.value } : current)} placeholder="留空则按节点 EasyTier IPv4 + targetPort 自动推导" /></label>
@@ -2462,7 +2487,7 @@ function buildAuditQuery(filter: AuditFilterState) {
                         <div className="form-note">服务双入口登记：如果这个 tunnel 对应的是网盘、图床或其他用户可访问服务，就在这里同时登记云端入口和 P2P 入口。</div>
                         <label><span>服务键</span><input value={tunnelForm.serviceKey} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceKey: event.target.value }))} placeholder="例如 drive / gallery / notes" /></label>
                         <label><span>服务标题</span><input value={tunnelForm.serviceTitle} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceTitle: event.target.value }))} placeholder="例如 网盘服务" /></label>
-                        <label><span>服务类型</span><select value={tunnelForm.serviceKind} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceKind: event.target.value as "app" | "drive" | "gallery" }))}><option value="app">app</option><option value="drive">drive</option><option value="gallery">gallery</option></select></label>
+                        <label><span>服务类型</span><select value={tunnelForm.serviceKind} onChange={(event) => setTunnelForm((current) => applyServiceKindChange(current, event.target.value as "app" | "drive" | "gallery" | "music"))}><option value="app">app</option><option value="drive">drive</option><option value="gallery">gallery</option><option value="music">music</option></select></label>
                         <label><span>服务摘要</span><input value={tunnelForm.serviceSummary} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceSummary: event.target.value }))} placeholder="用户端里显示的说明文案" /></label>
                         <label><span>云端入口 URL</span><input value={tunnelForm.servicePublicUrl} onChange={(event) => setTunnelForm((current) => ({ ...current, servicePublicUrl: event.target.value }))} placeholder="留空则按当前 tunnel 入口推导" /></label>
                         <label><span>P2P 入口 URL</span><input value={tunnelForm.serviceP2PUrl} onChange={(event) => setTunnelForm((current) => ({ ...current, serviceP2PUrl: event.target.value }))} placeholder="留空则按节点 EasyTier IPv4 + targetPort 自动推导" /></label>
@@ -3174,6 +3199,8 @@ function serviceRegistrationPillClass(source?: string) {
 
 function serviceKindLabel(kind?: string) {
   switch (kind) {
+    case "music":
+      return "音乐";
     case "drive":
       return "网盘";
     case "gallery":

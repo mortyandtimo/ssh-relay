@@ -55,7 +55,7 @@ type TunnelEditForm = {
   transportPolicy: string;
   serviceKey: string;
   serviceTitle: string;
-  serviceKind: "app" | "drive" | "gallery";
+  serviceKind: "app" | "drive" | "gallery" | "music";
   serviceSummary: string;
   servicePublicUrl: string;
   serviceP2PUrl: string;
@@ -70,7 +70,7 @@ type TunnelEditForm = {
 type ServiceMetadataDraft = {
   serviceKey: string;
   serviceTitle: string;
-  serviceKind: "app" | "drive" | "gallery";
+  serviceKind: "app" | "drive" | "gallery" | "music";
   serviceSummary: string;
   servicePublicUrl: string;
   serviceP2PUrl: string;
@@ -82,7 +82,7 @@ type ServiceMetadataDraft = {
   servicePreferredPath: "dual" | "cloud" | "p2p";
 };
 
-type ServiceTemplateKey = "drive" | "gallery";
+type ServiceTemplateKey = "drive" | "gallery" | "music";
 
 type RelayEndpointPreset = {
   id: string;
@@ -267,6 +267,26 @@ const emptyServiceMetadataDraft: ServiceMetadataDraft = {
   servicePreferredPath: "dual",
 };
 
+function defaultServicePreferredPath(kind: "app" | "drive" | "gallery" | "music") {
+  return kind === "music" ? "p2p" : "dual";
+}
+
+function applyServiceKindChange<T extends { serviceKind: "app" | "drive" | "gallery" | "music"; servicePreferredPath: "dual" | "cloud" | "p2p" }>(
+  current: T,
+  nextKind: "app" | "drive" | "gallery" | "music",
+): T {
+  const currentDefault = defaultServicePreferredPath(current.serviceKind);
+  const nextDefault = defaultServicePreferredPath(nextKind);
+  return {
+    ...current,
+    serviceKind: nextKind,
+    servicePreferredPath:
+      current.servicePreferredPath === currentDefault
+        ? nextDefault
+        : current.servicePreferredPath,
+  };
+}
+
 function suggestedPublicPortValue(protocol: PublishProtocol, index: number) {
   const suggested = defaultPublicPortForProtocol(protocol, index);
   return suggested > 0 ? String(suggested) : "";
@@ -288,7 +308,7 @@ function extractTunnelServiceFields(metadata?: Record<string, string>): ServiceM
   return {
     serviceKey: metadata?.serviceKey || "",
     serviceTitle: metadata?.serviceTitle || "",
-    serviceKind: (metadata?.serviceKind || "app") as "app" | "drive" | "gallery",
+    serviceKind: (metadata?.serviceKind || "app") as "app" | "drive" | "gallery" | "music",
     serviceSummary: metadata?.serviceSummary || "",
     servicePublicUrl: metadata?.servicePublicUrl || "",
     serviceP2PUrl: metadata?.serviceP2PUrl || "",
@@ -297,7 +317,12 @@ function extractTunnelServiceFields(metadata?: Record<string, string>): ServiceM
     serviceP2PPath: metadata?.serviceP2PPath || "",
     serviceCloudAccess: (metadata?.serviceCloudAccess || "all_users") as "all_users" | "admin_only" | "disabled",
     serviceP2PAccess: (metadata?.serviceP2PAccess || "all_users") as "all_users" | "admin_only" | "disabled",
-    servicePreferredPath: (metadata?.servicePreferredPath || "dual") as "dual" | "cloud" | "p2p",
+    servicePreferredPath: (
+      metadata?.servicePreferredPath ||
+      defaultServicePreferredPath(
+        (metadata?.serviceKind || "app") as "app" | "drive" | "gallery" | "music",
+      )
+    ) as "dual" | "cloud" | "p2p",
   };
 }
 
@@ -350,6 +375,8 @@ function buildTunnelServiceMetadata(baseMetadata: Record<string, string> | undef
 
 function serviceKindLabel(kind?: string) {
   switch (kind) {
+    case "music":
+      return "音乐";
     case "drive":
       return "网盘";
     case "gallery":
@@ -396,6 +423,19 @@ function buildServiceTemplate(template: ServiceTemplateKey, targetPort: string):
       serviceCloudAccess: "admin_only",
       serviceP2PAccess: "all_users",
       servicePreferredPath: "dual",
+      serviceP2PTargetPort: normalizedPort,
+      serviceP2PPath: "/",
+    };
+  }
+  if (template === "music") {
+    return {
+      serviceKey: "music",
+      serviceTitle: "音乐服务",
+      serviceKind: "music",
+      serviceSummary: "控制面继续走 HTTPS，播放、封面与下载默认优先走 P2P 数据面。",
+      serviceCloudAccess: "all_users",
+      serviceP2PAccess: "all_users",
+      servicePreferredPath: "p2p",
       serviceP2PTargetPort: normalizedPort,
       serviceP2PPath: "/",
     };
@@ -3242,6 +3282,7 @@ function ServiceMetadataEditor({
           <p>把这条发布规则登记成网盘、图床或其他服务后，云端目录和用户端工作台才能按业务身份识别它，而不是只把它当普通隧道。</p>
         </div>
         <div className="service-meta-actions">
+          <button className="btn btn-sm" type="button" onClick={() => applyTemplate("music")}><i className="fas fa-music" /> 音乐模板</button>
           <button className="btn btn-sm" type="button" onClick={() => applyTemplate("drive")}><i className="fas fa-hard-drive" /> 网盘模板</button>
           <button className="btn btn-sm" type="button" onClick={() => applyTemplate("gallery")}><i className="fas fa-images" /> 图床模板</button>
           <button className="btn btn-sm" type="button" onClick={() => onChange({ ...emptyServiceMetadataDraft })}><i className="fas fa-eraser" /> 清空登记</button>
@@ -3269,7 +3310,8 @@ function ServiceMetadataEditor({
 
         <label>
           <span>服务类型</span>
-          <select value={form.serviceKind} onChange={(event) => onChange({ serviceKind: event.target.value as "app" | "drive" | "gallery" })}>
+          <select value={form.serviceKind} onChange={(event) => onChange(applyServiceKindChange(form, event.target.value as "app" | "drive" | "gallery" | "music"))}>
+            <option value="music">音乐</option>
             <option value="app">通用应用</option>
             <option value="drive">网盘</option>
             <option value="gallery">图床</option>

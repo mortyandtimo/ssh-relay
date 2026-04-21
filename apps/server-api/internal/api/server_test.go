@@ -3093,6 +3093,368 @@ func TestPublicServiceTransportResolvesMusicManifestByPublicURL(t *testing.T) {
 	}
 }
 
+func TestPublicServiceTransportHidesAdminOnlyP2PFromAnonymousCaller(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "service-node-public-cloud",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-public-music-cloud-only",
+		"nodeId":     registerOut.NodeID,
+		"name":       "music-cloud-only",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 4533,
+		"publicPort": 0,
+		"domain":     "music-cloud-only.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKind":        "music",
+			"serviceP2PUrl":      "http://10.66.0.9:4533",
+			"serviceCloudAccess": "all_users",
+			"serviceP2PAccess":   "admin_only",
+		},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create tunnel 201, got %d: %s", createRes.Code, createRes.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/public/service-transport?kind=music&publicUrl="+url.QueryEscape("https://music-cloud-only.020309.top"), nil)
+	req.Host = "manage.020309.top"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected public service transport 200, got %d: %s", res.Code, res.Body.String())
+	}
+
+	var out types.PublicServiceTransportResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.PublicURL != "https://music-cloud-only.020309.top" {
+		t.Fatalf("expected public url https://music-cloud-only.020309.top, got %q", out.PublicURL)
+	}
+	if out.P2PURL != "" {
+		t.Fatalf("expected p2p url to be hidden, got %q", out.P2PURL)
+	}
+	if out.PreferredPath != "cloud" {
+		t.Fatalf("expected preferredPath cloud, got %q", out.PreferredPath)
+	}
+	if out.TransportManifest == nil {
+		t.Fatal("expected public service transport manifest")
+	}
+	if out.TransportManifest.DataPlane.P2PBaseURL != "" {
+		t.Fatalf("expected manifest p2p base url to be hidden, got %q", out.TransportManifest.DataPlane.P2PBaseURL)
+	}
+}
+
+func TestPublicServiceTransportCanReturnP2POnlyForAnonymousCaller(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "service-node-public-p2p",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-public-music-p2p-only",
+		"nodeId":     registerOut.NodeID,
+		"name":       "music-p2p-only",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 4533,
+		"publicPort": 0,
+		"domain":     "music-p2p-only.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKind":        "music",
+			"serviceP2PUrl":      "http://10.66.0.10:4533",
+			"serviceCloudAccess": "admin_only",
+			"serviceP2PAccess":   "all_users",
+		},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create tunnel 201, got %d: %s", createRes.Code, createRes.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/public/service-transport?kind=music&publicUrl="+url.QueryEscape("https://music-p2p-only.020309.top"), nil)
+	req.Host = "manage.020309.top"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected public service transport 200, got %d: %s", res.Code, res.Body.String())
+	}
+
+	var out types.PublicServiceTransportResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.PublicURL != "" {
+		t.Fatalf("expected public url to be hidden, got %q", out.PublicURL)
+	}
+	if out.P2PURL != "http://10.66.0.10:4533" {
+		t.Fatalf("expected p2p url http://10.66.0.10:4533, got %q", out.P2PURL)
+	}
+	if out.PreferredPath != "p2p" {
+		t.Fatalf("expected preferredPath p2p, got %q", out.PreferredPath)
+	}
+	if out.TransportManifest == nil {
+		t.Fatal("expected public service transport manifest")
+	}
+	if out.TransportManifest.DataPlane.CloudBaseURL != "" {
+		t.Fatalf("expected manifest cloud base url to be hidden, got %q", out.TransportManifest.DataPlane.CloudBaseURL)
+	}
+}
+
+func TestPublicServiceTransportReturnsNotFoundWhenAnonymousAccessIsDisabled(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "service-node-public-none",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-public-music-disabled",
+		"nodeId":     registerOut.NodeID,
+		"name":       "music-disabled",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 4533,
+		"publicPort": 0,
+		"domain":     "music-disabled.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKind":        "music",
+			"serviceP2PUrl":      "http://10.66.0.11:4533",
+			"serviceCloudAccess": "admin_only",
+			"serviceP2PAccess":   "disabled",
+		},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create tunnel 201, got %d: %s", createRes.Code, createRes.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/public/service-transport?kind=music&publicUrl="+url.QueryEscape("https://music-disabled.020309.top"), nil)
+	req.Host = "manage.020309.top"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("expected public service transport 404, got %d: %s", res.Code, res.Body.String())
+	}
+}
+
+func TestUserServiceCatalogHonorsConfiguredMusicP2PAccess(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	if _, err := server.store.CreateUser(context.Background(), store.CreateUserParams{
+		Email:       "user@example.com",
+		DisplayName: "普通用户",
+		Password:    "UserPass#2026",
+		Role:        types.UserRoleUser,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	userCookies := loginAndCollectCookies(t, server, "user@example.com", "UserPass#2026")
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "service-node-music-policy",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true, P2PAssist: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-music-policy",
+		"nodeId":     registerOut.NodeID,
+		"name":       "music-policy",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 4533,
+		"publicPort": 0,
+		"domain":     "music-policy.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKey":         "music",
+			"serviceTitle":       "音乐服务",
+			"serviceKind":        "music",
+			"serviceP2PUrl":      "http://10.66.0.12:4533",
+			"serviceCloudAccess": "all_users",
+			"serviceP2PAccess":   "admin_only",
+		},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create tunnel 201, got %d: %s", createRes.Code, createRes.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/user/services", nil)
+	req.Host = "manage.020309.top"
+	applyCookies(req, userCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected user services 200, got %d", res.Code)
+	}
+
+	var out types.UserServiceCatalogResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Items) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(out.Items))
+	}
+	if out.Items[0].Key != "music" {
+		t.Fatalf("expected service key music, got %q", out.Items[0].Key)
+	}
+	if out.Items[0].P2PAllowed {
+		t.Fatal("expected normal user p2p access to remain denied for music")
+	}
+	if out.Items[0].P2PAccess != serviceAccessAdminOnly {
+		t.Fatalf("expected p2pAccess admin_only, got %q", out.Items[0].P2PAccess)
+	}
+}
+
+func TestMusicServiceDefaultsToP2PPreferredPathWhenBothTransportsExist(t *testing.T) {
+	server := NewServer("test", store.NewInMemoryStore(), "")
+	server.adminBootstrapSecret = "bootstrap-secret"
+	adminCookies := bootstrapAdminAndCollectCookies(t, server)
+
+	registerBody, _ := json.Marshal(types.NodeRegisterRequest{
+		NodeName:     "service-node-music-default",
+		AgentVersion: "0.1.0",
+		Capabilities: types.NodeCapabilities{HTTPRelay: true, HTTPSRelay: true, P2PAssist: true},
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/agent/register", bytes.NewReader(registerBody))
+	registerRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(registerRes, registerReq)
+	if registerRes.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d", registerRes.Code)
+	}
+	var registerOut types.NodeRegisterResponse
+	if err := json.NewDecoder(registerRes.Body).Decode(&registerOut); err != nil {
+		t.Fatal(err)
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"id":         "tunnel-music-default-path",
+		"nodeId":     registerOut.NodeID,
+		"name":       "music-default-path",
+		"type":       "https",
+		"targetHost": "127.0.0.1",
+		"targetPort": 4533,
+		"publicPort": 0,
+		"domain":     "music-default-path.020309.top",
+		"tlsMode":    "edge_terminate",
+		"status":     "active",
+		"metadata": map[string]string{
+			"serviceKey":    "music",
+			"serviceTitle":  "音乐服务",
+			"serviceKind":   "music",
+			"serviceP2PUrl": "http://10.66.0.13:4533",
+		},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/tunnels", bytes.NewReader(createBody))
+	applyCookies(createReq, adminCookies)
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("expected create tunnel 201, got %d: %s", createRes.Code, createRes.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/user/services", nil)
+	req.Host = "manage.020309.top"
+	applyCookies(req, adminCookies)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected user services 200, got %d", res.Code)
+	}
+
+	var out types.UserServiceCatalogResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Items) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(out.Items))
+	}
+	if out.Items[0].PreferredPath != "p2p" {
+		t.Fatalf("expected preferredPath p2p, got %q", out.Items[0].PreferredPath)
+	}
+}
+
 func TestAgentEndpointsRemainAccessibleWithSessionAuthEnabled(t *testing.T) {
 	backend := store.NewInMemoryStore()
 	server := NewServer("test", backend, "")
