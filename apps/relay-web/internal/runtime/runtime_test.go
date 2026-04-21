@@ -167,7 +167,7 @@ func TestStandbyPoolEnqueuePrunesExpiredAndClosedItems(t *testing.T) {
 
 	pool := newStandbyPool("node:tunnel", 2, 4)
 	pool.items = []standbyConn{
-		{registeredAt: time.Now().Add(-standbyConnMaxAge - time.Second)},
+		{registeredAt: time.Now().Add(-2 * standbyConnMaxIdle), lastSeenAt: time.Now().Add(-standbyConnMaxIdle - time.Second)},
 		{conn: closedConn, registeredAt: time.Now().UTC()},
 		{conn: liveConn, registeredAt: time.Now().UTC()},
 	}
@@ -184,6 +184,73 @@ func TestStandbyPoolEnqueuePrunesExpiredAndClosedItems(t *testing.T) {
 	}
 	if len(pool.items) != 2 {
 		t.Fatalf("pool retained %d items, want 2", len(pool.items))
+	}
+}
+
+func TestStandbyPoolMaintainPreservesRecentlySeenConnection(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	serverConnCh := make(chan net.Conn, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			errCh <- acceptErr
+			return
+		}
+		serverConnCh <- conn
+	}()
+
+	clientConn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer clientConn.Close()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-serverConnCh:
+	case err := <-errCh:
+		t.Fatalf("accept: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("accept timeout")
+	}
+	defer serverConn.Close()
+
+	lastSeenBefore := time.Now().Add(-standbyConnMaxIdle + 5*time.Second)
+	pool := newStandbyPool("node:tunnel", 2, 4)
+	pool.items = []standbyConn{{
+		conn:         serverConn,
+		registeredAt: time.Now().Add(-2 * standbyConnMaxIdle),
+		lastSeenAt:   lastSeenBefore,
+	}}
+
+	if _, err := clientConn.Write([]byte{types.AgentRelayKeepaliveByte}); err != nil {
+		t.Fatalf("write keepalive: %v", err)
+	}
+	var evicted []standbyConn
+	for i := 0; i < 5; i++ {
+		time.Sleep(10 * time.Millisecond)
+		evicted = pool.maintain()
+		if len(pool.items) == 1 && pool.items[0].lastSeenAt.After(lastSeenBefore) {
+			break
+		}
+	}
+	if len(evicted) != 0 {
+		t.Fatalf("maintain evicted %d items, want 0", len(evicted))
+	}
+	if len(pool.items) != 1 {
+		t.Fatalf("pool retained %d items, want 1", len(pool.items))
+	}
+	if pool.items[0].lastSeenAt.Before(lastSeenBefore) {
+		t.Fatalf("lastSeenAt = %s, want on or after %s", pool.items[0].lastSeenAt, lastSeenBefore)
+	}
+	if pool.lastMaintainedAt.IsZero() {
+		t.Fatal("expected lastMaintainedAt to be recorded")
 	}
 }
 

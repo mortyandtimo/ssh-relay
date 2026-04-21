@@ -20,23 +20,35 @@ import (
 )
 
 const (
-	routeSyncInterval                  = 5 * time.Second
-	defaultStandbyPoolTargetSize       = 64
-	defaultStandbyPoolMaxSize          = 128
-	defaultGlobalMaxStandby      int64 = 16384
-	standbyConnMaxAge                  = 60 * time.Second
-	standbyKeepaliveDrainWindow        = 10 * time.Millisecond
-	defaultAcquireTimeout              = 10 * time.Second
+	routeSyncInterval                   = 5 * time.Second
+	defaultStandbyPoolTargetSize        = 64
+	defaultStandbyPoolMaxSize           = 128
+	defaultGlobalMaxStandby       int64 = 16384
+	standbyConnMaxIdle                  = 90 * time.Second
+	standbyMaintenanceInterval          = 1 * time.Second
+	standbyMaintenanceDrainWindow       = 1 * time.Millisecond
+	standbyKeepaliveDrainWindow         = 10 * time.Millisecond
+	defaultAcquireTimeout               = 10 * time.Second
 )
 
 type standbyConn struct {
 	conn         net.Conn
 	hello        types.AgentRelayHello
 	registeredAt time.Time
+	lastSeenAt   time.Time
 }
 
 func (s standbyConn) age() time.Duration { return time.Since(s.registeredAt) }
-func (s standbyConn) expired() bool      { return s.age() > standbyConnMaxAge }
+
+func (s standbyConn) lastSeen() time.Time {
+	if !s.lastSeenAt.IsZero() {
+		return s.lastSeenAt
+	}
+	return s.registeredAt
+}
+
+func (s standbyConn) idleFor() time.Duration { return time.Since(s.lastSeen()) }
+func (s standbyConn) expired() bool          { return s.idleFor() > standbyConnMaxIdle }
 
 func (s standbyConn) drainBufferedKeepalives(wait time.Duration) (int, error) {
 	buf := make([]byte, 1)
@@ -77,12 +89,13 @@ func (s standbyConn) prepareForStart() error {
 // ─── standby pool ───
 
 type standbyPool struct {
-	mu     sync.Mutex
-	items  []standbyConn
-	closed bool
-	key    string
-	target int
-	max    int
+	mu               sync.Mutex
+	items            []standbyConn
+	closed           bool
+	key              string
+	target           int
+	max              int
+	lastMaintainedAt time.Time
 }
 
 func newStandbyPool(key string, target, max int) *standbyPool {
@@ -101,7 +114,13 @@ func (p *standbyPool) enqueue(item standbyConn) (int, []standbyConn, error) {
 	if p.closed {
 		return len(p.items), nil, errors.New("pool closed")
 	}
-	evicted := p.pruneInvalidLocked()
+	if item.registeredAt.IsZero() {
+		item.registeredAt = time.Now().UTC()
+	}
+	if item.lastSeenAt.IsZero() {
+		item.lastSeenAt = item.registeredAt
+	}
+	evicted := p.pruneInvalidLocked(0)
 	for len(p.items) >= p.max {
 		idx := p.oldestIndexLocked()
 		evicted = append(evicted, p.items[idx])
@@ -146,20 +165,37 @@ func (p *standbyPool) closeAndDrain() []standbyConn {
 	return drained
 }
 
-func (p *standbyPool) pruneInvalidLocked() []standbyConn {
+func (p *standbyPool) maintain() []standbyConn {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	return p.pruneInvalidLocked(standbyMaintenanceDrainWindow)
+}
+
+func (p *standbyPool) pruneInvalidLocked(wait time.Duration) []standbyConn {
+	p.lastMaintainedAt = time.Now().UTC()
 	if len(p.items) == 0 {
 		return nil
 	}
 	kept := p.items[:0]
 	var evicted []standbyConn
 	for _, item := range p.items {
+		if item.lastSeenAt.IsZero() {
+			item.lastSeenAt = item.registeredAt
+		}
 		if item.expired() {
 			evicted = append(evicted, item)
 			continue
 		}
-		if _, err := item.drainBufferedKeepalives(0); err != nil {
+		drained, err := item.drainBufferedKeepalives(wait)
+		if err != nil {
 			evicted = append(evicted, item)
 			continue
+		}
+		if drained > 0 {
+			item.lastSeenAt = p.lastMaintainedAt
 		}
 		kept = append(kept, item)
 	}
@@ -233,6 +269,8 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	ticker := time.NewTicker(routeSyncInterval)
 	defer ticker.Stop()
+	maintTicker := time.NewTicker(standbyMaintenanceInterval)
+	defer maintTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -242,6 +280,8 @@ func (s *Service) Run(ctx context.Context) error {
 			if err := s.syncRoutes(ctx); err != nil {
 				log.Printf("sync web routes: %v", err)
 			}
+		case <-maintTicker.C:
+			s.maintainPools()
 		}
 	}
 }
@@ -278,16 +318,30 @@ func (s *Service) syncRoutes(ctx context.Context) error {
 		}
 	}
 
+	staleKeys := make([]string, 0)
 	s.mu.Lock()
 	// Remove stale routes
-	for domain := range s.routes {
+	for domain, route := range s.routes {
 		if _, ok := desired[domain]; !ok {
+			staleKeys = append(staleKeys, webPoolKey(route.NodeID, route.ID))
 			delete(s.routes, domain)
 			log.Printf("web route removed: %s", domain)
 		}
 	}
 	// Add/update routes
 	for domain, route := range desired {
+		current, ok := s.routes[domain]
+		if ok && sameWebRoute(current, route) {
+			key := webPoolKey(route.NodeID, route.ID)
+			if _, ok := s.pools[key]; !ok {
+				s.pools[key] = newStandbyPool(key, s.poolTarget, s.poolMax)
+			}
+			log.Printf("web route active: domain=%s node=%s tunnel=%s", domain, route.NodeID, route.ID)
+			continue
+		}
+		if ok {
+			staleKeys = append(staleKeys, webPoolKey(current.NodeID, current.ID))
+		}
 		s.routes[domain] = route
 		key := webPoolKey(route.NodeID, route.ID)
 		if _, ok := s.pools[key]; !ok {
@@ -296,6 +350,9 @@ func (s *Service) syncRoutes(ctx context.Context) error {
 		log.Printf("web route active: domain=%s node=%s tunnel=%s", domain, route.NodeID, route.ID)
 	}
 	s.mu.Unlock()
+	for _, key := range staleKeys {
+		s.drainPool(key)
+	}
 	return nil
 }
 
@@ -379,7 +436,8 @@ func (s *Service) HandleAgentReverse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	item := standbyConn{conn: conn, hello: hello, registeredAt: time.Now().UTC()}
+	registeredAt := time.Now().UTC()
+	item := standbyConn{conn: conn, hello: hello, registeredAt: registeredAt, lastSeenAt: registeredAt}
 	poolSize, totalStandbyCount, err := s.enqueueStandbyConn(pool, key, item)
 	if err != nil {
 		log.Printf("standby reverse connection rejected for tunnel %s: %v", hello.TunnelID, err)
@@ -523,6 +581,34 @@ func (s *Service) enqueueStandbyConn(pool *standbyPool, key string, item standby
 	return poolSize, totalAfterAdd, nil
 }
 
+func (s *Service) maintainPools() {
+	s.mu.Lock()
+	pools := make([]*standbyPool, 0, len(s.pools))
+	for _, pool := range s.pools {
+		pools = append(pools, pool)
+	}
+	s.mu.Unlock()
+	for _, pool := range pools {
+		evicted := pool.maintain()
+		if len(evicted) == 0 {
+			continue
+		}
+		s.closeStandbyItems(evicted)
+		log.Printf("standby pool maintenance evicted %d stale connections for key=%s", len(evicted), pool.key)
+	}
+}
+
+func (s *Service) drainPool(key string) {
+	s.mu.Lock()
+	pool := s.pools[key]
+	delete(s.pools, key)
+	s.mu.Unlock()
+	if pool == nil {
+		return
+	}
+	s.closeStandbyItems(pool.closeAndDrain())
+}
+
 func (s *Service) closeStandbyItems(items []standbyConn) {
 	for _, item := range items {
 		_ = atomic.AddInt64(&totalStandby, -1)
@@ -552,12 +638,14 @@ func (s *Service) RuntimeSummary() types.RelayRuntimeSummary {
 		standbyCount := len(pool.items)
 		targetSize := pool.target
 		maxSize := pool.max
+		targetCheckedAt := pool.lastMaintainedAt
 		pool.mu.Unlock()
 		pools = append(pools, types.RelayPoolSummary{
-			PoolKey:      key,
-			StandbyCount: standbyCount,
-			TargetSize:   targetSize,
-			MaxSize:      maxSize,
+			PoolKey:         key,
+			StandbyCount:    standbyCount,
+			TargetSize:      targetSize,
+			MaxSize:         maxSize,
+			TargetCheckedAt: targetCheckedAt,
 		})
 	}
 	s.mu.Unlock()
@@ -576,6 +664,15 @@ func helloMatchesRoute(hello types.AgentRelayHello, route types.TunnelSpec) bool
 		hello.TunnelID == route.ID &&
 		hello.TargetHost == route.TargetHost &&
 		hello.TargetPort == route.TargetPort
+}
+
+func sameWebRoute(left, right types.TunnelSpec) bool {
+	return left.ID == right.ID &&
+		left.Type == right.Type &&
+		left.NodeID == right.NodeID &&
+		left.Domain == right.Domain &&
+		left.TargetHost == right.TargetHost &&
+		left.TargetPort == right.TargetPort
 }
 
 func webPoolKey(nodeID, tunnelID string) string {
