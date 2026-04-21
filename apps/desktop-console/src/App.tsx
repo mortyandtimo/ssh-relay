@@ -39,6 +39,8 @@ type DesktopWindowEnv = {
   publicEntryHost?: string;
 };
 
+type ServiceKind = PublishRuleForm["serviceKind"];
+
 declare global {
   interface Window {
     __DESKTOP_ENV__?: DesktopWindowEnv;
@@ -55,7 +57,7 @@ type TunnelEditForm = {
   transportPolicy: string;
   serviceKey: string;
   serviceTitle: string;
-  serviceKind: "app" | "drive" | "gallery" | "music";
+  serviceKind: ServiceKind;
   serviceSummary: string;
   servicePublicUrl: string;
   serviceP2PUrl: string;
@@ -70,7 +72,7 @@ type TunnelEditForm = {
 type ServiceMetadataDraft = {
   serviceKey: string;
   serviceTitle: string;
-  serviceKind: "app" | "drive" | "gallery" | "music";
+  serviceKind: ServiceKind;
   serviceSummary: string;
   servicePublicUrl: string;
   serviceP2PUrl: string;
@@ -267,13 +269,13 @@ const emptyServiceMetadataDraft: ServiceMetadataDraft = {
   servicePreferredPath: "dual",
 };
 
-function defaultServicePreferredPath(kind: "app" | "drive" | "gallery" | "music") {
+function defaultServicePreferredPath(kind: ServiceKind) {
   return kind === "music" ? "p2p" : "dual";
 }
 
-function applyServiceKindChange<T extends { serviceKind: "app" | "drive" | "gallery" | "music"; servicePreferredPath: "dual" | "cloud" | "p2p" }>(
+function applyServiceKindChange<T extends { serviceKind: ServiceKind; servicePreferredPath: "dual" | "cloud" | "p2p" }>(
   current: T,
-  nextKind: "app" | "drive" | "gallery" | "music",
+  nextKind: ServiceKind,
 ): T {
   const currentDefault = defaultServicePreferredPath(current.serviceKind);
   const nextDefault = defaultServicePreferredPath(nextKind);
@@ -308,7 +310,7 @@ function extractTunnelServiceFields(metadata?: Record<string, string>): ServiceM
   return {
     serviceKey: metadata?.serviceKey || "",
     serviceTitle: metadata?.serviceTitle || "",
-    serviceKind: (metadata?.serviceKind || "app") as "app" | "drive" | "gallery" | "music",
+    serviceKind: (metadata?.serviceKind || "app") as ServiceKind,
     serviceSummary: metadata?.serviceSummary || "",
     servicePublicUrl: metadata?.servicePublicUrl || "",
     serviceP2PUrl: metadata?.serviceP2PUrl || "",
@@ -320,7 +322,7 @@ function extractTunnelServiceFields(metadata?: Record<string, string>): ServiceM
     servicePreferredPath: (
       metadata?.servicePreferredPath ||
       defaultServicePreferredPath(
-        (metadata?.serviceKind || "app") as "app" | "drive" | "gallery" | "music",
+        (metadata?.serviceKind || "app") as ServiceKind,
       )
     ) as "dual" | "cloud" | "p2p",
   };
@@ -375,12 +377,12 @@ function buildTunnelServiceMetadata(baseMetadata: Record<string, string> | undef
 
 function serviceKindLabel(kind?: string) {
   switch (kind) {
-    case "music":
-      return "音乐";
     case "drive":
       return "网盘";
     case "gallery":
       return "图床";
+    case "music":
+      return "音乐";
     case "app":
       return "通用应用";
     default:
@@ -3279,12 +3281,13 @@ function ServiceMetadataEditor({
       <div className="service-meta-header">
         <div>
           <strong>服务工作台登记</strong>
-          <p>把这条发布规则登记成网盘、图床或其他服务后，云端目录和用户端工作台才能按业务身份识别它，而不是只把它当普通隧道。</p>
+          <p>把这条发布规则登记成网盘、图床、音乐或其他服务后，云端目录和用户端工作台才能按业务身份识别它，而不是只把它当普通隧道。</p>
         </div>
         <div className="service-meta-actions">
           <button className="btn btn-sm" type="button" onClick={() => applyTemplate("music")}><i className="fas fa-music" /> 音乐模板</button>
           <button className="btn btn-sm" type="button" onClick={() => applyTemplate("drive")}><i className="fas fa-hard-drive" /> 网盘模板</button>
           <button className="btn btn-sm" type="button" onClick={() => applyTemplate("gallery")}><i className="fas fa-images" /> 图床模板</button>
+          <button className="btn btn-sm" type="button" onClick={() => applyTemplate("music")}><i className="fas fa-music" /> 音乐模板</button>
           <button className="btn btn-sm" type="button" onClick={() => onChange({ ...emptyServiceMetadataDraft })}><i className="fas fa-eraser" /> 清空登记</button>
         </div>
       </div>
@@ -3292,14 +3295,14 @@ function ServiceMetadataEditor({
       <div className="surface-banner info" style={{ marginTop: 0 }}>
         {form.serviceKey.trim()
           ? `当前登记为 ${serviceKindLabel(form.serviceKind)} · ${form.serviceKey.trim()}。留空的 P2P 节点和端口会自动沿用当前发布规则。`
-          : "不填写服务标识时，这条规则仍会正常发布，但用户端不会把它识别成网盘或图床工作台入口。"}
+          : "不填写服务标识时，这条规则仍会正常发布，但用户端不会把它识别成网盘、图床或音乐工作台入口。"}
       </div>
 
       <div className="service-meta-grid">
         <label>
           <span>服务标识</span>
-          <input value={form.serviceKey} onChange={(event) => onChange({ serviceKey: event.target.value })} placeholder="例如 drive、gallery" />
-          <small>这是服务目录里的稳定 key。建议网盘用 `drive`，图床用 `gallery`。</small>
+          <input value={form.serviceKey} onChange={(event) => onChange({ serviceKey: event.target.value })} placeholder="例如 drive、gallery、music" />
+          <small>这是服务目录里的稳定 key。建议网盘用 `drive`，图床用 `gallery`，音乐用 `music`。</small>
         </label>
 
         <label>
@@ -3310,11 +3313,11 @@ function ServiceMetadataEditor({
 
         <label>
           <span>服务类型</span>
-          <select value={form.serviceKind} onChange={(event) => onChange(applyServiceKindChange(form, event.target.value as "app" | "drive" | "gallery" | "music"))}>
-            <option value="music">音乐</option>
+          <select value={form.serviceKind} onChange={(event) => onChange(applyServiceKindChange(form, event.target.value as ServiceKind))}>
             <option value="app">通用应用</option>
             <option value="drive">网盘</option>
             <option value="gallery">图床</option>
+            <option value="music">音乐</option>
           </select>
           <small>用于用户端工作台决定采用哪类界面与交互。</small>
         </label>

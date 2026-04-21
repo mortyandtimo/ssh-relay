@@ -22,7 +22,7 @@ export type PublishRuleForm = {
   transportPolicy: string;
   serviceKey: string;
   serviceTitle: string;
-  serviceKind: "app" | "drive" | "gallery";
+  serviceKind: "app" | "drive" | "gallery" | "music";
   serviceSummary: string;
   servicePublicUrl: string;
   serviceP2PUrl: string;
