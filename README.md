@@ -1,148 +1,182 @@
-# Cloud Relay Platform
+# SSH Relay
 
-Cloud Relay Platform is a self-hosted reverse tunneling platform for exposing local services through a cloud relay while keeping management and visibility centralized.
+自建 SSH 远程转发中继系统。为 NAT/防火墙后的 Linux 机器提供公网可达的 SSH 入口，支持机器卡片注册、端口自动分配、反向隧道、心跳监控和掉线邮件告警。
 
-## Scope
+## 架构
 
-- `server-api`: control plane, node management, status aggregation, admin API
-- `relay-tcp`: TCP relay runtime
-- `relay-http`: HTTP relay runtime
-- `relay-https`: HTTPS relay runtime with TLS termination reserved at the edge
-- `client-agent`: node agent that registers, heartbeats, and later maintains data channels
-- `admin-web`: React management console for nodes, tunnels, and server health
-
-## Repository Layout
-
-```text
-apps/
-  server-api/
-  relay-tcp/
-  relay-http/
-  relay-https/
-  client-agent/
-  admin-web/
-packages/
-  protocol/
-  shared/
-db/
-deploy/docker/
-docs/
-outputs/runtime/
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  你的笔记本     │     │   云服务器 (中继)  │     │  远程 Linux      │
+│  (主控端)       │     │                  │     │  (被控端)        │
+│                 │     │  ssh-relay-api   │     │                 │
+│  ssh -p 40001 ──┼──→  │  ├─ :443 API     │     │  sshr daemon    │
+│  tunnel.xx.com  │     │  ├─ :40001 TCP  ←┼──── │  ├─ 心跳 30s     │
+│                 │     │  └─ 反向隧道      │     │  └─ 反向隧道    │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
 ```
 
-## Current Status
+## 快速开始
 
-This bootstrap establishes:
-
-- requirement and design artifacts required by the governed runtime
-- the initial Go module and shared protocol definitions
-- a working `server-api` with register, heartbeat, node listing, and server metrics endpoints
-- a PostgreSQL-backed `server-api` with tunnel persistence and internal TCP route discovery
-- a `relay-tcp` service that polls active TCP routes and binds public ports dynamically
-- a `client-agent` that can register itself and send heartbeats
-- a React admin shell ready to consume the management API
-
-HTTP and HTTPS relays still remain bootstrap services in this phase. The first real data-plane path implemented here is TCP relay driven by persisted routes from `server-api`.
-
-## Quick Start
-
-### Local Docker rehearsal
-
-```powershell
-docker build -f apps/server-api/Dockerfile -t cloud-relay-platform/server-api:dev .
-docker build -f apps/relay-tcp/Dockerfile -t cloud-relay-platform/relay-tcp:dev .
-docker compose -f deploy/docker/docker-compose.yml up -d postgres server-api relay-tcp
-```
-
-### Admin web
-
-```powershell
-cd apps/admin-web
-npm install
-npm run dev
-```
-
-By default the admin UI expects the API at `http://localhost:8080`.
-
-### Lightweight cloud deployment
-
-For a small cloud VM, prefer native binaries instead of Docker. The repository now includes `deploy/linux/` for this path.
-
-Recommended shape on the VM:
-
-- binaries under `/opt/cloud-relay-platform/bin`
-- environment files under `/etc/cloud-relay-platform`
-- `server-api` and `relay-tcp` managed by `systemd`
-- PostgreSQL installed natively from the distro package manager
-
-Build Linux binaries from a machine with Go installed:
+### 服务端（云服务器，一条命令）
 
 ```bash
-./deploy/linux/scripts/build-linux-binaries.sh
+curl -fsSL https://raw.githubusercontent.com/mortyandtimo/ssh-relay/main/install.sh | bash
+# 选 1) Server，按提示填写域名、数据库等信息
 ```
 
-Then copy these files to the VM:
-
-- `bin/linux-amd64/server-api`
-- `bin/linux-amd64/relay-tcp`
-- `bin/linux-amd64/client-agent`
-- `db/schema.sql`
-- `deploy/linux/systemd/*.service`
-- `deploy/linux/env/*.env.example`
-
-Install the systemd units on the VM:
+### 客户端（每台被控 Linux 机器，一条命令）
 
 ```bash
-sudo bash deploy/linux/scripts/install-systemd.sh
+curl -fsSL https://raw.githubusercontent.com/mortyandtimo/ssh-relay/main/install.sh | bash
+# 选 2) Client，然后注册并创建转发
 ```
 
-Create real env files on the VM:
-
-- `/etc/cloud-relay-platform/server-api.env`
-- `/etc/cloud-relay-platform/relay-tcp.env`
-- `/etc/cloud-relay-platform/client-agent.env`
-
-Then enable services:
+或使用交互式安装向导：
 
 ```bash
-sudo systemctl enable --now cloud-relay-server-api
-sudo systemctl enable --now cloud-relay-tcp
+git clone https://github.com/mortyandtimo/ssh-relay.git
+cd ssh-relay
+bash client-install.sh
 ```
 
-Check health:
+## 日常使用
+
+### 被控端
 
 ```bash
-curl http://127.0.0.1:8080/healthz
-journalctl -u cloud-relay-server-api -n 100 --no-pager
-journalctl -u cloud-relay-tcp -n 100 --no-pager
+sshr status           # 查看本机状态和转发
+sshr forward          # 选择端口创建新转发
+sshr list             # 列出所有转发
+sshr delete           # 按端口号删除转发
+sshr daemon           # 手动启动守护（心跳+反向隧道）
 ```
 
-### Cloud server rehearsal
+### 主控端（SSH 到远程机器）
 
-If you still want a disposable all-in-one rehearsal on a stronger machine, you can use Docker locally. On the lightweight cloud VM, prefer the native binary path above.
+```bash
+# 方式一：辅助脚本
+export SSHR_SERVER=https://tunnel.example.com
+ssh-to RTX4090-a3f2
+ssh-to RTX4090-a3f2 -l root
 
-```powershell
-docker build -f apps/server-api/Dockerfile -t cloud-relay-platform/server-api:dev .
-docker build -f apps/relay-tcp/Dockerfile -t cloud-relay-platform/relay-tcp:dev .
-docker compose -f deploy/docker/docker-compose.yml up -d postgres server-api relay-tcp
-Invoke-RestMethod http://127.0.0.1:8080/healthz
+# 方式二：CLI 工具
+sshr ssh RTX4090-a3f2
+
+# 方式三：原生 SSH
+ssh -p 40001 root@tunnel.example.com
 ```
 
-Then create a test node and tunnel from the VM itself:
+## 特性
 
-```powershell
-$node = Invoke-RestMethod -Uri 'http://127.0.0.1:8080/agent/register' -Method Post -ContentType 'application/json' -Body '{"nodeName":"cloud-test","agentVersion":"0.2.0","capabilities":{"tcpRelay":true,"httpRelay":true,"httpsRelay":true,"udpRelay":false,"p2pAssist":false}}'
-$tunnel = @{ nodeId = $node.nodeId; name = 'vm-test'; type = 'tcp'; transportPolicy = 'relay_only'; targetHost = '127.0.0.1'; targetPort = 22; publicPort = 20022; status = 'active' } | ConvertTo-Json
-Invoke-RestMethod -Uri 'http://127.0.0.1:8080/api/tunnels' -Method Post -ContentType 'application/json' -Body $tunnel
+- **机器卡片注册** — 每台机器分配唯一 ID，支持 GPU 自动检测命名
+- **端口管理** — 40000-40999 端口段自动分配，冲突检测
+- **反向隧道** — 被控端主动连接中继，无需公网 IP 或端口映射
+- **心跳监控** — 30s 心跳，90s 超时判定离线
+- **邮件告警** — 掉线自动发送邮件到配置的通知邮箱（5分钟冷却防刷）
+- **子域名 API** — `GET /api/machines` 查询所有机器及其转发状态
+- **证书集成** — 配合 cert-keeper 自动管理 SSL 证书
+
+## 环境变量
+
+### 服务端 (ssh-relay-api)
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `SSHR_DOMAIN` | 是 | 中继子域名 |
+| `SSHR_DATABASE_URL` | 是 | PostgreSQL 连接串 |
+| `SSHR_LISTEN_ADDR` | 否 | API 监听地址，默认 `:7722` |
+| `SSHR_PORT_START` | 否 | 端口范围起始，默认 `40000` |
+| `SSHR_PORT_END` | 否 | 端口范围结束，默认 `40999` |
+| `SSHR_SMTP_HOST` | 否 | SMTP 服务器（不填则跳过邮件通知） |
+| `SSHR_SMTP_PORT` | 否 | SMTP 端口，默认 `587` |
+| `SSHR_SMTP_USERNAME` | 否 | SMTP 用户名 |
+| `SSHR_SMTP_PASSWORD` | 否 | SMTP 密码 |
+| `SSHR_SMTP_FROM` | 否 | 发件人地址 |
+
+### 客户端 (sshr)
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `SSHR_SERVER` | 是 | 中继服务器地址，如 `https://tunnel.example.com` |
+| `SSHR_MACHINE_ID` | 否 | 机器 ID（自动从配置文件读取） |
+
+## API 端点
+
+```
+GET  /healthz                    # 健康检查
+POST /api/register               # 注册机器
+POST /api/heartbeat              # 心跳上报
+GET  /api/machines               # 机器列表 [?status=online|offline]
+GET  /api/machines/:id           # 机器详情
+PUT  /api/machines/:id           # 更新机器名称
+DELETE /api/machines/:id         # 删除机器
+GET  /api/machines/:id/forwards  # 机器转发列表
+GET  /api/machines/:id/events    # 机器心跳事件
+GET  /api/forwards               # 转发列表 [?machineId=xxx]
+POST /api/forwards               # 创建转发
+GET  /api/forwards/:id           # 转发详情
+DELETE /api/forwards/:id         # 删除转发
+GET  /api/ports                  # 全部端口状态
+GET  /api/ports/available        # 可用端口（前10个）
+GET  /api/settings               # 获取配置
+PUT  /api/settings               # 更新配置 {"notifyEmails":"a@x.com,b@x.com"}
 ```
 
-The current relay runtime will then expose `20022` on the cloud server and forward it to the configured local target. This is enough to rehearse route persistence, route polling, and TCP socket proxying on the cloud VM before the reverse data channel from `client-agent` is added.
+## 安装后配置
 
-## Key Endpoints
+### 设置通知邮箱
 
-- `GET /healthz`
-- `POST /agent/register`
-- `POST /agent/heartbeat`
-- `GET /api/nodes`
-- `GET /api/tunnels`
-- `GET /api/server/metrics`
+```bash
+curl -X PUT https://tunnel.example.com/api/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"notifyEmails":"admin@example.com,ops@example.com"}'
+```
+
+### Nginx 反代（子域名）
+
+确保 nginx 已反代子域名到 ssh-relay-api，并支持 WebSocket Upgrade：
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:7722;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
+}
+```
+
+### systemd 服务
+
+```bash
+sudo systemctl enable --now cloud-relay-ssh-relay
+sudo systemctl status cloud-relay-ssh-relay
+journalctl -u cloud-relay-ssh-relay -f
+```
+
+## 客户端 systemd 守护
+
+安装后自动创建用户级 systemd 服务：
+
+```bash
+systemctl --user status sshrdaemon
+systemctl --user restart sshrdaemon
+journalctl --user -u sshrdaemon -f
+```
+
+## 从源码构建
+
+```bash
+git clone https://github.com/mortyandtimo/ssh-relay.git
+cd ssh-relay
+
+# 服务端
+go build -o ssh-relay-api ./apps/ssh-relay-api/cmd/ssh-relay-api/
+
+# 客户端
+go build -o sshr ./apps/ssh-relay-cli/cmd/sshr/
+```
+
+## 许可证
+
+MIT

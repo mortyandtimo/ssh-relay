@@ -16,6 +16,8 @@ go build -o "${OUT_DIR}/relay-udp" ./apps/relay-udp/cmd/relay-udp
 go build -o "${OUT_DIR}/relay-http" ./apps/relay-http/cmd/relay-http
 go build -o "${OUT_DIR}/relay-https" ./apps/relay-https/cmd/relay-https
 go build -o "${OUT_DIR}/client-agent" ./apps/client-agent/cmd/client-agent
+go build -o "${OUT_DIR}/ssh-relay-api" ./apps/ssh-relay-api/cmd/ssh-relay-api
+go build -o "${OUT_DIR}/sshr" ./apps/ssh-relay-cli/cmd/sshr
 
 echo "linux binaries built into ${OUT_DIR}"
 

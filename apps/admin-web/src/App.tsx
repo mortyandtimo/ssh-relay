@@ -1,5 +1,7 @@
 import { FormEvent, Fragment, ReactNode, useEffect, useRef, useState } from "react";
 
+const PUBLIC_ENTRY_HOST = "<your-server-ip>";
+
 type NodeCapabilities = {
   tcpRelay: boolean;
   httpRelay: boolean;
@@ -2407,7 +2409,7 @@ function buildAuditQuery(filter: AuditFilterState) {
                         {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>域名</span><input value={tunnelEditForm.domain} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, domain: event.target.value } : current)} placeholder="例如 app.example.com" /></label> : null}
                         {(tunnelEditForm.type === "http" || tunnelEditForm.type === "https") ? <label><span>probePath</span><input value={tunnelEditForm.probePath} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, probePath: event.target.value } : current)} placeholder="默认 /" /></label> : null}
                         {tunnelEditForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelEditForm.tlsMode} onChange={(event) => setTunnelEditForm((current) => current ? { ...current, tlsMode: event.target.value } : current)}><option value="edge_terminate">edge_terminate</option></select></label> : null}
-                        {tunnelEditForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelEditForm.publicPort || "<公网端口>"}</code></div> : null}
+                        {tunnelEditForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>{"http://" + PUBLIC_ENTRY_HOST + ":" + (tunnelEditForm.publicPort || "<公网端口>")}</code></div> : null}
                         {tunnelEditForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelEditForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
                         {tunnelEditForm.type === "socks5" ? <div className="form-note">SOCKS5 使用节点侧内置代理语义，不需要手工填写目标主机和目标端口。</div> : null}
                         <div className="form-note">P2P 服务语义：{tunnelEditNodeOption?.supportsP2P ? <><code>p2p_preferred</code> 当前可选，表示这个 tunnel 未来优先接入 P2P 运行面；但运行事实仍要看 <code>runtimePath/runtimeState</code>。</> : <>当前节点不具备 <code>p2pAssist</code>，不建议设为 <code>p2p_preferred</code>；当前运行仍按 <code>relay_only</code> 理解。</>}</div>
@@ -2478,7 +2480,7 @@ function buildAuditQuery(filter: AuditFilterState) {
                         {(tunnelForm.type === "http" || tunnelForm.type === "https") ? <label><span>probePath</span><input value={tunnelForm.probePath} onChange={(event) => setTunnelForm((current) => ({ ...current, probePath: event.target.value }))} placeholder="默认 /" /></label> : null}
                         {tunnelForm.type === "https" ? <label><span>TLS 模式</span><select value={tunnelForm.tlsMode} onChange={(event) => setTunnelForm((current) => ({ ...current, tlsMode: event.target.value as "" | "edge_terminate" }))}><option value="edge_terminate">edge_terminate</option></select></label> : null}
                         {tunnelForm.type === "udp" ? <div className="form-note">UDP（最小 V1）：当前已完成真实公网 echo 验证，可用于最小公网 UDP 单会话验证；仍不支持 UDP probe、复杂会话管理、生产级超时治理或 NAT 穿透。</div> : null}
-                        {tunnelForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>http://82.156.236.104:{tunnelForm.publicPort || "<公网端口>"}</code></div> : null}
+                        {tunnelForm.type === "http" ? <div className="form-note">HTTP relay 用于发布节点上的 Web/API 服务，访问方式为 <code>{"http://" + PUBLIC_ENTRY_HOST + ":" + (tunnelForm.publicPort || "<公网端口>")}</code></div> : null}
                         {tunnelForm.type === "https" ? <div className="form-note">HTTPS 当前标准入口语义为 Nginx 在 443 终止 TLS，再转发到 relay-https 后端服务。正式访问入口是 <code>https://{tunnelForm.domain || "<你的域名>"}</code>；此处端口字段仅作内部保留字段，不作为标准用户入口。</div> : null}
                         {tunnelFormNode?.status !== "online" ? <div className="form-note">当前选中节点 offline。按现有语义仍可查看或保留配置，但当前不可通信。</div> : null}
                         {tunnelFormNode?.isolated ? <div className="form-note">当前选中节点已隔离，后端会拒绝新建 tunnel。</div> : null}
@@ -3060,34 +3062,34 @@ function fallbackPortPlan(type: string): PortRangePlan {
 
 function tunnelPublicEntry(tunnel: TunnelSpec) {
   if (tunnel.type === "http") {
-    return "http://82.156.236.104:" + tunnel.publicPort;
+    return "http://" + PUBLIC_ENTRY_HOST + ":" + tunnel.publicPort;
   }
   if (tunnel.type === "https") {
     return tunnel.domain ? "https://" + tunnel.domain : "https://<待绑定域名>";
   }
   if (tunnel.type === "udp") {
-    return "udp://82.156.236.104:" + tunnel.publicPort;
+    return "udp://" + PUBLIC_ENTRY_HOST + ":" + tunnel.publicPort;
   }
   if (tunnel.type === "socks5") {
-    return "socks5://82.156.236.104:" + tunnel.publicPort;
+    return "socks5://" + PUBLIC_ENTRY_HOST + ":" + tunnel.publicPort;
   }
-  return "82.156.236.104:" + tunnel.publicPort;
+  return PUBLIC_ENTRY_HOST + ":" + tunnel.publicPort;
 }
 
 function tunnelEntryPreview(type: string, publicPort: string, domain: string) {
   if (type === "http") {
-    return "http://82.156.236.104:" + (publicPort || "<公网端口>");
+    return "http://" + PUBLIC_ENTRY_HOST + ":" + (publicPort || "<公网端口>");
   }
   if (type === "https") {
     return domain ? "https://" + domain : "https://<待绑定域名>";
   }
   if (type === "udp") {
-    return "udp://82.156.236.104:" + (publicPort || "<公网端口>");
+    return "udp://" + PUBLIC_ENTRY_HOST + ":" + (publicPort || "<公网端口>");
   }
   if (type === "socks5") {
-    return "socks5://82.156.236.104:" + (publicPort || "<公网端口>");
+    return "socks5://" + PUBLIC_ENTRY_HOST + ":" + (publicPort || "<公网端口>");
   }
-  return "82.156.236.104:" + (publicPort || "<公网端口>");
+  return PUBLIC_ENTRY_HOST + ":" + (publicPort || "<公网端口>");
 }
 
 function normalizeProbePath(pathValue?: string) {

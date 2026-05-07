@@ -10,7 +10,7 @@ type Page = "loading" | "certs" | "add" | "setup" | "login" | "settings";
 type ReopenDialogChoice = "cancel" | "new-window";
 type CloseAction = "ask" | "tray" | "exit";
 
-const legacyDefaultApiUrl = "http://82.156.236.104:7720";
+const legacyDefaultApiUrl = "http://<your-server-ip>:7720";
 const defaultApiUrl = "https://cert.manage.020309.top";
 const defaultCloseAction: CloseAction = "ask";
 

@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloud Relay SSH Relay API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cloud-relay-platform
+EnvironmentFile=/etc/cloud-relay-platform/ssh-relay-api.env
+ExecStart=/opt/cloud-relay-platform/bin/ssh-relay-api
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
