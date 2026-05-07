@@ -195,6 +195,7 @@ func (m *Manager) HandleReverseConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Drain buffered reader before using as raw conn
 	wrapped := &hijackedConn{Conn: conn, reader: bufrw.Reader}
+	enableTCPKeepalive(wrapped)
 
 	log.Printf("relay: reverse connection from machine=%s port=%d", machineID, port)
 	t.pool.add(wrapped)
@@ -351,4 +352,11 @@ type hijackedConn struct {
 
 func (c *hijackedConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
+}
+
+func enableTCPKeepalive(conn net.Conn) {
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		tcp.SetKeepAlive(true)
+		tcp.SetKeepAlivePeriod(30 * time.Second)
+	}
 }

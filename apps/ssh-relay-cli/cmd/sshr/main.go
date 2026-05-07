@@ -638,7 +638,7 @@ func handleProxyCommands(ctx context.Context, conn net.Conn) {
 	}
 }
 
-const keepaliveInterval = 30 * time.Second
+const keepaliveInterval = 120 * time.Second
 
 // ─── list ───
 
