@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -536,9 +537,21 @@ func maintainReverse(ctx context.Context, server, machineID string, publicPort i
 	}
 
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", host)
+	rawConn, err := dialer.DialContext(ctx, "tcp", host)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
+	}
+
+	var conn net.Conn
+	if parsed.Scheme == "https" {
+		tlsConn := tls.Client(rawConn, &tls.Config{ServerName: parsed.Hostname()})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			rawConn.Close()
+			return fmt.Errorf("tls handshake: %w", err)
+		}
+		conn = tlsConn
+	} else {
+		conn = rawConn
 	}
 	defer conn.Close()
 
