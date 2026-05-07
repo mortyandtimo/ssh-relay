@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#===============================================================================
+# ssh-to - SSH into a registered machine through the SSH Relay
+# Usage: ssh-to <machine-name> [ssh-extra-args...]
+#===============================================================================
+set -euo pipefail
+
+SERVER="${SSHR_SERVER:?must set SSHR_SERVER env var (e.g. https://tunnel.example.com)}"
+RELAY_HOST="${SSHR_RELAY_HOST:-$(echo "$SERVER" | sed 's|https\?://||;s|/.*||')}"
+
+[[ $# -lt 1 ]] && { echo "Usage: ssh-to <machine-name> [ssh-args...]"; echo "Example: ssh-to RTX4090-a3f2 -l root"; exit 1; }
+
+MACHINE="$1"; shift
+
+# Query API for the machine
+echo "Looking up $MACHINE..." >&2
+MACHINES=$(curl -fsS "$SERVER/api/machines" 2>/dev/null) || { echo "ERROR: cannot reach $SERVER" >&2; exit 1; }
+
+MACHINE_ID=$(echo "$MACHINES" | python3 -c "
+import json, sys
+items = json.load(sys.stdin)['items']
+for m in items:
+    if m['name'].lower() == '$MACHINE'.lower():
+        print(m['id'])
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null) || { echo "ERROR: machine '$MACHINE' not found" >&2; exit 1; }
+
+# Check status
+STATUS=$(echo "$MACHINES" | python3 -c "
+import json, sys
+items = json.load(sys.stdin)['items']
+for m in items:
+    if m['id'] == '$MACHINE_ID':
+        print(m['status'])
+        break
+")
+[[ "$STATUS" != "online" ]] && echo "WARNING: $MACHINE is $STATUS" >&2
+
+# Get forwards
+FWDS=$(curl -fsS "$SERVER/api/forwards?machineId=$MACHINE_ID" 2>/dev/null)
+FWD_COUNT=$(echo "$FWDS" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
+
+if [[ "$FWD_COUNT" == "0" ]]; then
+    echo "ERROR: $MACHINE has no active forwards" >&2
+    exit 1
+fi
+
+if [[ "$FWD_COUNT" == "1" ]]; then
+    PORT=$(echo "$FWDS" | python3 -c "import json,sys; print(json.load(sys.stdin)['items'][0]['publicPort'])")
+else
+    echo "$MACHINE has $FWD_COUNT forwards:" >&2
+    echo "$FWDS" | python3 -c "
+import json, sys
+for f in json.load(sys.stdin)['items']:
+    print(f\"  {f['publicPort']} -> {f['targetHost']}:{f['targetPort']}  ({f['name']})\")
+" >&2
+    echo -n "Port to use: " >&2
+    read PORT
+fi
+
+echo "Connecting to $MACHINE:$PORT via $RELAY_HOST..." >&2
+exec ssh -p "$PORT" "$@" "$RELAY_HOST"
