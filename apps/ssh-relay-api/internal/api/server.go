@@ -1425,6 +1425,36 @@ const dashboardHTML = `<!DOCTYPE html>
     <code>curl -fsSL https://raw.githubusercontent.com/mortyandtimo/ssh-relay/main/client-install.sh | bash</code>
     <p>或访问 <a href="https://github.com/mortyandtimo/ssh-relay" target="_blank" style="color:var(--blue)">GitHub 仓库</a> 查看完整文档</p>
   </div>
+
+  <div id="admin-panel" style="display:none">
+    <div class="section-title">
+      &#x1F464; 用户管理 <span class="count" id="user-count"></span>
+      <button class="btn-sm btn-green" onclick="openUserModal()" style="margin-left:auto">+ 创建用户</button>
+    </div>
+    <div id="user-list" class="machine-card" style="padding:16px"></div>
+  </div>
+  <div class="modal-overlay" id="user-modal">
+    <div class="modal-box">
+      <h3 id="modal-title">创建用户</h3>
+      <div class="field"><label>用户名</label><input id="mu-username" placeholder="用户名"></div>
+      <div class="field"><label>邮箱（可选，用于验证码登录）</label><input id="mu-email" type="email" placeholder="user@hrbeu.edu.cn"></div>
+      <div class="field"><label>密码</label><input id="mu-password" type="password" placeholder="密码"></div>
+      <div class="field"><label>角色</label><select id="mu-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></div>
+      <div class="field" id="mu-edit-role" style="display:none"><label>修改角色（仅超级管理员）</label><select id="mu-newrole"><option value="">不改</option><option value="user">普通用户</option><option value="admin">管理员</option></select></div>
+      <input type="hidden" id="mu-id">
+      <div class="modal-actions">
+        <button class="btn-sm btn-gray" onclick="closeUserModal()">取消</button>
+        <button class="btn-sm btn-green" id="mu-submit" onclick="saveUser()">创建</button>
+      </div>
+      <div class="msg error" id="mu-err"></div>
+      <div class="msg success" id="mu-ok"></div>
+      <div class="pass-box" id="new-pwd-box">
+        <h4>新密码</h4>
+        <input readonly id="new-pwd-value" onclick="this.select();document.execCommand('copy')">
+        <p style="font-size:11px;color:var(--muted);margin-top:4px">点击复制，关闭后将无法再次查看</p>
+      </div>
+    </div>
+  </div>
 </div>
 <script>
 var host = window.location.host;
