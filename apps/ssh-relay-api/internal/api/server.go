@@ -769,6 +769,11 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 		s.handleUserSettings(w, r, actor, id)
 		return
 	}
+	// /api/users/{id}/promote
+	if len(parts) == 2 && parts[1] == "promote" {
+		s.handlePromoteUser(w, r, actor, id)
+		return
+	}
 
 	target, err := s.store.GetUser(r.Context(), id)
 	if err != nil {
@@ -861,6 +866,37 @@ func (s *Server) handleUserSettings(w http.ResponseWriter, r *http.Request, acto
 	}
 }
 
+
+// ─── Promote guest user ───
+
+func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request, actor *store.User, targetID string) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if actor.Role == store.RoleUser {
+		writeError(w, http.StatusForbidden, "权限不足")
+		return
+	}
+
+	target, err := s.store.GetUser(r.Context(), targetID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if actor.Role == store.RoleAdmin && target.Role != store.RoleUser {
+		writeError(w, http.StatusForbidden, "管理员只能提升普通用户")
+		return
+	}
+
+	if err := s.store.PromoteUser(r.Context(), targetID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Printf("user promoted: %s by %s", target.Username, actor.Username)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "promoted", "id": targetID})
+}
 // ─── Change own password ───
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
@@ -1010,24 +1046,22 @@ func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.FindUserByEmail(r.Context(), req.Email)
 	if err != nil {
 		if s.isEmailAllowed(req.Email) {
-			// Auto-register: use email prefix as username
-			username := strings.SplitN(req.Email, "@", 2)[0]
-			// Check username uniqueness
-			existing, _ := s.store.FindUserByUsername(r.Context(), username)
-			if existing != nil {
-				// Append random suffix
-				username = username + "-" + randomHex(4)
-			}
-			user, err = s.store.CreateUser(r.Context(), username, req.Email, randomHex(12), store.RoleUser)
+			user, err = s.store.CreateAutoUser(r.Context(), req.Email)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "auto-register failed")
 				return
 			}
-			log.Printf("auto-registered user: %s (email=%s)", username, req.Email)
+			log.Printf("auto-registered guest: %s (email=%s)", user.Username, req.Email)
 		} else {
 			writeError(w, http.StatusNotFound, "user not found")
 			return
 		}
+	}
+
+	// Check login limit for auto users
+	if err := s.store.CheckLoginAllowed(r.Context(), &user); err != nil {
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
 	}
 
 	_, token, err := s.store.CreateSession(r.Context(), user.ID)
@@ -1036,15 +1070,23 @@ func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Shorter session for auto-registered guests (2 hours vs 24 hours)
+	maxAge := 86400
+	if user.Source == "auto" {
+		maxAge = 7200
+	}
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     "sshr_session",
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   86400,
+		MaxAge:   maxAge,
 		Secure:   true,
 	})
+
+	s.store.IncrementLoginCount(r.Context(), user.ID)
 
 	log.Printf("user %s logged in via verification code", user.Username)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1074,10 +1116,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check login limit for auto users
+	if err := s.store.CheckLoginAllowed(r.Context(), &user); err != nil {
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
+
 	_, token, err := s.store.CreateSession(r.Context(), user.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session error")
 		return
+	}
+
+	maxAge := 86400
+	if user.Source == "auto" {
+		maxAge = 7200
 	}
 
 	http.SetCookie(w, &http.Cookie{
@@ -1086,9 +1139,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   86400,
+		MaxAge:   maxAge,
 		Secure:   true,
 	})
+
+	s.store.IncrementLoginCount(r.Context(), user.ID)
 
 	log.Printf("user %s logged in via password", user.Username)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1393,6 +1448,55 @@ function load(){
     var hidePorts = d.role==='user' && d.settings && d.settings.ports_visible==='false';
     loadMachines(hidePorts);
   }).catch(function(){});
+}
+
+function loadMachines(hidePorts){
+  Promise.all([
+    fetch('/api/machines').then(function(r){return r.json();}),
+    fetch('/api/forwards').then(function(r){return r.json();})
+  ]).then(function(results){
+    var machines = results[0].items;
+    var allFwds = results[1].items;
+    var fwdMap = {};
+    allFwds.forEach(function(f){ if(!fwdMap[f.machineId]) fwdMap[f.machineId]=[]; fwdMap[f.machineId].push(f); });
+    var online=0, offline=0;
+    machines.forEach(function(m){ if(m.status==='online') online++; else offline++; });
+    document.getElementById('cnt-online').textContent = online;
+    document.getElementById('cnt-offline').textContent = offline;
+    document.getElementById('cnt-forwards').textContent = allFwds.length;
+    var html = '';
+    if(machines.length===0){
+      html='<div class="empty">暂无注册机器<br><code>sshr register</code> 在被控 Linux 机器上注册即可在此查看</div>';
+    }
+    machines.forEach(function(m){
+      var isOff=m.status!=='online';
+      html+='<div class="machine-card'+(isOff?' offline':'')+'">';
+      html+='<div class="machine-header">';
+      html+='<div><span class="status-dot '+(m.status==='online'?'online':'offline')+'"></span><span class="machine-name">'+esc(m.name)+'</span></div>';
+      html+='<div class="machine-meta">';
+      if(m.gpuModel) html+='<span class="gpu-tag">'+esc(m.gpuModel)+'</span> ';
+      html+='ID: '+esc(m.id.substring(0,16))+' &middot; '+(m.lastSeenAt?timeAgo(m.lastSeenAt):'从未');
+      html+='</div></div>';
+      var fwds = fwdMap[m.id] || [];
+      if(fwds.length>0){
+        if(hidePorts){
+          html+='<div style="color:var(--muted);font-size:13px;margin-top:8px;">'+fwds.length+' 个转发（权限受限，请联系管理员查看详情）</div>';
+        }else{
+          html+='<table><thead><tr><th>端口</th><th>目标</th><th>SSH 连接命令</th><th></th></tr></thead><tbody>';
+          fwds.forEach(function(f){
+            var cmd = 'ssh -p '+f.publicPort+' &lt;用户名&gt;@'+host;
+            html+='<tr><td><code>'+f.publicPort+'</code></td><td>'+esc(f.targetHost)+':'+f.targetPort+'</td><td><code>'+cmd+'</code></td><td><button class="copy-btn" onclick="copy(this,\''+cmd+'\')">复制</button></td></tr>';
+          });
+          html+='</tbody></table>';
+        }
+      }else{
+        html+='<div style="color:var(--muted);font-size:13px;margin-top:8px;">暂无转发，在该机器上运行 <code>sshr forward</code></div>';
+      }
+      html+='</div>';
+    });
+    document.getElementById('machines').innerHTML = html;
+    document.getElementById('last-update').textContent = '更新于 ' + new Date().toLocaleTimeString();
+  }).catch(function(e){ console.error(e); });
 }
 function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 function timeAgo(ts){ var s=(Date.now()-new Date(ts).getTime())/1000; if(s<60) return Math.floor(s)+'秒前'; if(s<3600) return Math.floor(s/60)+'分钟前'; if(s<86400) return Math.floor(s/3600)+'小时前'; return Math.floor(s/86400)+'天前'; }

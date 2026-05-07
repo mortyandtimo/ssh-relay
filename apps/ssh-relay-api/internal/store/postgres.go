@@ -114,13 +114,16 @@ const (
 )
 
 type User struct {
-	ID           string   `json:"id"`
-	Email        string   `json:"email,omitempty"`
-	Username     string   `json:"username"`
-	DisplayName  string   `json:"displayName"`
-	Role         UserRole `json:"role"`
-	PasswordHash string   `json:"-"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID              string    `json:"id"`
+	Email           string    `json:"email,omitempty"`
+	Username        string    `json:"username"`
+	DisplayName     string    `json:"displayName"`
+	Role            UserRole  `json:"role"`
+	Source          string    `json:"source"`
+	LoginCount      int       `json:"loginCount"`
+	LoginWeekReset  time.Time `json:"loginWeekReset"`
+	PasswordHash    string    `json:"-"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 type VerificationCode struct {
@@ -197,6 +200,9 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	    username text not null unique,
 	    display_name text not null default '',
 	    role text not null default 'user',
+	    source text not null default 'admin',
+	    login_count integer not null default 0,
+	    login_week_reset timestamptz not null default now(),
 	    password_hash text not null,
 	    created_at timestamptz not null default now()
 	);
@@ -226,7 +232,15 @@ create index if not exists idx_sshr_sessions_token on sshr_web_sessions(token_ha
 		);
 	`
 	_, err := s.pool.Exec(ctx, schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migrate existing tables
+	s.pool.Exec(ctx, "alter table sshr_users add column if not exists source text not null default 'admin'")
+	s.pool.Exec(ctx, "alter table sshr_users add column if not exists login_count integer not null default 0")
+	s.pool.Exec(ctx, "alter table sshr_users add column if not exists login_week_reset timestamptz not null default now()")
+	return nil
 }
 
 // ─── Machine CRUD ───
@@ -608,8 +622,8 @@ func (s *Store) AuthenticateUser(ctx context.Context, login, password string) (U
 	var u User
 	var roleStr string
 	err := s.pool.QueryRow(ctx,
-		`select id, email, username, display_name, role, password_hash, created_at from sshr_users where (username=$1 or email=$1) and password_hash=$2`,
-		login, pwHash).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt)
+		`select id, email, username, display_name, role, source, login_count, login_week_reset, password_hash, created_at from sshr_users where (username=$1 or email=$1) and password_hash=$2`,
+		login, pwHash).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.Source, &u.LoginCount, &u.LoginWeekReset, &u.PasswordHash, &u.CreatedAt)
 	if err != nil {
 		return User{}, fmt.Errorf("invalid credentials")
 	}
@@ -621,8 +635,8 @@ func (s *Store) FindUserByEmail(ctx context.Context, email string) (User, error)
 	var u User
 	var roleStr string
 	err := s.pool.QueryRow(ctx,
-		`select id, email, username, display_name, role, password_hash, created_at from sshr_users where email=$1`,
-		email).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt)
+		`select id, email, username, display_name, role, source, login_count, login_week_reset, password_hash, created_at from sshr_users where email=$1`,
+		email).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.Source, &u.LoginCount, &u.LoginWeekReset, &u.PasswordHash, &u.CreatedAt)
 	if err != nil {
 		return User{}, err
 	}
@@ -634,8 +648,8 @@ func (s *Store) FindUserByUsername(ctx context.Context, username string) (*User,
 	var u User
 	var roleStr string
 	err := s.pool.QueryRow(ctx,
-		`select id, email, username, display_name, role, password_hash, created_at from sshr_users where username=$1`,
-		username).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt)
+		`select id, email, username, display_name, role, source, login_count, login_week_reset, password_hash, created_at from sshr_users where username=$1`,
+		username).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.Source, &u.LoginCount, &u.LoginWeekReset, &u.PasswordHash, &u.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -735,8 +749,8 @@ func (s *Store) ValidateSession(ctx context.Context, token string) (User, error)
 	var u User
 	var roleStr string
 	err = s.pool.QueryRow(ctx,
-		`select id, email, username, display_name, role, password_hash, created_at from sshr_users where id=$1`,
-		userID).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt)
+		`select id, email, username, display_name, role, source, login_count, login_week_reset, password_hash, created_at from sshr_users where id=$1`,
+		userID).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.Source, &u.LoginCount, &u.LoginWeekReset, &u.PasswordHash, &u.CreatedAt)
 	if err != nil {
 		return User{}, err
 	}
@@ -760,7 +774,7 @@ func makeRand(n int) []byte {
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.pool.Query(ctx,
-		`select id, email, username, display_name, role, password_hash, created_at from sshr_users order by created_at desc`)
+		`select id, email, username, display_name, role, source, login_count, login_week_reset, password_hash, created_at from sshr_users order by created_at desc`)
 	if err != nil {
 		return nil, err
 	}
@@ -770,7 +784,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	for rows.Next() {
 		var u User
 		var roleStr string
-		if err := rows.Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.Source, &u.LoginCount, &u.LoginWeekReset, &u.PasswordHash, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		u.Role = UserRole(roleStr)
@@ -786,8 +800,8 @@ func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 	var u User
 	var roleStr string
 	err := s.pool.QueryRow(ctx,
-		`select id, email, username, display_name, role, password_hash, created_at from sshr_users where id=$1`,
-		id).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt)
+		`select id, email, username, display_name, role, source, login_count, login_week_reset, password_hash, created_at from sshr_users where id=$1`,
+		id).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.Source, &u.LoginCount, &u.LoginWeekReset, &u.PasswordHash, &u.CreatedAt)
 	if err != nil {
 		return User{}, err
 	}
@@ -799,21 +813,80 @@ func (s *Store) CreateUser(ctx context.Context, username, email, password string
 	id := "u_" + hex.EncodeToString(makeRand(8))
 	now := time.Now().UTC()
 	u := User{
-		ID:           id,
-		Email:        email,
-		Username:     username,
-		DisplayName:  username,
-		Role:         role,
-		PasswordHash: hashPassword(password),
-		CreatedAt:    now,
+		ID:             id,
+		Email:          email,
+		Username:       username,
+		DisplayName:    username,
+		Role:           role,
+		Source:         "admin",
+		LoginWeekReset: now,
+		PasswordHash:   hashPassword(password),
+		CreatedAt:      now,
 	}
 	_, err := s.pool.Exec(ctx,
-		`insert into sshr_users (id, email, username, display_name, role, password_hash, created_at) values ($1,$2,$3,$4,$5,$6,$7)`,
-		u.ID, u.Email, u.Username, u.DisplayName, string(u.Role), u.PasswordHash, u.CreatedAt)
+		`insert into sshr_users (id, email, username, display_name, role, source, login_count, login_week_reset, password_hash, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		u.ID, u.Email, u.Username, u.DisplayName, string(u.Role), u.Source, u.LoginCount, u.LoginWeekReset, u.PasswordHash, u.CreatedAt)
 	if err != nil {
 		return User{}, fmt.Errorf("create user: %w", err)
 	}
 	return u, nil
+}
+
+func (s *Store) CreateAutoUser(ctx context.Context, email string) (User, error) {
+	id := "u_" + hex.EncodeToString(makeRand(8))
+	now := time.Now().UTC()
+	username := strings.SplitN(email, "@", 2)[0]
+
+	// Check username uniqueness, append random if conflict
+	var existing string
+	if err := s.pool.QueryRow(ctx, `select id from sshr_users where username=$1`, username).Scan(&existing); err == nil {
+		username = username + "-" + hex.EncodeToString(makeRand(2))[:4]
+	}
+
+	u := User{
+		ID:             id,
+		Email:          email,
+		Username:       username,
+		DisplayName:    username,
+		Role:           RoleUser,
+		Source:         "auto",
+		LoginWeekReset: now,
+		PasswordHash:   hashPassword(hex.EncodeToString(makeRand(12))),
+		CreatedAt:      now,
+	}
+	_, err := s.pool.Exec(ctx,
+		`insert into sshr_users (id, email, username, display_name, role, source, login_count, login_week_reset, password_hash, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		u.ID, u.Email, u.Username, u.DisplayName, string(u.Role), u.Source, u.LoginCount, u.LoginWeekReset, u.PasswordHash, u.CreatedAt)
+	if err != nil {
+		return User{}, fmt.Errorf("create auto user: %w", err)
+	}
+	return u, nil
+}
+
+func (s *Store) CheckLoginAllowed(ctx context.Context, u *User) error {
+	if u.Source != "auto" {
+		return nil // admin-created users have no limit
+	}
+	now := time.Now().UTC()
+	// Reset count if a week has passed
+	if now.After(u.LoginWeekReset.Add(7 * 24 * time.Hour)) {
+		u.LoginCount = 0
+		u.LoginWeekReset = now
+		s.pool.Exec(ctx, `update sshr_users set login_count=0, login_week_reset=$1 where id=$2`, now, u.ID)
+	}
+	if u.LoginCount >= 7 {
+		return fmt.Errorf("本周登录次数已用完（7/7），请联系管理员升级为正式用户")
+	}
+	return nil
+}
+
+func (s *Store) IncrementLoginCount(ctx context.Context, userID string) {
+	s.pool.Exec(ctx, `update sshr_users set login_count=login_count+1 where id=$1`, userID)
+}
+
+func (s *Store) PromoteUser(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, `update sshr_users set source='admin' where id=$1`, id)
+	return err
 }
 
 func (s *Store) UpdateUser(ctx context.Context, id string, updates map[string]any) error {
