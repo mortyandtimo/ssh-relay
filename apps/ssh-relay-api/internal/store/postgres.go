@@ -3,9 +3,11 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -101,6 +103,42 @@ type Settings struct {
 	NotifyEmails []string `json:"notifyEmails"`
 }
 
+// ─── Auth types ───
+
+type UserRole string
+
+const (
+	RoleAdmin UserRole = "admin"
+	RoleUser  UserRole = "user"
+)
+
+type User struct {
+	ID           string   `json:"id"`
+	Email        string   `json:"email,omitempty"`
+	Username     string   `json:"username"`
+	DisplayName  string   `json:"displayName"`
+	Role         UserRole `json:"role"`
+	PasswordHash string   `json:"-"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+type VerificationCode struct {
+	ID        int64     `json:"id"`
+	Email     string    `json:"email"`
+	CodeHash  string    `json:"-"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	Used      bool      `json:"used"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type WebSession struct {
+	ID           string    `json:"id"`
+	UserID       string    `json:"userId"`
+	TokenHash    string    `json:"-"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
 type Store struct {
 	pool *pgxpool.Pool
 	mu   sync.RWMutex
@@ -152,6 +190,32 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	    value text not null,
 	    updated_at timestamptz not null default now()
 	);
+	create table if not exists sshr_users (
+	    id text primary key,
+	    email text not null default '',
+	    username text not null unique,
+	    display_name text not null default '',
+	    role text not null default 'user',
+	    password_hash text not null,
+	    created_at timestamptz not null default now()
+	);
+	create table if not exists sshr_verification_codes (
+	    id bigserial primary key,
+	    email text not null,
+	    code_hash text not null,
+	    expires_at timestamptz not null,
+	    used boolean not null default false,
+	    created_at timestamptz not null default now()
+	);
+	create index if not exists idx_sshr_vcodes_email on sshr_verification_codes(email, created_at desc);
+	create table if not exists sshr_web_sessions (
+	    id text primary key,
+	    user_id text not null references sshr_users(id) on delete cascade,
+	    token_hash text not null,
+	    expires_at timestamptz not null,
+	    created_at timestamptz not null default now()
+	);
+	create index if not exists idx_sshr_sessions_token on sshr_web_sessions(token_hash);
 	`
 	_, err := s.pool.Exec(ctx, schema)
 	return err
@@ -518,6 +582,178 @@ func (s *Store) MarkStaleMachinesOffline(ctx context.Context, threshold time.Dur
 		reallyGone = append(reallyGone, m)
 	}
 	return reallyGone, nil
+}
+
+// ─── Auth: Users ───
+
+func hashPassword(password string) string {
+	return hashString("sshr-pw:" + password)
+}
+
+func hashString(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+func (s *Store) CreateUser(ctx context.Context, username, email, password string, role UserRole) (User, error) {
+	id := "u_" + hex.EncodeToString(makeRand(8))
+	now := time.Now().UTC()
+	u := User{
+		ID:           id,
+		Email:        email,
+		Username:     username,
+		DisplayName:  username,
+		Role:         role,
+		PasswordHash: hashPassword(password),
+		CreatedAt:    now,
+	}
+	_, err := s.pool.Exec(ctx,
+		`insert into sshr_users (id, email, username, display_name, role, password_hash, created_at) values ($1,$2,$3,$4,$5,$6,$7)`,
+		u.ID, u.Email, u.Username, u.DisplayName, string(u.Role), u.PasswordHash, u.CreatedAt)
+	if err != nil {
+		return User{}, fmt.Errorf("create user: %w", err)
+	}
+	return u, nil
+}
+
+func (s *Store) AuthenticateUser(ctx context.Context, login, password string) (User, error) {
+	pwHash := hashPassword(password)
+	var u User
+	var roleStr string
+	err := s.pool.QueryRow(ctx,
+		`select id, email, username, display_name, role, password_hash, created_at from sshr_users where (username=$1 or email=$1) and password_hash=$2`,
+		login, pwHash).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt)
+	if err != nil {
+		return User{}, fmt.Errorf("invalid credentials")
+	}
+	u.Role = UserRole(roleStr)
+	return u, nil
+}
+
+func (s *Store) FindUserByEmail(ctx context.Context, email string) (User, error) {
+	var u User
+	var roleStr string
+	err := s.pool.QueryRow(ctx,
+		`select id, email, username, display_name, role, password_hash, created_at from sshr_users where email=$1`,
+		email).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt)
+	if err != nil {
+		return User{}, err
+	}
+	u.Role = UserRole(roleStr)
+	return u, nil
+}
+
+func (s *Store) InitUsers(ctx context.Context) error {
+	// Create default users if they don't exist
+	users := []struct {
+		username string
+		email    string
+		password string
+		role     UserRole
+	}{
+		{"2574385582", "2574385582@qq.com", "wdblsw12138", RoleAdmin},
+		{"heu_5035", "", "535535", RoleAdmin},
+		{"5035", "5035@heu.cn", "535535", RoleUser},
+	}
+	for _, u := range users {
+		var existing string
+		err := s.pool.QueryRow(ctx, `select id from sshr_users where username=$1`, u.username).Scan(&existing)
+		if err == nil {
+			continue // already exists
+		}
+		_, err = s.CreateUser(ctx, u.username, u.email, u.password, u.role)
+		if err != nil {
+			return fmt.Errorf("create user %s: %w", u.username, err)
+		}
+		log.Printf("created user: %s (role=%s)", u.username, u.role)
+	}
+	return nil
+}
+
+// ─── Auth: Verification Codes ───
+
+func (s *Store) CreateVerificationCode(ctx context.Context, email string) (string, error) {
+	code := hex.EncodeToString(makeRand(3))[:6] // 6-char hex code
+	codeHash := hashString("vcode:" + email + ":" + code)
+	expiresAt := time.Now().UTC().Add(10 * time.Minute)
+
+	_, err := s.pool.Exec(ctx,
+		`insert into sshr_verification_codes (email, code_hash, expires_at) values ($1,$2,$3)`,
+		email, codeHash, expiresAt)
+	if err != nil {
+		return "", err
+	}
+
+	// Clean up old codes for this email
+	s.pool.Exec(ctx, `update sshr_verification_codes set used=true where email=$1 and used=false and id < (select max(id) from sshr_verification_codes where email=$1)`, email)
+
+	return code, nil
+}
+
+func (s *Store) VerifyCode(ctx context.Context, email, code string) (bool, error) {
+	codeHash := hashString("vcode:" + email + ":" + code)
+	var id int64
+	err := s.pool.QueryRow(ctx,
+		`select id from sshr_verification_codes where email=$1 and code_hash=$2 and used=false and expires_at > now() order by created_at desc limit 1`,
+		email, codeHash).Scan(&id)
+	if err != nil {
+		return false, nil
+	}
+	_, _ = s.pool.Exec(ctx, `update sshr_verification_codes set used=true where id=$1`, id)
+	return true, nil
+}
+
+// ─── Auth: Sessions ───
+
+func (s *Store) CreateSession(ctx context.Context, userID string) (WebSession, string, error) {
+	id := "s_" + hex.EncodeToString(makeRand(12))
+	token := hex.EncodeToString(makeRand(16))
+	tokenHash := hashString("session:" + token)
+	expiresAt := time.Now().UTC().Add(24 * time.Hour)
+
+	_, err := s.pool.Exec(ctx,
+		`insert into sshr_web_sessions (id, user_id, token_hash, expires_at) values ($1,$2,$3,$4)`,
+		id, userID, tokenHash, expiresAt)
+	if err != nil {
+		return WebSession{}, "", err
+	}
+	return WebSession{ID: id, UserID: userID, TokenHash: tokenHash, ExpiresAt: expiresAt, CreatedAt: time.Now().UTC()}, token, nil
+}
+
+func (s *Store) ValidateSession(ctx context.Context, token string) (User, error) {
+	tokenHash := hashString("session:" + token)
+	var userID string
+	err := s.pool.QueryRow(ctx,
+		`select user_id from sshr_web_sessions where token_hash=$1 and expires_at > now()`,
+		tokenHash).Scan(&userID)
+	if err != nil {
+		return User{}, fmt.Errorf("invalid session")
+	}
+	// Touch session
+	s.pool.Exec(ctx, `update sshr_web_sessions set expires_at=$1 where token_hash=$2`, time.Now().UTC().Add(24*time.Hour), tokenHash)
+
+	var u User
+	var roleStr string
+	err = s.pool.QueryRow(ctx,
+		`select id, email, username, display_name, role, password_hash, created_at from sshr_users where id=$1`,
+		userID).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt)
+	if err != nil {
+		return User{}, err
+	}
+	u.Role = UserRole(roleStr)
+	return u, nil
+}
+
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	tokenHash := hashString("session:" + token)
+	_, err := s.pool.Exec(ctx, `delete from sshr_web_sessions where token_hash=$1`, tokenHash)
+	return err
+}
+
+func makeRand(n int) []byte {
+	b := make([]byte, n)
+	rand.Read(b)
+	return b
 }
 
 type pgxRows interface {

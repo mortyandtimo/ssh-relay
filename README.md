@@ -73,7 +73,8 @@ ssh -p 40001 root@tunnel.example.com
 - **反向隧道** — 被控端主动连接中继，无需公网 IP 或端口映射
 - **心跳监控** — 30s 心跳，90s 超时判定离线
 - **邮件告警** — 掉线自动发送邮件到配置的通知邮箱（5分钟冷却防刷）
-- **子域名 API** — `GET /api/machines` 查询所有机器及其转发状态
+- **Web 仪表盘** — 访问子域名即可查看所有机器状态和 SSH 命令
+- **登录认证** — 支持密码登录和邮箱验证码登录，防扫描
 - **证书集成** — 配合 cert-keeper 自动管理 SSL 证书
 
 ## 环境变量
@@ -120,7 +121,16 @@ GET  /api/ports                  # 全部端口状态
 GET  /api/ports/available        # 可用端口（前10个）
 GET  /api/settings               # 获取配置
 PUT  /api/settings               # 更新配置 {"notifyEmails":"a@x.com,b@x.com"}
+GET  /api/auth/me                # 当前用户信息
+POST /api/auth/login             # 密码登录 {"login":"用户名或邮箱","password":"密码"}
+POST /api/auth/send-code         # 发送验证码 {"email":"xxx@xxx.com"}
+POST /api/auth/verify-code       # 验证码登录 {"email":"xxx@xxx.com","code":"xxxxxx"}
+POST /api/auth/logout            # 退出登录
 ```
+
+## 用户管理
+
+首次部署时自动创建默认管理员账号，请登录后及时修改密码。详见 `apps/ssh-relay-api/internal/store/postgres.go` 中的 `InitUsers` 函数。
 
 ## 安装后配置
 

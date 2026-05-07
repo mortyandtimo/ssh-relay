@@ -73,6 +73,10 @@ func (s *Service) SendOfflineAlert(to []string, machineName, machineID string, l
 
 func sendMail(cfg Config, to, subject, body string) error {
 	addr := net.JoinHostPort(cfg.SMTPHost, cfg.SMTPPort)
+	return SendMail(cfg.SMTPHost, addr, cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPFrom, to, subject, body)
+}
+
+func SendMail(smtpHost, addr, username, password, from, to, subject, body string) error {
 	client, err := smtp.Dial(addr)
 	if err != nil {
 		return fmt.Errorf("smtp dial: %w", err)
@@ -80,16 +84,16 @@ func sendMail(cfg Config, to, subject, body string) error {
 	defer client.Close()
 
 	if ok, _ := client.Extension("STARTTLS"); ok {
-		if err := client.StartTLS(&tls.Config{ServerName: cfg.SMTPHost}); err != nil {
+		if err := client.StartTLS(&tls.Config{ServerName: smtpHost}); err != nil {
 			return fmt.Errorf("starttls: %w", err)
 		}
 	}
 	if ok, _ := client.Extension("AUTH"); ok {
-		if err := client.Auth(smtp.PlainAuth("", cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPHost)); err != nil {
+		if err := client.Auth(smtp.PlainAuth("", username, password, smtpHost)); err != nil {
 			return fmt.Errorf("auth: %w", err)
 		}
 	}
-	if err := client.Mail(cfg.SMTPFrom); err != nil {
+	if err := client.Mail(from); err != nil {
 		return err
 	}
 	if err := client.Rcpt(to); err != nil {
@@ -100,7 +104,7 @@ func sendMail(cfg Config, to, subject, body string) error {
 		return err
 	}
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
-		cfg.SMTPFrom, to, subject, body)
+		from, to, subject, body)
 	if _, err := w.Write([]byte(msg)); err != nil {
 		_ = w.Close()
 		return err

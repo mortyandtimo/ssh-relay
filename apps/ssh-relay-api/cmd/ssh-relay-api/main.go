@@ -33,6 +33,9 @@ func main() {
 	if err := st.EnsureSchema(ctx); err != nil {
 		log.Fatalf("ensure schema: %v", err)
 	}
+	if err := st.InitUsers(ctx); err != nil {
+		log.Fatalf("init users: %v", err)
+	}
 
 	notifierSvc := notifier.New(notifier.Config{
 		SMTPHost:     strings.TrimSpace(os.Getenv("SSHR_SMTP_HOST")),
