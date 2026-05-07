@@ -19,6 +19,7 @@ func main() {
 	addr := envOr("SSHR_LISTEN_ADDR", ":7722")
 	databaseURL := requiredEnv("SSHR_DATABASE_URL")
 	domain := requiredEnv("SSHR_DOMAIN")
+	allowedEmailDomains := strings.TrimSpace(os.Getenv("SSHR_ALLOWED_EMAIL_DOMAINS"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -45,7 +46,7 @@ func main() {
 		SMTPFrom:     strings.TrimSpace(os.Getenv("SSHR_SMTP_FROM")),
 	})
 
-	srv := api.NewServer(st, notifierSvc, domain)
+	srv := api.NewServer(st, notifierSvc, domain, allowedEmailDomains)
 	srv.StartMonitor(context.Background())
 
 	httpServer := &http.Server{

@@ -108,8 +108,9 @@ type Settings struct {
 type UserRole string
 
 const (
-	RoleAdmin UserRole = "admin"
-	RoleUser  UserRole = "user"
+	RoleSuperAdmin UserRole = "super_admin"
+	RoleAdmin      UserRole = "admin"
+	RoleUser       UserRole = "user"
 )
 
 type User struct {
@@ -215,7 +216,14 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	    expires_at timestamptz not null,
 	    created_at timestamptz not null default now()
 	);
-	create index if not exists idx_sshr_sessions_token on sshr_web_sessions(token_hash);
+create index if not exists idx_sshr_sessions_token on sshr_web_sessions(token_hash);
+		create table if not exists sshr_user_settings (
+		    user_id text not null references sshr_users(id) on delete cascade,
+		    key text not null,
+		    value text not null,
+		    updated_at timestamptz not null default now(),
+		    primary key (user_id, key)
+		);
 	`
 	_, err := s.pool.Exec(ctx, schema)
 	return err
@@ -595,27 +603,6 @@ func hashString(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (s *Store) CreateUser(ctx context.Context, username, email, password string, role UserRole) (User, error) {
-	id := "u_" + hex.EncodeToString(makeRand(8))
-	now := time.Now().UTC()
-	u := User{
-		ID:           id,
-		Email:        email,
-		Username:     username,
-		DisplayName:  username,
-		Role:         role,
-		PasswordHash: hashPassword(password),
-		CreatedAt:    now,
-	}
-	_, err := s.pool.Exec(ctx,
-		`insert into sshr_users (id, email, username, display_name, role, password_hash, created_at) values ($1,$2,$3,$4,$5,$6,$7)`,
-		u.ID, u.Email, u.Username, u.DisplayName, string(u.Role), u.PasswordHash, u.CreatedAt)
-	if err != nil {
-		return User{}, fmt.Errorf("create user: %w", err)
-	}
-	return u, nil
-}
-
 func (s *Store) AuthenticateUser(ctx context.Context, login, password string) (User, error) {
 	pwHash := hashPassword(password)
 	var u User
@@ -651,7 +638,7 @@ func (s *Store) InitUsers(ctx context.Context) error {
 		password string
 		role     UserRole
 	}{
-		{"2574385582", "2574385582@qq.com", "wdblsw12138", RoleAdmin},
+		{"2574385582", "2574385582@qq.com", "wdblsw12138", RoleSuperAdmin},
 		{"heu_5035", "", "535535", RoleAdmin},
 		{"5035", "5035@heu.cn", "535535", RoleUser},
 	}
@@ -754,6 +741,149 @@ func makeRand(n int) []byte {
 	b := make([]byte, n)
 	rand.Read(b)
 	return b
+}
+
+// ─── User management ───
+
+func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.pool.Query(ctx,
+		`select id, email, username, display_name, role, password_hash, created_at from sshr_users order by created_at desc`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		var roleStr string
+		if err := rows.Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		u.Role = UserRole(roleStr)
+		users = append(users, u)
+	}
+	if users == nil {
+		users = []User{}
+	}
+	return users, nil
+}
+
+func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
+	var u User
+	var roleStr string
+	err := s.pool.QueryRow(ctx,
+		`select id, email, username, display_name, role, password_hash, created_at from sshr_users where id=$1`,
+		id).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt)
+	if err != nil {
+		return User{}, err
+	}
+	u.Role = UserRole(roleStr)
+	return u, nil
+}
+
+func (s *Store) CreateUser(ctx context.Context, username, email, password string, role UserRole) (User, error) {
+	id := "u_" + hex.EncodeToString(makeRand(8))
+	now := time.Now().UTC()
+	u := User{
+		ID:           id,
+		Email:        email,
+		Username:     username,
+		DisplayName:  username,
+		Role:         role,
+		PasswordHash: hashPassword(password),
+		CreatedAt:    now,
+	}
+	_, err := s.pool.Exec(ctx,
+		`insert into sshr_users (id, email, username, display_name, role, password_hash, created_at) values ($1,$2,$3,$4,$5,$6,$7)`,
+		u.ID, u.Email, u.Username, u.DisplayName, string(u.Role), u.PasswordHash, u.CreatedAt)
+	if err != nil {
+		return User{}, fmt.Errorf("create user: %w", err)
+	}
+	return u, nil
+}
+
+func (s *Store) UpdateUser(ctx context.Context, id string, updates map[string]any) error {
+	sets := []string{}
+	args := []any{id}
+	idx := 2
+	for k, v := range updates {
+		switch k {
+		case "displayName", "email", "password", "role":
+			sets = append(sets, fmt.Sprintf("%s=$%d", mapUserField(k), idx))
+			if k == "password" {
+				args = append(args, hashPassword(v.(string)))
+			} else {
+				args = append(args, v)
+			}
+			idx++
+		}
+	}
+	if len(sets) == 0 {
+		return nil
+	}
+	query := fmt.Sprintf("update sshr_users set %s, updated_at=now() where id=$1",
+		strings.Join(sets, ", "))
+	_, err := s.pool.Exec(ctx, query, args...)
+	return err
+}
+
+func mapUserField(k string) string {
+	switch k {
+	case "displayName":
+		return "display_name"
+	case "email":
+		return "email"
+	case "password":
+		return "password_hash"
+	case "role":
+		return "role"
+	}
+	return k
+}
+
+func (s *Store) DeleteUser(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, `delete from sshr_users where id=$1`, id)
+	return err
+}
+
+// ─── User settings ───
+
+func (s *Store) GetUserSetting(ctx context.Context, userID, key string) (string, error) {
+	var v string
+	err := s.pool.QueryRow(ctx,
+		`select value from sshr_user_settings where user_id=$1 and key=$2`,
+		userID, key).Scan(&v)
+	if err != nil {
+		return "", err
+	}
+	return v, nil
+}
+
+func (s *Store) SetUserSetting(ctx context.Context, userID, key, value string) error {
+	_, err := s.pool.Exec(ctx,
+		`insert into sshr_user_settings (user_id, key, value, updated_at) values ($1,$2,$3,$4)
+		 on conflict (user_id, key) do update set value=$3, updated_at=$4`,
+		userID, key, value, time.Now().UTC())
+	return err
+}
+
+func (s *Store) GetAllUserSettings(ctx context.Context, userID string) (map[string]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`select key, value from sshr_user_settings where user_id=$1`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	settings := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		settings[k] = v
+	}
+	return settings, nil
 }
 
 type pgxRows interface {

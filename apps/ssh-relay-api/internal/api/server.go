@@ -20,32 +20,34 @@ const offlineThreshold = 90 * time.Second
 const monitorInterval = 30 * time.Second
 
 type Server struct {
-	store       *store.Store
-	notifier    *notifier.Service
-	relay       *relay.Manager
-	domain      string
-	portStart   int
-	portEnd     int
-	mux         *http.ServeMux
-	httpClient  *http.Client
-	startedAt   time.Time
-	stopMonitor context.CancelFunc
+	store               *store.Store
+	notifier            *notifier.Service
+	relay               *relay.Manager
+	domain              string
+	allowedEmailDomains string
+	portStart           int
+	portEnd             int
+	mux                 *http.ServeMux
+	httpClient          *http.Client
+	startedAt           time.Time
+	stopMonitor         context.CancelFunc
 }
 
-func NewServer(s *store.Store, n *notifier.Service, domain string) *Server {
+func NewServer(s *store.Store, n *notifier.Service, domain, allowedEmailDomains string) *Server {
 	portStart, _ := strconv.Atoi(envOr("SSHR_PORT_START", "40000"))
 	portEnd, _ := strconv.Atoi(envOr("SSHR_PORT_END", "40999"))
 
 	srv := &Server{
-		store:      s,
-		notifier:   n,
-		relay:      relay.NewManager(s, portStart, portEnd, 4),
-		domain:     domain,
-		portStart:  portStart,
-		portEnd:    portEnd,
-		mux:        http.NewServeMux(),
-		httpClient: &http.Client{Timeout: 5 * time.Second},
-		startedAt:  time.Now().UTC(),
+		store:               s,
+		notifier:            n,
+		relay:               relay.NewManager(s, portStart, portEnd, 4),
+		domain:              domain,
+		allowedEmailDomains: allowedEmailDomains,
+		portStart:           portStart,
+		portEnd:             portEnd,
+		mux:                 http.NewServeMux(),
+		httpClient:          &http.Client{Timeout: 5 * time.Second},
+		startedAt:           time.Now().UTC(),
 	}
 	srv.routes()
 	return srv
@@ -91,6 +93,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/settings", s.handleSettings)
 	s.mux.HandleFunc("/api/events", s.handleEvents)
 	s.mux.HandleFunc("/api/relay/reverse", s.relay.HandleReverseConnect)
+	s.mux.HandleFunc("/api/users", s.handleUsers)
+	s.mux.HandleFunc("/api/users/", s.handleUserByID)
+	s.mux.HandleFunc("/api/me/password", s.handleChangePassword)
 	s.mux.HandleFunc("/", s.handleDashboard)
 }
 
@@ -592,6 +597,295 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// ─── Email domain check ───
+
+func (s *Server) isEmailAllowed(email string) bool {
+	if s.allowedEmailDomains == "" {
+		return true
+	}
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	for _, d := range strings.Split(s.allowedEmailDomains, ",") {
+		if strings.TrimSpace(d) == parts[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// ─── Role helpers ───
+
+func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, roles ...store.UserRole) *store.User {
+	user := s.sessionUser(r)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return nil
+	}
+	for _, role := range roles {
+		if user.Role == role || user.Role == store.RoleSuperAdmin {
+			return user
+		}
+	}
+	writeError(w, http.StatusForbidden, "insufficient permissions")
+	return nil
+}
+
+func (s *Server) userCanManage(actor, target *store.User) bool {
+	if actor.Role == store.RoleSuperAdmin {
+		return true // super_admin can manage anyone
+	}
+	if actor.Role == store.RoleAdmin && target.Role == store.RoleUser {
+		return true
+	}
+	return false
+}
+
+// ─── Port visibility for users ───
+
+func (s *Server) userPortsVisible(ctx context.Context, userID string) bool {
+	v, err := s.store.GetUserSetting(ctx, userID, "ports_visible")
+	if err != nil {
+		return true // default visible
+	}
+	return v != "false"
+}
+
+// ─── User management ───
+
+func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
+	actor := s.requireRole(w, r, store.RoleSuperAdmin, store.RoleAdmin)
+	if actor == nil {
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		users, err := s.store.ListUsers(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// Filter by role hierarchy
+		var filtered []store.User
+		for _, u := range users {
+			if s.userCanManage(actor, &u) {
+				filtered = append(filtered, u)
+			}
+		}
+		if filtered == nil {
+			filtered = []store.User{}
+		}
+		// Attach user settings
+		type userWithSettings struct {
+			store.User
+			Settings map[string]string `json:"settings"`
+		}
+		var result []userWithSettings
+		for _, u := range filtered {
+			u.PasswordHash = "" // never leak password hash
+			settings, _ := s.store.GetAllUserSettings(r.Context(), u.ID)
+			result = append(result, userWithSettings{User: u, Settings: settings})
+		}
+		if result == nil {
+			result = []userWithSettings{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": result})
+
+	case http.MethodPost:
+		var req struct {
+			Username string        `json:"username"`
+			Email    string        `json:"email"`
+			Password string        `json:"password"`
+			Role     store.UserRole `json:"role"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Username == "" || req.Password == "" {
+			writeError(w, http.StatusBadRequest, "username and password are required")
+			return
+		}
+		if req.Role == "" {
+			req.Role = store.RoleUser
+		}
+
+		// Check role permission
+		if req.Role == store.RoleAdmin && actor.Role != store.RoleSuperAdmin {
+			writeError(w, http.StatusForbidden, "only super_admin can create admin accounts")
+			return
+		}
+		if req.Role == store.RoleSuperAdmin {
+			writeError(w, http.StatusForbidden, "cannot create super_admin accounts")
+			return
+		}
+
+		// Validate email domain
+		if req.Email != "" && !s.isEmailAllowed(req.Email) {
+			writeError(w, http.StatusForbidden, "email domain not allowed")
+			return
+		}
+
+		u, err := s.store.CreateUser(r.Context(), req.Username, req.Email, req.Password, req.Role)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if strings.Contains(err.Error(), "create user") {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		log.Printf("user created: id=%s username=%s role=%s by=%s", u.ID, u.Username, u.Role, actor.Username)
+		writeJSON(w, http.StatusCreated, u)
+
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+	}
+}
+
+func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
+	actor := s.requireRole(w, r, store.RoleSuperAdmin, store.RoleAdmin)
+	if actor == nil {
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/api/users/")
+	parts := strings.Split(path, "/")
+	id := parts[0]
+
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "user id is required")
+		return
+	}
+
+	// /api/users/{id}/settings
+	if len(parts) == 2 && parts[1] == "settings" {
+		s.handleUserSettings(w, r, actor, id)
+		return
+	}
+
+	target, err := s.store.GetUser(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if !s.userCanManage(actor, &target) {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		target.PasswordHash = ""
+		settings, _ := s.store.GetAllUserSettings(r.Context(), id)
+		writeJSON(w, http.StatusOK, map[string]any{"user": target, "settings": settings})
+
+	case http.MethodPut:
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+		// Only super_admin can change role
+		if _, ok := req["role"]; ok && actor.Role != store.RoleSuperAdmin {
+			writeError(w, http.StatusForbidden, "only super_admin can change role")
+			return
+		}
+		if email, ok := req["email"].(string); ok && email != "" && !s.isEmailAllowed(email) {
+			writeError(w, http.StatusForbidden, "email domain not allowed")
+			return
+		}
+		if err := s.store.UpdateUser(r.Context(), id, req); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		updated, _ := s.store.GetUser(r.Context(), id)
+		updated.PasswordHash = ""
+		log.Printf("user updated: id=%s username=%s by=%s", id, updated.Username, actor.Username)
+		writeJSON(w, http.StatusOK, updated)
+
+	case http.MethodDelete:
+		if target.ID == actor.ID {
+			writeError(w, http.StatusBadRequest, "cannot delete yourself")
+			return
+		}
+		if err := s.store.DeleteUser(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		log.Printf("user deleted: id=%s username=%s by=%s", id, target.Username, actor.Username)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "id": id})
+
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut+", "+http.MethodDelete)
+	}
+}
+
+func (s *Server) handleUserSettings(w http.ResponseWriter, r *http.Request, actor *store.User, targetID string) {
+	target, err := s.store.GetUser(r.Context(), targetID)
+	if err != nil || !s.userCanManage(actor, &target) {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		settings, _ := s.store.GetAllUserSettings(r.Context(), targetID)
+		writeJSON(w, http.StatusOK, settings)
+
+	case http.MethodPut:
+		var req map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+		for k, v := range req {
+			if k == "ports_visible" || k == "role" {
+				if err := s.store.SetUserSetting(r.Context(), targetID, k, v); err != nil {
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+			}
+		}
+		settings, _ := s.store.GetAllUserSettings(r.Context(), targetID)
+		writeJSON(w, http.StatusOK, settings)
+
+	default:
+		writeMethodNotAllowed(w, http.MethodGet+", "+http.MethodPut)
+	}
+}
+
+// ─── Change own password ───
+
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeMethodNotAllowed(w, http.MethodPut)
+		return
+	}
+	user := s.sessionUser(r)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	var req struct {
+		OldPassword string `json:"oldPassword"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OldPassword == "" || req.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "oldPassword and newPassword are required")
+		return
+	}
+	// Verify old password
+	_, err := s.store.AuthenticateUser(r.Context(), user.Username, req.OldPassword)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "current password is incorrect")
+		return
+	}
+	if err := s.store.UpdateUser(r.Context(), user.ID, map[string]any{"password": req.NewPassword}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "password_changed"})
+}
+
 // ─── Dashboard ───
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -637,6 +931,12 @@ func (s *Server) handleSendCode(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
 		writeError(w, http.StatusBadRequest, "email is required")
+		return
+	}
+
+	// Check email domain is allowed
+	if !s.isEmailAllowed(req.Email) {
+		writeError(w, http.StatusForbidden, "email domain not allowed")
 		return
 	}
 
@@ -786,11 +1086,13 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
+	settings, _ := s.store.GetAllUserSettings(r.Context(), user.ID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username":    user.Username,
 		"displayName": user.DisplayName,
 		"email":       user.Email,
 		"role":        user.Role,
+		"settings":    settings,
 	})
 }
 
@@ -971,6 +1273,37 @@ const dashboardHTML = `<!DOCTYPE html>
   .install-box code { background:#0d1117; padding:4px 10px; border-radius:4px; font-size:12px; color:var(--green); display:block; margin:6px 0; overflow-x:auto; white-space:pre-wrap; word-break:break-all; }
   .install-box p { color:var(--muted); font-size:13px; margin:8px 0; }
   @media(max-width:640px){ .summary{flex-direction:column;} table{font-size:11px;} td code{font-size:10px;padding:2px 4px;} }
+  .role-badge { font-size:10px; padding:2px 8px; border-radius:10px; font-weight:600; text-transform:uppercase; }
+  .role-badge.super_admin { background:#da3633; color:#fff; }
+  .role-badge.admin { background:#d2991d; color:#000; }
+  .role-badge.user { background:#30363d; color:var(--muted); }
+  .section-title { font-size:15px; font-weight:600; margin:24px 0 12px; display:flex; align-items:center; gap:8px; }
+  .section-title .count { color:var(--muted); font-size:12px; font-weight:400; }
+  .btn-sm { padding:4px 12px; border-radius:4px; border:none; cursor:pointer; font-size:11px; font-weight:600; }
+  .btn-green { background:#238636; color:#fff; }
+  .btn-red { background:#da3633; color:#fff; }
+  .btn-gray { background:var(--border); color:var(--text); }
+  .btn-blue { background:#1f6feb; color:#fff; }
+  .btn-sm:hover { opacity:0.85; }
+  .toggle-track { width:36px; height:20px; background:var(--border); border-radius:10px; cursor:pointer; position:relative; display:inline-block; vertical-align:middle; }
+  .toggle-track.on { background:#238636; }
+  .toggle-track .knob { width:16px; height:16px; background:#fff; border-radius:50%; position:absolute; top:2px; left:2px; transition:transform 0.15s; }
+  .toggle-track.on .knob { transform:translateX(16px); }
+  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center; }
+  .modal-overlay.active { display:flex; }
+  .modal-box { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:28px; width:400px; max-width:90vw; }
+  .modal-box h3 { font-size:17px; margin-bottom:18px; }
+  .modal-box .field { margin-bottom:14px; }
+  .modal-box .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .modal-box .field input, .modal-box .field select { width:100%; padding:8px 12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:13px; outline:none; }
+  .modal-box .field input:focus, .modal-box .field select:focus { border-color:var(--blue); }
+  .modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:20px; }
+  .modal-box .msg { font-size:12px; margin-top:8px; display:none; }
+  .modal-box .msg.error { color:var(--red); }
+  .modal-box .msg.success { color:var(--green); }
+  .pass-box { display:none; margin-top:20px; padding:16px; background:var(--bg); border:1px solid var(--border); border-radius:8px; }
+  .pass-box h4 { font-size:13px; color:var(--muted); margin-bottom:8px; }
+  .pass-box input { background:var(--bg); border:1px solid var(--border); color:var(--green); padding:8px; width:100%; border-radius:4px; font-size:14px; }
 </style>
 </head>
 <body>
@@ -1000,8 +1333,26 @@ const dashboardHTML = `<!DOCTYPE html>
 </div>
 <script>
 var host = window.location.host;
+var currentUser = {};
+
 function load(){
-  fetch('/api/auth/me').then(function(r){ return r.json(); }).then(function(d){ document.getElementById('login-user').textContent = d.displayName||d.username; }).catch(function(){});
+  fetch('/api/auth/me').then(function(r){ return r.json(); }).then(function(d){
+    currentUser = d;
+    var badge='';
+    if(d.role==='super_admin') badge=' <span class="role-badge super_admin">Super Admin</span>';
+    else if(d.role==='admin') badge=' <span class="role-badge admin">Admin</span>';
+    else badge=' <span class="role-badge user">User</span>';
+    document.getElementById('login-user').innerHTML = (d.displayName||d.username) + badge;
+    // Show/hide admin panel
+    if(d.role==='super_admin' || d.role==='admin'){
+      document.getElementById('admin-panel').style.display='block';
+      document.getElementById('mu-role').parentElement.style.display=(d.role==='super_admin')?'block':'none';
+      loadUsers();
+    }
+    // Users can see their own ports_visible setting
+    var hidePorts = d.role==='user' && d.settings && d.settings.ports_visible==='false';
+    loadMachines(hidePorts);
+  }).catch(function(){});
   Promise.all([
     fetch('/api/machines').then(function(r){return r.json();}),
     fetch('/api/forwards').then(function(r){return r.json();})
@@ -1049,6 +1400,171 @@ function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.
 function timeAgo(ts){ var s=(Date.now()-new Date(ts).getTime())/1000; if(s<60) return Math.floor(s)+'秒前'; if(s<3600) return Math.floor(s/60)+'分钟前'; if(s<86400) return Math.floor(s/3600)+'小时前'; return Math.floor(s/86400)+'天前'; }
 function copy(btn,text){ navigator.clipboard.writeText(text).then(function(){ btn.textContent='已复制!'; setTimeout(function(){ btn.textContent='复制'; },1500); }); }
 function logout(){ fetch('/api/auth/logout',{method:'POST'}).then(function(){ location.reload(); }); }
+
+// ─── User management JS ───
+
+function loadUsers(){
+  fetch('/api/users').then(function(r){ return r.json(); }).then(function(d){
+    var items = d.items;
+    document.getElementById('user-count').textContent = '('+items.length+'个用户)';
+    var html = '';
+    if(items.length===0){
+      html='<div style="color:var(--muted);font-size:13px;text-align:center;padding:12px">暂无用户</div>';
+    }else{
+      html+='<table><thead><tr><th>用户名</th><th>邮箱</th><th>角色</th><th>端口可见</th><th>操作</th></tr></thead><tbody>';
+      items.forEach(function(u){
+        var roleLabel = u.role==='super_admin'?'Super Admin':(u.role==='admin'?'Admin':'User');
+        var portsOn = u.settings && u.settings.ports_visible!=='false';
+        html+='<tr>';
+        html+='<td>'+esc(u.username)+'</td>';
+        html+='<td style="color:var(--muted)">'+esc(u.email||'-')+'</td>';
+        html+='<td><span class="role-badge '+esc(u.role)+'">'+roleLabel+'</span></td>';
+        if(u.role==='user'){
+          html+='<td><div class="toggle-track'+(portsOn?' on':'')+'" onclick="togglePorts(\''+u.id+'\',this)"><div class="knob"></div></div></td>';
+        }else{
+          html+='<td style="color:var(--muted);font-size:11px">-</td>';
+        }
+        html+='<td>';
+        html+='<button class="btn-sm btn-blue" onclick="editUser(\''+u.id+'\',\''+escJs(u.username)+'\',\''+escJs(u.email||'')+'\',\''+escJs(u.role)+'\')">编辑</button> ';
+        html+='<button class="btn-sm btn-red" onclick="deleteUser(\''+u.id+'\',\''+escJs(u.username)+'\')">删除</button>';
+        html+='</td></tr>';
+      });
+      html+='</tbody></table>';
+    }
+    document.getElementById('user-list').innerHTML = html;
+  }).catch(function(e){ console.error(e); });
+}
+
+function escJs(s){ return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"'); }
+
+function openUserModal(){
+  document.getElementById('modal-title').textContent='创建用户';
+  document.getElementById('mu-username').value='';
+  document.getElementById('mu-email').value='';
+  document.getElementById('mu-password').value='';
+  document.getElementById('mu-password').parentElement.style.display='block';
+  document.getElementById('mu-role').value='user';
+  document.getElementById('mu-id').value='';
+  document.getElementById('mu-submit').textContent='创建';
+  document.getElementById('mu-err').style.display='none';
+  document.getElementById('mu-ok').style.display='none';
+  document.getElementById('new-pwd-box').style.display='none';
+  document.getElementById('mu-edit-role').style.display='none';
+  // Show role selector only for super_admin
+  if(currentUser.role==='super_admin'){
+    document.getElementById('mu-role').parentElement.style.display='block';
+  }else{
+    document.getElementById('mu-role').parentElement.style.display='none';
+  }
+  document.getElementById('user-modal').classList.add('active');
+}
+
+function editUser(id, username, email, role){
+  document.getElementById('modal-title').textContent='编辑用户: '+username;
+  document.getElementById('mu-username').value=username;
+  document.getElementById('mu-email').value=email;
+  document.getElementById('mu-password').value='';
+  document.getElementById('mu-password').parentElement.style.display='block';
+  document.getElementById('mu-role').parentElement.style.display='none';
+  document.getElementById('mu-id').value=id;
+  document.getElementById('mu-submit').textContent='保存';
+  document.getElementById('mu-err').style.display='none';
+  document.getElementById('mu-ok').style.display='none';
+  document.getElementById('new-pwd-box').style.display='none';
+  // Show role edit for super_admin
+  if(currentUser.role==='super_admin' && role!=='super_admin'){
+    document.getElementById('mu-edit-role').style.display='block';
+    document.getElementById('mu-newrole').value='';
+  }else{
+    document.getElementById('mu-edit-role').style.display='none';
+  }
+  document.getElementById('user-modal').classList.add('active');
+}
+
+function closeUserModal(){
+  document.getElementById('user-modal').classList.remove('active');
+  document.getElementById('new-pwd-box').style.display='none';
+}
+
+function saveUser(){
+  var id = document.getElementById('mu-id').value;
+  var username = document.getElementById('mu-username').value.trim();
+  var email = document.getElementById('mu-email').value.trim();
+  var password = document.getElementById('mu-password').value;
+  var role = document.getElementById('mu-role').value;
+  var errEl = document.getElementById('mu-err');
+  var okEl = document.getElementById('mu-ok');
+  errEl.style.display='none';
+  okEl.style.display='none';
+  document.getElementById('new-pwd-box').style.display='none';
+
+  if(!username){ errEl.textContent='用户名不能为空'; errEl.style.display='block'; return; }
+
+  if(id){
+    // Update
+    var body = {};
+    if(email) body.email = email;
+    if(password) body.password = password;
+    if(currentUser.role==='super_admin'){
+      var nr = document.getElementById('mu-newrole').value;
+      if(nr) body.role = nr;
+    }
+    fetch('/api/users/'+id, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})
+    .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
+    .then(function(r){
+      if(r.ok){
+        okEl.textContent='保存成功';
+        okEl.style.display='block';
+        if(password){
+          document.getElementById('new-pwd-value').value=password;
+          document.getElementById('new-pwd-box').style.display='block';
+        }
+        loadUsers();
+      }else{
+        errEl.textContent=r.d.error||'保存失败';
+        errEl.style.display='block';
+      }
+    });
+  }else{
+    // Create
+    if(!password){ errEl.textContent='密码不能为空'; errEl.style.display='block'; return; }
+    fetch('/api/users', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:username, email:email, password:password, role:role})})
+    .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
+    .then(function(r){
+      if(r.ok){
+        okEl.textContent='创建成功';
+        okEl.style.display='block';
+        document.getElementById('new-pwd-value').value=password;
+        document.getElementById('new-pwd-box').style.display='block';
+        loadUsers();
+      }else{
+        errEl.textContent=r.d.error||'创建失败';
+        errEl.style.display='block';
+      }
+    });
+  }
+}
+
+function deleteUser(id, name){
+  if(!confirm('确定要删除用户 \''+name+'\' 吗？此操作不可恢复。')) return;
+  fetch('/api/users/'+id, {method:'DELETE'})
+  .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, d:d}; }); })
+  .then(function(r){
+    if(r.ok){ loadUsers(); }
+    else { alert(r.d.error||'删除失败'); }
+  });
+}
+
+function togglePorts(userId, track){
+  var isOn = track.classList.contains('on');
+  var newVal = isOn?'false':'true';
+  fetch('/api/users/'+userId+'/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ports_visible:newVal})})
+  .then(function(r){ return r.json(); })
+  .then(function(){
+    if(newVal==='true'){ track.classList.add('on'); }else{ track.classList.remove('on'); }
+  });
+}
+
 load();
 setInterval(load, 30000);
 </script>
