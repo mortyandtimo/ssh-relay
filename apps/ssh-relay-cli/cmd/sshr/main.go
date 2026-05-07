@@ -83,6 +83,8 @@ func main() {
 		cmdDelete()
 	case "ssh":
 		cmdSSH()
+	case "uninstall":
+		cmdUninstall()
 	case "version":
 		fmt.Println("sshr version", version)
 	default:
@@ -103,15 +105,22 @@ Commands:
   sshr list         List all forwards for this machine
   sshr delete       Delete a forward by port number
   sshr ssh <name>   SSH into a registered machine by name
+  sshr uninstall     Remove systemd service and local config
   sshr version      Show version
 
-Environment:
-  SSHR_SERVER       Relay server URL (required, e.g. https://tunnel.example.com)
-  SSHR_MACHINE_ID   Machine ID (auto-loaded from config file)`)
+Config file: ~/.config/sshr/machine.json
+Override env: SSHR_SERVER, SSHR_MACHINE_ID`)
 }
 
 func serverURL() string {
-	return envOr("SSHR_SERVER", "")
+	if s := os.Getenv("SSHR_SERVER"); s != "" {
+		return s
+	}
+	c, err := loadConfig()
+	if err != nil {
+		return ""
+	}
+	return c.Server
 }
 
 func relayHost() string {
@@ -137,6 +146,7 @@ func configFile() string {
 type configData struct {
 	MachineID string `json:"machineId"`
 	Name      string `json:"name"`
+	Server    string `json:"server"`
 }
 
 func loadConfig() (configData, error) {
@@ -224,7 +234,7 @@ func cmdRegister() {
 		log.Fatalf("decode response: %v", err)
 	}
 
-	if err := saveConfig(configData{MachineID: m.ID, Name: m.Name}); err != nil {
+	if err := saveConfig(configData{MachineID: m.ID, Name: m.Name, Server: server}); err != nil {
 		log.Fatalf("save config: %v", err)
 	}
 
@@ -793,6 +803,37 @@ func cmdSSH() {
 	if err := cmd.Run(); err != nil {
 		os.Exit(cmd.ProcessState.ExitCode())
 	}
+}
+
+// ─── uninstall ───
+
+func cmdUninstall() {
+	fmt.Println("This will remove sshr systemd service and configuration.")
+	fmt.Print("Continue? [y/N]: ")
+	var answer string
+	fmt.Scanln(&answer)
+	if answer != "y" && answer != "Y" {
+		fmt.Println("Cancelled.")
+		return
+	}
+
+	// Stop and disable systemd user service
+	exec.Command("systemctl", "--user", "stop", "sshrdaemon").Run()
+	exec.Command("systemctl", "--user", "disable", "sshrdaemon").Run()
+	os.Remove(os.ExpandEnv("$HOME/.config/systemd/user/sshrdaemon.service"))
+	exec.Command("systemctl", "--user", "daemon-reload").Run()
+	fmt.Println("systemd service removed.")
+
+	// Remove config
+	os.RemoveAll(configDir())
+	fmt.Println("Configuration removed.")
+
+	// Remove binary
+	binPath, _ := exec.LookPath("sshr")
+	if binPath != "" {
+		fmt.Printf("To remove the binary: sudo rm %s\n", binPath)
+	}
+	fmt.Println("Uninstall complete.")
 }
 
 // ─── helpers ───
