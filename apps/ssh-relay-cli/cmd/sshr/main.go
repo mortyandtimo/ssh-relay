@@ -590,14 +590,15 @@ func (c *bufConn) Read(p []byte) (int, error) {
 }
 
 func handleProxyCommands(ctx context.Context, conn net.Conn) {
+	reader := bufio.NewReader(conn)
+
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		conn.SetReadDeadline(time.Now().Add(keepaliveInterval * 2))
 
-		// Read SSHR-PROXY header
-		header, err := bufio.NewReader(conn).ReadString('\n')
+		header, err := reader.ReadString('\n')
 		if err != nil {
 			return
 		}
@@ -611,7 +612,7 @@ func handleProxyCommands(ctx context.Context, conn net.Conn) {
 		fmt.Sscanf(strings.TrimPrefix(header, "SSHR-PROXY "), "%d", &bodyLen)
 
 		body := make([]byte, bodyLen)
-		if _, err := io.ReadFull(conn, body); err != nil {
+		if _, err := io.ReadFull(reader, body); err != nil {
 			return
 		}
 
@@ -623,21 +624,18 @@ func handleProxyCommands(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		go proxyToLocal(ctx, conn, cmd.TargetHost, cmd.TargetPort)
-	}
-}
+		target, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", cmd.TargetHost, cmd.TargetPort), 10*time.Second)
+		if err != nil {
+			return
+		}
 
-func proxyToLocal(ctx context.Context, relay net.Conn, targetHost string, targetPort int) {
-	target, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", targetHost, targetPort), 10*time.Second)
-	if err != nil {
+		// Full duplex proxy - blocks until either side closes
+		errCh := make(chan error, 2)
+		go func() { _, e := io.Copy(target, reader); errCh <- e; target.Close() }()
+		go func() { _, e := io.Copy(conn, target); errCh <- e; conn.Close() }()
+		<-errCh
 		return
 	}
-	defer target.Close()
-
-	errCh := make(chan error, 2)
-	go func() { _, e := io.Copy(target, relay); errCh <- e }()
-	go func() { _, e := io.Copy(relay, target); errCh <- e }()
-	<-errCh
 }
 
 const keepaliveInterval = 30 * time.Second
