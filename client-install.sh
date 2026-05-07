@@ -12,7 +12,12 @@ warn(){ echo -e "  ${YELLOW}[WARN]${NC} $*"; }
 err(){ echo -e "  ${RED}[ERR]${NC} $*"; exit 1; }
 ask(){ local def="$2"; [[ -n "$def" ]] && def=" [$def]"; read -rep "  $1$def: " val; echo "${val:-$2}"; }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Handle piped execution (curl | bash) - BASH_SOURCE is unbound in that case
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    SCRIPT_DIR="$(pwd)"
+fi
 SSHR_BIN="$SCRIPT_DIR/sshr"
 SSHR_INSTALL="/usr/local/bin/sshr"
 CONFIG_DIR="$HOME/.config/sshr"
@@ -45,10 +50,12 @@ if [[ -f "$SSHR_BIN" ]]; then
 elif command -v sshr &>/dev/null; then
     ok "sshr 已存在: $(which sshr)"
 else
-    warn "未找到本地 sshr，尝试下载..."
-    curl -fsSL "https://github.com/mortyandtimo/ssh-relay/releases/latest/download/sshr-linux-amd64" -o /tmp/sshr 2>/dev/null || {
-        warn "下载失败，请将 sshr 放到 $SCRIPT_DIR 后重试"
-        exit 1
+    warn "未找到本地 sshr，正在从 GitHub 下载..."
+    curl -fsSL "https://raw.githubusercontent.com/mortyandtimo/ssh-relay/main/sshr" -o /tmp/sshr || {
+        warn "下载失败。请检查网络连接，或手动安装:"
+        warn "  git clone https://github.com/mortyandtimo/ssh-relay.git"
+        warn "  cd ssh-relay && go build -o sshr ./apps/ssh-relay-cli/cmd/sshr/"
+        err "无法获取 sshr 二进制"
     }
     sudo install -m 0755 /tmp/sshr "$SSHR_INSTALL"
     ok "sshr 已下载并安装"
