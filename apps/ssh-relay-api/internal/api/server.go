@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -599,6 +601,12 @@ func envOr(key, fallback string) string {
 
 // ─── Email domain check ───
 
+func randomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)[:n]
+}
+
 func (s *Server) isEmailAllowed(email string) bool {
 	if s.allowedEmailDomains == "" {
 		return true
@@ -940,7 +948,22 @@ func (s *Server) handleSendCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check user exists
+	// Allowed domains: auto-register, no need for pre-existing account
+	if s.isEmailAllowed(req.Email) {
+		code, err := s.store.CreateVerificationCode(r.Context(), req.Email)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create code")
+			return
+		}
+		if err := sendVerificationEmail(s.domain, req.Email, code); err != nil {
+			log.Printf("send code email failed: %v", err)
+		}
+		log.Printf("verification code sent to %s", req.Email)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "sent", "expiresIn": 600})
+		return
+	}
+
+	// Non-whitelist domains: must have existing account
 	_, err := s.store.FindUserByEmail(r.Context(), req.Email)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "account not found")
@@ -983,11 +1006,28 @@ func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find user and create session
+	// Find user or auto-create for allowed domains
 	user, err := s.store.FindUserByEmail(r.Context(), req.Email)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
-		return
+		if s.isEmailAllowed(req.Email) {
+			// Auto-register: use email prefix as username
+			username := strings.SplitN(req.Email, "@", 2)[0]
+			// Check username uniqueness
+			existing, _ := s.store.FindUserByUsername(r.Context(), username)
+			if existing != nil {
+				// Append random suffix
+				username = username + "-" + randomHex(4)
+			}
+			user, err = s.store.CreateUser(r.Context(), username, req.Email, randomHex(12), store.RoleUser)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "auto-register failed")
+				return
+			}
+			log.Printf("auto-registered user: %s (email=%s)", username, req.Email)
+		} else {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
 	}
 
 	_, token, err := s.store.CreateSession(r.Context(), user.ID)
@@ -1115,7 +1155,7 @@ func sendVerificationEmail(domain, to, code string) error {
 	}
 	subject := "SSH Relay - 登录验证码"
 	body := fmt.Sprintf("您的 SSH Relay 登录验证码是: %s\r\n有效期 10 分钟，请勿泄露给他人。\r\n\r\n-- SSH Relay", code)
-	return notifier.SendMail(host, port, user, pass, from, to, subject, body)
+	return notifier.SendMail(host, host+":"+port, user, pass, from, to, subject, body)
 }
 
 const loginHTML = `<!DOCTYPE html>
@@ -1353,48 +1393,6 @@ function load(){
     var hidePorts = d.role==='user' && d.settings && d.settings.ports_visible==='false';
     loadMachines(hidePorts);
   }).catch(function(){});
-  Promise.all([
-    fetch('/api/machines').then(function(r){return r.json();}),
-    fetch('/api/forwards').then(function(r){return r.json();})
-  ]).then(function(results){
-    var machines = results[0].items;
-    var allFwds = results[1].items;
-    var fwdMap = {};
-    allFwds.forEach(function(f){ if(!fwdMap[f.machineId]) fwdMap[f.machineId]=[]; fwdMap[f.machineId].push(f); });
-    var online=0, offline=0;
-    machines.forEach(function(m){ if(m.status==='online') online++; else offline++; });
-    document.getElementById('cnt-online').textContent = online;
-    document.getElementById('cnt-offline').textContent = offline;
-    document.getElementById('cnt-forwards').textContent = allFwds.length;
-    var html = '';
-    if(machines.length===0){
-      html='<div class="empty">暂无注册机器<br><code>sshr register</code> 在被控 Linux 机器上注册即可在此查看</div>';
-    }
-    machines.forEach(function(m){
-      var isOff=m.status!=='online';
-      html+='<div class="machine-card'+(isOff?' offline':'')+'">';
-      html+='<div class="machine-header">';
-      html+='<div><span class="status-dot '+(m.status==='online'?'online':'offline')+'"></span><span class="machine-name">'+esc(m.name)+'</span></div>';
-      html+='<div class="machine-meta">';
-      if(m.gpuModel) html+='<span class="gpu-tag">'+esc(m.gpuModel)+'</span> ';
-      html+='ID: '+esc(m.id.substring(0,16))+' &middot; '+(m.lastSeenAt?timeAgo(m.lastSeenAt):'从未');
-      html+='</div></div>';
-      var fwds = fwdMap[m.id] || [];
-      if(fwds.length>0){
-        html+='<table><thead><tr><th>端口</th><th>目标</th><th>SSH 连接命令</th><th></th></tr></thead><tbody>';
-        fwds.forEach(function(f){
-          var cmd = 'ssh -p '+f.publicPort+' &lt;用户名&gt;@'+host;
-          html+='<tr><td><code>'+f.publicPort+'</code></td><td>'+esc(f.targetHost)+':'+f.targetPort+'</td><td><code>'+cmd+'</code></td><td><button class="copy-btn" onclick="copy(this,\''+cmd+'\')">复制</button></td></tr>';
-        });
-        html+='</tbody></table>';
-      }else{
-        html+='<div style="color:var(--muted);font-size:13px;margin-top:8px;">暂无转发，在该机器上运行 <code>sshr forward</code></div>';
-      }
-      html+='</div>';
-    });
-    document.getElementById('machines').innerHTML = html;
-    document.getElementById('last-update').textContent = '更新于 ' + new Date().toLocaleTimeString();
-  }).catch(function(e){ console.error(e); });
 }
 function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 function timeAgo(ts){ var s=(Date.now()-new Date(ts).getTime())/1000; if(s<60) return Math.floor(s)+'秒前'; if(s<3600) return Math.floor(s/60)+'分钟前'; if(s<86400) return Math.floor(s/3600)+'小时前'; return Math.floor(s/86400)+'天前'; }

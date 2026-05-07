@@ -630,6 +630,19 @@ func (s *Store) FindUserByEmail(ctx context.Context, email string) (User, error)
 	return u, nil
 }
 
+func (s *Store) FindUserByUsername(ctx context.Context, username string) (*User, error) {
+	var u User
+	var roleStr string
+	err := s.pool.QueryRow(ctx,
+		`select id, email, username, display_name, role, password_hash, created_at from sshr_users where username=$1`,
+		username).Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &roleStr, &u.PasswordHash, &u.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	u.Role = UserRole(roleStr)
+	return &u, nil
+}
+
 func (s *Store) InitUsers(ctx context.Context) error {
 	// Create default users if they don't exist
 	users := []struct {
