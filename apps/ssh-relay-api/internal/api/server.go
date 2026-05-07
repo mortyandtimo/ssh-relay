@@ -86,6 +86,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/settings", s.handleSettings)
 	s.mux.HandleFunc("/api/events", s.handleEvents)
 	s.mux.HandleFunc("/api/relay/reverse", s.relay.HandleReverseConnect)
+	s.mux.HandleFunc("/", s.handleDashboard)
 }
 
 // ─── Health ───
@@ -585,3 +586,123 @@ func envOr(key, fallback string) string {
 	}
 	return fallback
 }
+
+// ─── Dashboard ───
+
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(dashboardHTML))
+}
+
+const dashboardHTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SSH Relay - Machine Dashboard</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --green:#3fb950; --red:#f85149; --yellow:#d2991d; --blue:#58a6ff; --text:#c9d1d9; --muted:#8b949e; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; min-height:100vh; }
+  header { background:var(--card); border-bottom:1px solid var(--border); padding:20px 32px; }
+  header h1 { font-size:20px; font-weight:600; }
+  header p { color:var(--muted); font-size:13px; margin-top:4px; }
+  .container { max-width:960px; margin:0 auto; padding:24px 16px; }
+  .summary { display:flex; gap:16px; margin-bottom:24px; flex-wrap:wrap; }
+  .summary-box { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:16px 20px; flex:1; min-width:120px; }
+  .summary-box .num { font-size:28px; font-weight:700; }
+  .summary-box .label { color:var(--muted); font-size:12px; margin-top:2px; }
+  .online .num { color:var(--green); } .offline .num { color:var(--red); } .ports .num { color:var(--blue); }
+  .machine-card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:20px; margin-bottom:16px; }
+  .machine-card.offline { opacity:0.6; }
+  .machine-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px; }
+  .machine-name { font-size:16px; font-weight:600; }
+  .machine-meta { color:var(--muted); font-size:12px; }
+  .status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  .status-dot.online { background:var(--green); box-shadow:0 0 6px var(--green); }
+  .status-dot.offline { background:var(--red); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-weight:500; padding:8px 12px; border-bottom:1px solid var(--border); }
+  td { padding:8px 12px; border-bottom:1px solid var(--border); }
+  td code { background:#0d1117; padding:3px 8px; border-radius:4px; font-size:12px; color:var(--blue); white-space:nowrap; }
+  .copy-btn { background:var(--border); color:var(--text); border:none; padding:3px 10px; border-radius:4px; cursor:pointer; font-size:11px; }
+  .copy-btn:hover { background:#484f58; }
+  .empty { text-align:center; color:var(--muted); padding:40px; }
+  .gpu-tag { background:#1a2332; color:var(--yellow); font-size:11px; padding:2px 8px; border-radius:4px; }
+  .refresh { color:var(--muted); font-size:11px; text-align:center; margin-top:24px; }
+  @media(max-width:640px){ .summary{flex-direction:column;} table{font-size:11px;} td code{font-size:10px;padding:2px 4px;} }
+</style>
+</head>
+<body>
+<header>
+  <h1>&#x26A1; SSH Relay Dashboard</h1>
+  <p id="domain"></p>
+</header>
+<div class="container">
+  <div class="summary">
+    <div class="summary-box online"><div class="num" id="cnt-online">-</div><div class="label">&#x25CF; Online</div></div>
+    <div class="summary-box offline"><div class="num" id="cnt-offline">-</div><div class="label">&#x25CB; Offline</div></div>
+    <div class="summary-box ports"><div class="num" id="cnt-forwards">-</div><div class="label">&#x2194; Forwards</div></div>
+  </div>
+  <div id="machines"></div>
+  <div class="refresh">Auto-refresh every 30s &middot; <span id="last-update"></span></div>
+</div>
+<script>
+var host = window.location.host;
+document.getElementById('domain').textContent = 'Relay: ' + host;
+function load(){
+  Promise.all([
+    fetch('/api/machines').then(function(r){return r.json();}),
+    fetch('/api/forwards').then(function(r){return r.json();})
+  ]).then(function(results){
+    var machines = results[0].items;
+    var allFwds = results[1].items;
+    var fwdMap = {};
+    allFwds.forEach(function(f){ if(!fwdMap[f.machineId]) fwdMap[f.machineId]=[]; fwdMap[f.machineId].push(f); });
+    var online=0, offline=0;
+    machines.forEach(function(m){ if(m.status==='online') online++; else offline++; });
+    document.getElementById('cnt-online').textContent = online;
+    document.getElementById('cnt-offline').textContent = offline;
+    document.getElementById('cnt-forwards').textContent = allFwds.length;
+    var html = '';
+    if(machines.length===0){
+      html='<div class="empty">No machines registered yet.<br><code>sshr register</code> on a remote Linux machine to get started.</div>';
+    }
+    machines.forEach(function(m){
+      var isOff=m.status!=='online';
+      html+='<div class="machine-card'+(isOff?' offline':'')+'">';
+      html+='<div class="machine-header">';
+      html+='<div><span class="status-dot '+(m.status==='online'?'online':'offline')+'"></span><span class="machine-name">'+esc(m.name)+'</span></div>';
+      html+='<div class="machine-meta">';
+      if(m.gpuModel) html+='<span class="gpu-tag">'+esc(m.gpuModel)+'</span> ';
+      html+='ID: '+esc(m.id.substring(0,16))+' &middot; '+(m.lastSeenAt?timeAgo(m.lastSeenAt):'never');
+      html+='</div></div>';
+      var fwds = fwdMap[m.id] || [];
+      if(fwds.length>0){
+        html+='<table><thead><tr><th>Port</th><th>Target</th><th>SSH Command</th><th></th></tr></thead><tbody>';
+        fwds.forEach(function(f){
+          var cmd = 'ssh -p '+f.publicPort+' &lt;user&gt;@'+host;
+          html+='<tr><td><code>'+f.publicPort+'</code></td><td>'+esc(f.targetHost)+':'+f.targetPort+'</td><td><code>'+cmd+'</code></td><td><button class="copy-btn" onclick="copy(this,\''+cmd+'\')">Copy</button></td></tr>';
+        });
+        html+='</tbody></table>';
+      }else{
+        html+='<div style="color:var(--muted);font-size:13px;margin-top:8px;">No forwards. Run <code>sshr forward</code> on this machine.</div>';
+      }
+      html+='</div>';
+    });
+    document.getElementById('machines').innerHTML = html;
+    document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  }).catch(function(e){ console.error(e); });
+}
+function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+function timeAgo(ts){ var s=(Date.now()-new Date(ts).getTime())/1000; if(s<60) return Math.floor(s)+'s ago'; if(s<3600) return Math.floor(s/60)+'m ago'; if(s<86400) return Math.floor(s/3600)+'h ago'; return Math.floor(s/86400)+'d ago'; }
+function copy(btn,text){ navigator.clipboard.writeText(text).then(function(){ btn.textContent='Copied!'; setTimeout(function(){ btn.textContent='Copy'; },1500); }); }
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>`
