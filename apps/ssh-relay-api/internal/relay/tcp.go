@@ -54,7 +54,7 @@ type reversePool struct {
 
 func NewManager(st *store.Store, portStart, portEnd, poolSize int) *Manager {
 	if poolSize < 1 {
-		poolSize = 4
+		poolSize = 8
 	}
 	return &Manager{
 		store:     st,

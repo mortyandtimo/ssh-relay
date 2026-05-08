@@ -42,7 +42,7 @@ func NewServer(s *store.Store, n *notifier.Service, domain, allowedEmailDomains 
 	srv := &Server{
 		store:               s,
 		notifier:            n,
-		relay:               relay.NewManager(s, portStart, portEnd, 4),
+		relay:               relay.NewManager(s, portStart, portEnd, 8),
 		domain:              domain,
 		allowedEmailDomains: allowedEmailDomains,
 		portStart:           portStart,
