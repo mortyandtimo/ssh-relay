@@ -185,6 +185,9 @@ server {
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-Port 443;
         proxy_set_header Forwarded "for=$remote_addr;proto=https;host=$host";
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
         proxy_pass %s;
     }
 }
