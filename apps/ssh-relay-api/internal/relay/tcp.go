@@ -45,10 +45,11 @@ type portTunnel struct {
 }
 
 type reversePool struct {
-	mu      sync.Mutex
-	conns   []net.Conn
-	waiters []chan net.Conn
-	ctx     context.Context
+	mu       sync.Mutex
+	conns    []net.Conn
+	waiters  []chan net.Conn
+	maxConns int
+	ctx      context.Context
 }
 
 func NewManager(st *store.Store, portStart, portEnd, poolSize int) *Manager {
@@ -217,7 +218,7 @@ func (t *portTunnel) start(ctx context.Context, poolSize int) error {
 	t.listener = l
 
 	poolCtx, cancel := context.WithCancel(ctx)
-	t.pool = &reversePool{ctx: poolCtx}
+	t.pool = &reversePool{ctx: poolCtx, maxConns: poolSize}
 	t.cancel = cancel
 
 	go t.acceptLoop(ctx)
@@ -302,11 +303,13 @@ func (p *reversePool) add(conn net.Conn) {
 		}
 	}
 
-	// Close all existing idle connections - keep only the freshest
-	for _, old := range p.conns {
-		old.Close()
+	// Keep pool fresh: close oldest if at capacity
+	p.conns = append(p.conns, conn)
+	for len(p.conns) > p.maxConns {
+		oldest := p.conns[0]
+		p.conns = p.conns[1:]
+		oldest.Close()
 	}
-	p.conns = []net.Conn{conn}
 }
 
 func (p *reversePool) get(ctx context.Context, timeout time.Duration) (net.Conn, error) {

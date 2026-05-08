@@ -482,15 +482,17 @@ func (tm *tunnelManager) sync() {
 		}
 	}
 
-	// Start new
+	// Start new (4 parallel tunnels per port for concurrent SSH sessions)
 	for port := range desired {
 		if _, ok := tm.active[port]; ok {
 			continue
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		tm.active[port] = cancel
-		go runReverseTunnel(ctx, tm.server, tm.machineID, port)
-		log.Printf("tunnel opened: port %d", port)
+		for i := 0; i < 4; i++ {
+			go runReverseTunnel(ctx, tm.server, tm.machineID, port)
+		}
+		log.Printf("tunnel opened: port %d (4 connections)", port)
 	}
 }
 
