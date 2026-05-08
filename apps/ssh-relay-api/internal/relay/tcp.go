@@ -302,13 +302,11 @@ func (p *reversePool) add(conn net.Conn) {
 		}
 	}
 
-	p.conns = append(p.conns, conn)
-	// Trim excess
-	for len(p.conns) > 16 {
-		oldest := p.conns[0]
-		p.conns = p.conns[1:]
-		oldest.Close()
+	// Close all existing idle connections - keep only the freshest
+	for _, old := range p.conns {
+		old.Close()
 	}
+	p.conns = []net.Conn{conn}
 }
 
 func (p *reversePool) get(ctx context.Context, timeout time.Duration) (net.Conn, error) {
