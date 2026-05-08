@@ -68,6 +68,35 @@ func TestCloneHTTPRequestForRelayDoesNotDuplicateExistingPeerInForwardedFor(t *t
 	}
 }
 
+func TestCloneHTTPRequestForRelayPreservesUpgradeHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "https://games.020309.top/ws/7001", nil)
+	req.RemoteAddr = "10.20.30.40:54321"
+	req.Host = "games.020309.top"
+	req.Header.Set("Connection", "keep-alive, Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "test-key")
+
+	route := types.TunnelSpec{TargetHost: "127.0.0.1", TargetPort: 7080}
+	upstream := cloneHTTPRequestForRelay(req, route)
+
+	if got := upstream.Host; got != "127.0.0.1:7080" {
+		t.Fatalf("expected upstream host to target app, got %q", got)
+	}
+	if got := upstream.Header.Get("Connection"); got != "Upgrade" {
+		t.Fatalf("expected upgrade connection header, got %q", got)
+	}
+	if got := upstream.Header.Get("Upgrade"); got != "websocket" {
+		t.Fatalf("expected websocket upgrade header, got %q", got)
+	}
+	if got := upstream.Header.Get("Sec-WebSocket-Version"); got != "13" {
+		t.Fatalf("expected websocket version header to survive, got %q", got)
+	}
+	if got := upstream.Header.Get("X-Forwarded-Proto"); got != "https" {
+		t.Fatalf("expected forwarded proto https, got %q", got)
+	}
+}
+
 func TestCopyHTTPResponseRewritesLocationAndRefreshOnly(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "https://img.020309.top/admin/settings", nil)
 	req.Host = "img.020309.top"
@@ -313,7 +342,7 @@ func TestReadHTTPResponseSkippingKeepalivesSkipsLeadingNoise(t *testing.T) {
 		writeDone <- err
 	}()
 
-	resp, skipped, err := readHTTPResponseSkippingKeepalives(serverConn, req)
+	resp, _, skipped, err := readHTTPResponseSkippingKeepalives(serverConn, req)
 	if err != nil {
 		t.Fatalf("readHTTPResponseSkippingKeepalives returned error: %v", err)
 	}

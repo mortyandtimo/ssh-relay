@@ -38,6 +38,15 @@ type standbyConn struct {
 	lastSeenAt   time.Time
 }
 
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
+}
+
 func (s standbyConn) age() time.Duration { return time.Since(s.registeredAt) }
 
 func (s standbyConn) lastSeen() time.Time {
@@ -492,16 +501,27 @@ func (s *Service) HandleProxyRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "web relay write failed", http.StatusBadGateway)
 		return
 	}
-	resp, skippedKeepalives, err := readHTTPResponseSkippingKeepalives(standby.conn, upstreamReq)
+	resp, relayConn, skippedKeepalives, err := readHTTPResponseSkippingKeepalives(standby.conn, upstreamReq)
 	if err != nil {
 		log.Printf("web request %d read upstream response failed for tunnel %s: %v", reqID, route.ID, err)
 		http.Error(w, "web relay response failed", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
 	if skippedKeepalives > 0 {
 		log.Printf("web request %d skipped %d leading keepalive bytes before upstream response for tunnel %s", reqID, skippedKeepalives, route.ID)
 	}
+
+	if requestHasProtocolUpgrade(r) && resp.StatusCode == http.StatusSwitchingProtocols {
+		log.Printf("web request %d switching to upgraded stream for tunnel %s upgrade=%q", reqID, route.ID, strings.TrimSpace(r.Header.Get("Upgrade")))
+		if err := proxyUpgradedResponse(w, resp, relayConn); err != nil {
+			log.Printf("web request %d upgraded proxy failed for tunnel %s: %v", reqID, route.ID, err)
+			return
+		}
+		log.Printf("web request %d upgraded stream finished after %s", reqID, time.Since(startedAt))
+		return
+	}
+
+	defer resp.Body.Close()
 	rewriteReport := copyHTTPResponse(w, r, route, resp)
 	if rewriteReport.LocationOriginal != "" || rewriteReport.RefreshOriginal != "" {
 		log.Printf("web request %d response rewrite location=%q -> %q refresh=%q -> %q", reqID, rewriteReport.LocationOriginal, rewriteReport.LocationRewritten, rewriteReport.RefreshOriginal, rewriteReport.RefreshRewritten)
@@ -513,25 +533,28 @@ func (s *Service) HandleProxyRequest(w http.ResponseWriter, r *http.Request) {
 	log.Printf("web request %d completed with status=%d after %s", reqID, resp.StatusCode, time.Since(startedAt))
 }
 
-func readHTTPResponseSkippingKeepalives(conn net.Conn, req *http.Request) (*http.Response, int, error) {
+func readHTTPResponseSkippingKeepalives(conn net.Conn, req *http.Request) (*http.Response, net.Conn, int, error) {
 	reader := bufio.NewReader(conn)
 	skipped := 0
 	for {
 		b, err := reader.ReadByte()
 		if err != nil {
-			return nil, skipped, err
+			return nil, nil, skipped, err
 		}
 		if b == types.AgentRelayKeepaliveByte {
 			skipped++
 			continue
 		}
 		if err := reader.UnreadByte(); err != nil {
-			return nil, skipped, err
+			return nil, nil, skipped, err
 		}
 		break
 	}
 	resp, err := http.ReadResponse(reader, req)
-	return resp, skipped, err
+	if err != nil {
+		return nil, nil, skipped, err
+	}
+	return resp, &bufferedConn{Conn: conn, reader: reader}, skipped, nil
 }
 
 // ─── standby pool management ───
@@ -684,12 +707,17 @@ func cloneHTTPRequestForRelay(r *http.Request, route types.TunnelSpec) *http.Req
 	out.URL = &url.URL{Path: r.URL.Path, RawPath: r.URL.RawPath, RawQuery: r.URL.RawQuery, ForceQuery: r.URL.ForceQuery}
 	out.RequestURI = ""
 	out.Host = fmt.Sprintf("%s:%d", route.TargetHost, route.TargetPort)
-	out.Close = true
 	out.Header = cloneHeader(r.Header)
 	out.Header.Set("Host", out.Host)
-	out.Header.Set("Connection", "close")
 	out.Header.Del("Proxy-Connection")
-	out.Header.Del("Upgrade")
+	if requestHasProtocolUpgrade(r) {
+		out.Close = false
+		out.Header.Set("Connection", "Upgrade")
+	} else {
+		out.Close = true
+		out.Header.Set("Connection", "close")
+		out.Header.Del("Upgrade")
+	}
 	setForwardedHeaders(out.Header, r)
 	return out
 }
@@ -730,6 +758,82 @@ func cloneHeader(header http.Header) http.Header {
 		cloned[key] = append([]string(nil), values...)
 	}
 	return cloned
+}
+
+func requestHasProtocolUpgrade(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if strings.TrimSpace(r.Header.Get("Upgrade")) == "" {
+		return false
+	}
+	return headerValueHasToken(r.Header, "Connection", "upgrade")
+}
+
+func headerValueHasToken(header http.Header, key, token string) bool {
+	for _, value := range header.Values(key) {
+		parts := strings.Split(value, ",")
+		for _, part := range parts {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func proxyUpgradedResponse(w http.ResponseWriter, resp *http.Response, upstreamConn net.Conn) error {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		return errors.New("hijacking not supported")
+	}
+	clientConn, clientBufRW, err := hijacker.Hijack()
+	if err != nil {
+		return err
+	}
+	defer clientConn.Close()
+
+	if err := resp.Write(clientBufRW); err != nil {
+		return err
+	}
+	if err := clientBufRW.Flush(); err != nil {
+		return err
+	}
+
+	proxyStreamPair(&bufferedConn{Conn: clientConn, reader: clientBufRW.Reader}, upstreamConn)
+	return nil
+}
+
+func proxyStreamPair(left, right net.Conn) {
+	buf1 := make([]byte, 32*1024)
+	buf2 := make([]byte, 32*1024)
+	errCh := make(chan error, 2)
+
+	go func() {
+		_, err := io.CopyBuffer(right, left, buf1)
+		errCh <- err
+		closeWrite(right)
+	}()
+	go func() {
+		_, err := io.CopyBuffer(left, right, buf2)
+		errCh <- err
+		closeWrite(left)
+	}()
+
+	firstErr := <-errCh
+	secondErr := <-errCh
+	if firstErr != nil && !errors.Is(firstErr, io.EOF) && !errors.Is(firstErr, net.ErrClosed) {
+		log.Printf("upgraded proxy first copy ended with error: %v", firstErr)
+	}
+	if secondErr != nil && !errors.Is(secondErr, io.EOF) && !errors.Is(secondErr, net.ErrClosed) {
+		log.Printf("upgraded proxy second copy ended with error: %v", secondErr)
+	}
+}
+
+func closeWrite(conn net.Conn) {
+	if closer, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = closer.CloseWrite()
+	}
 }
 
 func setForwardedHeaders(header http.Header, r *http.Request) {
